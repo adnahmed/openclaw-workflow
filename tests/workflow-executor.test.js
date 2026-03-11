@@ -478,3 +478,40 @@ test('respects concurrency limit', async () => {
     assert.ok(maxConcurrent <= 3, `Max concurrent steps ${maxConcurrent} should be <= 2 (with slight variance)`);
   });
 });
+
+// ── EXEC_POLL_PREAMBLE injection tests ─────────────────────────────────────
+
+test('EXEC_POLL_PREAMBLE is prepended to step task before spawn', async (t) => {
+  // Arrange: capture what prompt the adapter receives
+  const receivedPrompts = [];
+  const capturingAdapter = {
+    async spawn(prompt, _options) {
+      receivedPrompts.push(prompt);
+      return { sessionId: 'mock-1', sessionKey: 'mock-1' };
+    },
+    async getStatus(_id) { return { status: 'done' }; },
+  };
+
+  const step = {
+    id: 'test-step',
+    name: 'Test Step',
+    task: 'Do something useful.',
+    timeout: 60,
+    retry: 0,
+    optional: false,
+    depends_on: [],
+    outputs: [],
+  };
+  const stepRunner = createStepRunner(capturingAdapter);
+  await stepRunner(step, 'run-test', {}, { pollIntervalMs: 10, baseDir: tmpdir() });
+
+  assert.ok(receivedPrompts.length === 1, 'spawn called once');
+  assert.ok(
+    receivedPrompts[0].includes('Command still running'),
+    'preamble with exec-poll instruction prepended',
+  );
+  assert.ok(
+    receivedPrompts[0].endsWith('Do something useful.'),
+    'original task appended after preamble',
+  );
+});
