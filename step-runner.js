@@ -35,21 +35,62 @@
  * // result.status === 'ok' | 'failed'
  */
 
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { checkOutputs } from './output-checker.js';
 
 const execAsync = promisify(exec);
 
+let cachedOpenClawPath = null;
+
 /**
- * Encodes a string for PowerShell's -EncodedCommand parameter.
- * PowerShell expects a Base64-encoded UTF-16LE string.
- * @param {string} command 
- * @returns {string}
+ * Runs an OpenClaw CLI command with a structured argument array.
+ * Avoids shell interpolation by using powershell -File.
+ * 
+ * @param {string[]} args - Arguments for the openclaw command
+ * @param {Object} options - Execution options (timeout)
+ * @returns {Promise<{ stdout: string, stderr: string }>}
  */
-function encodePsCommand(command) {
-  return Buffer.from(command, 'utf16le').toString('base64');
+async function runOpenClaw(args, options = {}) {
+  const { timeout = 30000 } = options;
+
+  if (!cachedOpenClawPath) {
+    try {
+      const { stdout } = await execAsync('powershell -Command "(Get-Command openclaw).Source"');
+      cachedOpenClawPath = stdout.trim();
+    } catch (err) {
+      throw new Error(`Could not find openclaw executable in PATH: ${err.message}`);
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell', [
+      '-ExecutionPolicy', 'Bypass',
+      '-File', cachedOpenClawPath,
+      ...args
+    ], {
+      timeout,
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.stderr.on('data', (data) => { stderr += data; });
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new Error(`OpenClaw CLI failed (exit ${code}): ${stderr || stdout}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      reject(err);
+    });
+  });
 }
 
 /**
@@ -283,7 +324,15 @@ class ApiAdapter {
  * so the spawned agent correctly handles bash commands that take >10s (the default
  * exec yieldMs) by polling via the process tool rather than seeing empty output.
  */
-class CliAdapter {
+export class CliAdapter {
+  /**
+   * @param {Function} [executor] - Optional function to execute OpenClaw commands. 
+   * Defaults to the module-level `runOpenClaw`.
+   */
+  constructor(executor = runOpenClaw) {
+    this.executor = executor;
+  }
+
   /**
    * @param {string} prompt  - Task prompt
    * @param {Object} options - Options (model, timeout, label)
@@ -292,24 +341,25 @@ class CliAdapter {
   async spawn(prompt, options) {
     this._jobs = this._jobs || new Map();
 
-    // Build the PowerShell script using a here-string for the prompt to avoid quoting issues
-    let psScript = `$prompt = @'\n${prompt}\n'@\n`;
-    psScript += `openclaw cron add --at +5s --session isolated --message $prompt --delete-after-run --json`;
-    
+    const args = [
+      'cron', 'add',
+      '--at', '+5s',
+      '--session', 'isolated',
+      '--message', prompt,
+      '--delete-after-run',
+      '--json'
+    ];
+
     if (options.model) {
-      psScript += ` --model "${options.model}"`;
+      args.push('--model', options.model);
     }
     if (options.label) {
-      psScript += ` --name "${options.label}"`;
+      args.push('--name', options.label);
     }
 
     let jobId;
     try {
-      const encoded = encodePsCommand(psScript);
-      const { stdout } = await execAsync(`powershell -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, {
-        timeout: 30000,
-        maxBuffer: 1024 * 1024,
-      });
+      const { stdout } = await this.executor(args, { timeout: 30000 });
       const parsed = JSON.parse(stdout.trim());
       jobId = parsed.id || parsed.job?.id;
       if (!jobId) throw new Error(`Unexpected cron add output: ${stdout}`);
@@ -319,8 +369,7 @@ class CliAdapter {
 
     // Trigger the job immediately
     try {
-      const runEncoded = encodePsCommand(`openclaw cron run ${jobId}`);
-      await execAsync(`powershell -ExecutionPolicy Bypass -EncodedCommand ${runEncoded}`, { timeout: 10000 });
+      await this.executor(['cron', 'run', jobId], { timeout: 10000 });
     } catch (err) {
       // Non-fatal — the job may already be queued to run in 5s
     }
@@ -338,12 +387,13 @@ class CliAdapter {
   async getStatus(sessionId) {
     const jobId = sessionId;
     try {
-      const cmd = `openclaw cron runs --id ${jobId} --limit 1 --json`;
-      const encoded = encodePsCommand(cmd);
-      const { stdout } = await execAsync(
-        `powershell -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
-        { timeout: 15000 },
-      );
+      const { stdout } = await this.executor([
+        'cron', 'runs', 
+        '--id', jobId, 
+        '--limit', '1', 
+        '--json'
+      ], { timeout: 15000 });
+
       const lines = stdout.trim().split('\n').filter(Boolean);
       if (!lines.length) return { status: 'running' };
 
@@ -351,8 +401,7 @@ class CliAdapter {
       const entry = JSON.parse(lines[lines.length - 1]);
       if (entry.action === 'finished') {
         // Clean up the cron job (best-effort — may already be deleted if --delete-after-run)
-        const removeCmd = `openclaw cron remove ${jobId}`;
-        execAsync(`powershell -ExecutionPolicy Bypass -EncodedCommand ${encodePsCommand(removeCmd)}`).catch(() => {});
+        this.executor(['cron', 'remove', jobId]).catch(() => {});
         return entry.status === 'ok'
           ? { status: 'done' }
           : { status: 'error', error: entry.error || entry.summary || 'Step failed' };
