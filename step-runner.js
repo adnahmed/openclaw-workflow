@@ -73,17 +73,28 @@ async function runOpenClaw(args, options = {}) {
       timeout,
     });
 
+    console.log(`[DEBUG] Spawning command: powershell -ExecutionPolicy Bypass -File ${cachedOpenClawPath} ${args.join(' ')}`);
+
     let stdout = '';
     let stderr = '';
 
-    child.stdout.on('data', (data) => { stdout += data; });
-    child.stderr.on('data', (data) => { stderr += data; });
+    child.stdout.on('data', (data) => { 
+      const chunk = data.toString();
+      console.log(`[DEBUG] stdout: ${chunk}`);
+      stdout += chunk; 
+    });
+    child.stderr.on('data', (data) => { 
+      const chunk = data.toString();
+      console.error(`[DEBUG] stderr: ${chunk}`);
+      stderr += chunk; 
+    });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
+      console.log(`[DEBUG] Process exited with code: ${code}, signal: ${signal}`);
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
-        reject(new Error(`OpenClaw CLI failed (exit ${code}): ${stderr || stdout}`));
+        reject(new Error(`OpenClaw CLI failed (exit ${code}, signal ${signal}): ${stderr || stdout}`));
       }
     });
 
@@ -343,12 +354,13 @@ export class CliAdapter {
 
     const args = [
       'cron', 'add',
-      '--at', '+5s',
+      '--at', '5s',
       '--session', 'isolated',
       '--message', prompt,
       '--delete-after-run',
       '--json'
     ];
+    console.log(`[DEBUG] CliAdapter.spawn args: ${JSON.stringify(args)}`);
 
     if (options.model) {
       args.push('--model', options.model);
