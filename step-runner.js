@@ -58,51 +58,48 @@ async function runOpenClaw(args, options = {}) {
   if (!cachedOpenClawPath) {
     try {
       const { stdout } = await execAsync('powershell -Command "(Get-Command openclaw).Source"');
-      cachedOpenClawPath = stdout.trim();
+      const psPath = stdout.trim();
+      const basedir = psPath.substring(0, psPath.lastIndexOf('\\'));
+      cachedOpenClawPath = `${basedir}\\node_modules\\openclaw\\openclaw.mjs`;
     } catch (err) {
       throw new Error(`Could not find openclaw executable in PATH: ${err.message}`);
     }
   }
 
   return new Promise((resolve, reject) => {
-    const child = spawn('powershell', [
-      '-ExecutionPolicy', 'Bypass',
-      '-File', cachedOpenClawPath,
-      ...args
-    ], {
-      timeout,
-    });
-
-    console.log(`[DEBUG] Spawning command: powershell -ExecutionPolicy Bypass -File ${cachedOpenClawPath} ${args.join(' ')}`);
+    const child = spawn('node', [cachedOpenClawPath, ...args]);
+    
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`OpenClaw CLI timed out after ${timeout}ms`));
+    }, timeout);
 
     let stdout = '';
     let stderr = '';
 
     child.stdout.on('data', (data) => { 
-      const chunk = data.toString();
-      console.log(`[DEBUG] stdout: ${chunk}`);
-      stdout += chunk; 
+      stdout += data; 
     });
     child.stderr.on('data', (data) => { 
-      const chunk = data.toString();
-      console.error(`[DEBUG] stderr: ${chunk}`);
-      stderr += chunk; 
+      stderr += data; 
     });
 
-    child.on('close', (code, signal) => {
-      console.log(`[DEBUG] Process exited with code: ${code}, signal: ${signal}`);
+    child.on('close', (code) => {
+      clearTimeout(timer);
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
-        reject(new Error(`OpenClaw CLI failed (exit ${code}, signal ${signal}): ${stderr || stdout}`));
+        reject(new Error(`OpenClaw CLI failed (code ${code}): ${stderr || stdout || 'Unknown error'}`));
       }
     });
 
     child.on('error', (err) => {
-      reject(err);
+      clearTimeout(timer);
+      reject(new Error(`Failed to start OpenClaw CLI: ${err.message}`));
     });
   });
 }
+
 
 /**
  * Preamble injected at the start of every step task prompt.
