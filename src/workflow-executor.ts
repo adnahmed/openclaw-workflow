@@ -59,6 +59,9 @@ const TICK_INTERVAL_MS = 500;
  * @property {number}   [pollIntervalMs] - Poll interval for step runners
  * @property {string}   [defaultModel]   - Default model for steps without a model
  * @property {Function} [notify]         - Function(message) for sending notifications
+ * @property {'none'|'announce'} [cronDeliveryMode] - Delivery mode for cron jobs
+ * @property {string}   [cronDeliveryChannel] - Delivery channel for cron jobs
+ * @property {string}   [cronDeliveryTo] - Delivery target for cron jobs
  */
 
 /**
@@ -97,7 +100,11 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
     notify = () => {},
     pollIntervalMs = 5000,
     defaultModel,
+    cronDeliveryMode = 'none',
+    cronDeliveryChannel,
+    cronDeliveryTo,
   } = config;
+
 
   // Build substitution context once for the entire run
   const varCtx = buildContext(runId);
@@ -254,11 +261,14 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
       try {
         let result;
         try {
-          result = await stepRunner(step, runId, api, {
-            pollIntervalMs,
-            baseDir,
-            defaultModel,
-          });
+        result = await stepRunner(step, runId, api, {
+          pollIntervalMs,
+          baseDir,
+          defaultModel,
+          cronDeliveryMode,
+          cronDeliveryChannel,
+          cronDeliveryTo,
+        });
         } catch (err) {
           result = {
             status: 'failed',

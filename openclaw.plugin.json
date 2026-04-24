@@ -45,6 +45,19 @@
         "type": "integer",
         "minimum": 250,
         "description": "How often to poll step session status in milliseconds. Defaults to 5000."
+      },
+      "cronDeliveryMode": {
+        "type": "string",
+        "enum": ["none", "announce"],
+        "description": "Delivery mode for internal workflow step cron jobs. Defaults to none."
+      },
+      "cronDeliveryChannel": {
+        "type": "string",
+        "description": "Explicit delivery channel for cron jobs when cronDeliveryMode is announce, e.g. discord or whatsapp."
+      },
+      "cronDeliveryTo": {
+        "type": "string",
+        "description": "Optional explicit delivery target for cron jobs."
       }
     }
   },

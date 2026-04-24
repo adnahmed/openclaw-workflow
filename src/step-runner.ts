@@ -184,6 +184,9 @@ explicitly indicates an error.
  * @property {string}  baseDir         - Base directory for resolving relative output paths
  * @property {string}  [defaultModel]  - Default LLM model to use if step doesn't specify one
  * @property {boolean} [cancelled]     - If true, step should not be started (cancel check)
+ * @property {'none'|'announce'} [cronDeliveryMode] - Delivery mode for cron jobs
+ * @property {string}   [cronDeliveryChannel] - Delivery channel for cron jobs
+ * @property {string}   [cronDeliveryTo] - Delivery target for cron jobs
  */
 
 /**
@@ -226,7 +229,11 @@ export async function runStep(step, runId, api, options) {
 		pollIntervalMs = 5000,
 		baseDir = process.cwd(),
 		defaultModel,
+		cronDeliveryMode = 'none',
+		cronDeliveryChannel,
+		cronDeliveryTo,
 	} = options;
+
 
 	const startTime = Date.now();
 
@@ -248,6 +255,9 @@ export async function runStep(step, runId, api, options) {
 			timeout: step.timeout,
 			sessionTarget: "isolated",
 			label: `wf:${runId}:${step.id}`,
+			cronDeliveryMode,
+			cronDeliveryChannel,
+			cronDeliveryTo,
 		});
 		sessionKey = spawnResult.sessionKey;
 
@@ -418,6 +428,52 @@ class ApiAdapter {
  * so the spawned agent correctly handles bash commands that take >10s (the default
  * exec yieldMs) by polling via the process tool rather than seeing empty output.
  */
+function stripAnsi(input) {
+	return input.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function parseCronRunsOutput(raw) {
+	const text = stripAnsi(raw || "").trim();
+	if (!text) return [];
+
+	// 1. Try whole output as JSON.
+	try {
+		const parsed = JSON.parse(text);
+		if (Array.isArray(parsed)) return parsed;
+		if (Array.isArray(parsed.entries)) return parsed.entries;
+		return [parsed];
+	} catch {}
+
+	// 2. Try extracting the outer JSON object from noisy CLI output.
+	const firstBrace = text.indexOf("{");
+	const lastBrace = text.lastIndexOf("}");
+
+	if (firstBrace >= 0 && lastBrace > firstBrace) {
+		const jsonSlice = text.slice(firstBrace, lastBrace + 1);
+		try {
+			const parsed = JSON.parse(jsonSlice);
+			if (Array.isArray(parsed)) return parsed;
+			if (Array.isArray(parsed.entries)) return parsed.entries;
+			return [parsed];
+		} catch {}
+	}
+
+	// 3. JSONL fallback.
+	const entries = [];
+	for (const line of text.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("{")) continue;
+
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (Array.isArray(parsed.entries)) entries.push(...parsed.entries);
+			else entries.push(parsed);
+		} catch {}
+	}
+
+	return entries;
+}
+
 export class CliAdapter {
 	/**
 	 * @param {Function} [executor] - Optional function to execute OpenClaw commands.
@@ -447,9 +503,25 @@ export class CliAdapter {
 			"--delete-after-run",
 			"--json",
 		];
+
+		if (options.cronDeliveryMode === 'announce') {
+			args.push("--announce");
+			args.push("--channel", options.cronDeliveryChannel || "discord");
+			if (options.cronDeliveryTo) {
+				args.push("--to", options.cronDeliveryTo);
+			}
+		} else {
+			// Default to 'none'
+			args.push("--no-deliver");
+		}
+
 		if (options.model) {
 			args.push("--model", options.model);
 		}
+		if (options.label) {
+			args.push("--name", options.label);
+		}
+
 		if (options.label) {
 			args.push("--name", options.label);
 		}
@@ -484,28 +556,69 @@ export class CliAdapter {
 	async getStatus(sessionId) {
 		const jobId = sessionId;
 		try {
-			const { stdout } = await this.executor(
-				["cron", "runs", "--id", jobId, "--limit", "1", "--json"],
+			const { stdout, stderr } = await this.executor(
+				["cron", "runs", "--id", jobId, "--limit", "5", "--json"],
 				{ timeout: 15000 },
 			);
 
-			const data = JSON.parse(stdout.trim());
-			const entries = Array.isArray(data) ? data : data.entries;
-			if (!entries || entries.length === 0) return { status: "running" };
+			const entries = parseCronRunsOutput(`${stdout}\n${stderr}`);
 
-			const entry = entries[entries.length - 1];
-			const logs = entry.logs || entry.stdout || entry.stderr || null;
-			if (entry.action === "finished") {
-				// Clean up the cron job (best-effort — may already be deleted if --delete-after-run)
-				this.executor(["cron", "remove", jobId]).catch(() => {});
-				return entry.status === "ok"
-					? { status: "done", logs }
-					: {
-							status: "error",
-							error: entry.error || entry.summary || "Step failed",
-							logs,
-						};
+			if (!entries.length) {
+				return { status: "running" };
 			}
+
+			const matching = entries.filter((entry) => {
+				return entry.jobId === jobId || entry.id === jobId || entry.job_id === jobId;
+			});
+
+			const entry = matching.at(-1) || entries.at(-1);
+
+			if (!entry) {
+				return { status: "running" };
+			}
+
+			const logs =
+				entry.logs ||
+				entry.stdout ||
+				entry.stderr ||
+				entry.summary ||
+				null;
+
+			const isFinished =
+				entry.action === "finished" ||
+				["ok", "success", "error", "failed"].includes(entry.status);
+
+			if (!isFinished) {
+				return { status: "running", logs };
+			}
+
+			this.executor(["cron", "remove", jobId]).catch(() => {});
+
+			if (entry.status === "ok" || entry.status === "success") {
+				return { status: "done", logs };
+			}
+
+			return {
+				status: "error",
+				error:
+					entry.error ||
+					entry.summary ||
+					`Cron run finished with status: ${entry.status}`,
+				logs,
+			};
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+
+			if (message.includes("not found") || message.includes("404")) {
+				return { status: "done" };
+			}
+
+			return {
+				status: "error",
+				error: `Failed to poll cron run status: ${message}`,
+			};
+		}
+	}
 			return { status: "running", logs };
 		} catch (err) {
 			// If the job no longer exists (deleted after run), treat as done

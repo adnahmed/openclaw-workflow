@@ -14,6 +14,9 @@ type RawPluginConfig = {
   notifyChannel?: string;
   sessionModel?: string;
   pollIntervalMs?: number;
+  cronDeliveryMode?: 'none' | 'announce';
+  cronDeliveryChannel?: string;
+  cronDeliveryTo?: string;
 };
 
 type RuntimeConfig = {
@@ -51,5 +54,8 @@ export function normalizePluginConfig(rawConfig: RawPluginConfig = {}, runtime: 
     notifyChannel: rawConfig.notifyChannel || null,
     defaultModel: rawConfig.sessionModel || null,
     pollIntervalMs,
+    cronDeliveryMode: rawConfig.cronDeliveryMode || 'none',
+    cronDeliveryChannel: rawConfig.cronDeliveryChannel || null,
+    cronDeliveryTo: rawConfig.cronDeliveryTo || null,
   };
 }
