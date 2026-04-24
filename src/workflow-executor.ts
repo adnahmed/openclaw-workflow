@@ -132,8 +132,14 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
   async function mutateState(mutator) {
     let nextState;
     stateWriteQueue = stateWriteQueue.then(async () => {
-      nextState = await mutator(state);
-      state = nextState;
+      try {
+        nextState = await mutator(state);
+        state = nextState;
+      } catch (err) {
+        api?.logger?.error?.(`[workflow:${runId}] state mutation failed`, err);
+      }
+    }).catch(err => {
+      api?.logger?.error?.(`[workflow:${runId}] state queue error`, err);
     });
     await stateWriteQueue;
     return nextState;
@@ -245,105 +251,99 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
     });
 
     const promise = (async () => {
-      let result;
       try {
-        result = await stepRunner(step, runId, api, {
-          pollIntervalMs,
-          baseDir,
-          defaultModel,
-        });
-      } catch (err) {
-        result = {
-          status: 'failed',
-          session_key: null,
-          output_check: { passed: false, missing_files: [], checked_files: [] },
-          error: err.message,
-          duration_ms: 0,
-        };
-      }
+        let result;
+        try {
+          result = await stepRunner(step, runId, api, {
+            pollIntervalMs,
+            baseDir,
+            defaultModel,
+          });
+        } catch (err) {
+          result = {
+            status: 'failed',
+            session_key: null,
+            output_check: { passed: false, missing_files: [], checked_files: [] },
+            error: err.message,
+            duration_ms: 0,
+          };
+        }
 
-      const completedAt = new Date().toISOString();
-      const startedAt = state.steps[step.id]?.started_at;
-      const durationMs = result.duration_ms ||
-        (startedAt ? Date.now() - new Date(startedAt).getTime() : 0);
+        const completedAt = new Date().toISOString();
+        const startedAt = state.steps[step.id]?.started_at;
+        const durationMs = result.duration_ms ||
+          (startedAt ? Date.now() - new Date(startedAt).getTime() : 0);
 
-       if (result.status === 'ok') {
-         // Success path
-         await mutateState(current => updateStepState(current, step.id, {
-           status: 'ok',
-           completed_at: completedAt,
-           duration_ms: durationMs,
-           session_key: result.session_key,
-           output_check: result.output_check,
-           error: null,
-           logs: result.logs,
-           attempts,
-         }, runsDir));
+         if (result.status === 'ok') {
+          // Success path
+          await mutateState(current => updateStepState(current, step.id, {
+            status: 'ok',
+            completed_at: completedAt,
+            duration_ms: durationMs,
+            session_key: result.session_key,
+            output_check: result.output_check,
+            error: null,
+            logs: result.logs,
+            attempts,
+          }, runsDir));
+          
+          const durationSec = Math.round(durationMs / 1000);
+          await notify(`✅ ${step.name} complete (${durationSec}s)`);
 
+        } else {
+          // Failure path — check for retry
+          const maxAttempts = step.retry + 1;
+          const shouldRetry = attempts < maxAttempts;
 
-        const durationSec = Math.round(durationMs / 1000);
-        await notify(`✅ ${step.name} complete (${durationSec}s)`);
+          if (shouldRetry) {
+            // Notify retry, schedule re-launch after retry_delay
+            const nextAttempt = attempts + 1;
+            await notify(`❌ ${step.name} failed — retrying (attempt ${nextAttempt}/${maxAttempts})`);
 
-      } else {
-        // Failure path — check for retry
-        const maxAttempts = step.retry + 1;
-        const shouldRetry = attempts < maxAttempts;
+            // Mark as pending again so the scheduler will re-launch
+             await mutateState(current => updateStepState(current, step.id, {
+              status: 'pending',
+              error: result.error,
+              logs: result.logs,
+              attempts, // keep the attempt count so we know we've retried
+            }, runsDir));
 
-        if (shouldRetry) {
-          // Notify retry, schedule re-launch after retry_delay
-          const nextAttempt = attempts + 1;
-          await notify(`❌ ${step.name} failed — retrying (attempt ${nextAttempt}/${maxAttempts})`);
+            await waitForRetry(step.id, step.retry_delay);
+            if (cancelled) return;
 
-          // Mark as pending again so the scheduler will re-launch
-           await mutateState(current => updateStepState(current, step.id, {
-             status: 'pending',
-             error: result.error,
-             logs: result.logs,
-             attempts, // keep the attempt count so we know we've retried
-           }, runsDir));
-
-
-          await waitForRetry(step.id, step.retry_delay);
-          if (cancelled) return;
-
-          // After the delay, the scheduler loop will detect the step as
-          // 'pending' and re-launch it. But we need to ensure the attempts
-          // counter is preserved. We handle this by storing attempts in state.
-
-         } else {
-           // All retries exhausted — mark as failed
-           await mutateState(current => updateStepState(current, step.id, {
-             status: 'failed',
-             completed_at: completedAt,
-             duration_ms: durationMs,
-             session_key: result.session_key,
-             output_check: result.output_check,
-             error: result.error,
-             logs: result.logs,
-             attempts,
-           }, runsDir));
-
-
-          const wasRetried = step.retry > 0;
-          if (wasRetried) {
-            await notify(`❌ ${step.name} failed after ${attempts} attempt(s): ${result.error}`);
           } else {
-            await notify(`❌ ${step.name} failed: ${result.error}`);
-          }
+            // All retries exhausted — mark as failed
+            await mutateState(current => updateStepState(current, step.id, {
+              status: 'failed',
+              completed_at: completedAt,
+              duration_ms: durationMs,
+              session_key: result.session_key,
+              output_check: result.output_check,
+              error: result.error,
+              logs: result.logs,
+              attempts,
+            }, runsDir));
 
-          // If not optional, cascade skip to dependent steps
-          if (!step.optional) {
-            await cascadeSkip(step.id);
-          } else {
-            // Optional failure — log it but don't cascade
-            await notify(`⚠️  ${step.name} failed (optional — continuing pipeline)`);
+            const wasRetried = step.retry > 0;
+            if (wasRetried) {
+              await notify(`❌ ${step.name} failed after ${attempts} attempt(s): ${result.error}`);
+            } else {
+              await notify(`❌ ${step.name} failed: ${result.error}`);
+            }
+
+            // If not optional, cascade skip to dependent steps
+            if (!step.optional) {
+              await cascadeSkip(step.id);
+            } else {
+              // Optional failure — log it but don't cascade
+              await notify(`⚠️  ${step.name} failed (optional — continuing pipeline)`);
+            }
           }
         }
+      } finally {
+        // Remove from in-flight map when done (whether ok, failed, or retrying)
+        inFlight.delete(step.id);
       }
-
-      // Remove from in-flight map when done (whether ok, failed, or retrying)
-      inFlight.delete(step.id);
-
     })();
 
     inFlight.set(step.id, promise);

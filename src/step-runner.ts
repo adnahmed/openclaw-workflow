@@ -489,11 +489,11 @@ export class CliAdapter {
 				{ timeout: 15000 },
 			);
 
-			const lines = stdout.trim().split("\n").filter(Boolean);
-			if (!lines.length) return { status: "running" };
+			const data = JSON.parse(stdout.trim());
+			const entries = Array.isArray(data) ? data : data.entries;
+			if (!entries || entries.length === 0) return { status: "running" };
 
-			// JSONL — take the last line
-			const entry = JSON.parse(lines[lines.length - 1]);
+			const entry = entries[entries.length - 1];
 			const logs = entry.logs || entry.stdout || entry.stderr || null;
 			if (entry.action === "finished") {
 				// Clean up the cron job (best-effort — may already be deleted if --delete-after-run)
