@@ -38,6 +38,8 @@
 import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
+import path from 'node:path';
+import fs from 'node:fs';
 import { checkOutputs } from './output-checker.js';
 
 const execAsync = promisify(exec);
@@ -57,10 +59,43 @@ async function runOpenClaw(args, options = {}) {
 
   if (!cachedOpenClawPath) {
     try {
-      const { stdout } = await execAsync('powershell -Command "(Get-Command openclaw).Source"');
-      const psPath = stdout.trim();
-      const basedir = psPath.substring(0, psPath.lastIndexOf('\\'));
-      cachedOpenClawPath = `${basedir}\\node_modules\\openclaw\\openclaw.mjs`;
+      let wrapperPath = '';
+      if (process.platform === 'win32') {
+        try {
+          const { stdout } = await execAsync('powershell -Command "(Get-Command openclaw).Source"');
+          wrapperPath = stdout.trim().split('\n')[0];
+        } catch {
+          const { stdout } = await execAsync('where openclaw');
+          wrapperPath = stdout.trim().split('\n')[0];
+        }
+      } else {
+        const { stdout } = await execAsync('which openclaw');
+        wrapperPath = stdout.trim().split('\n')[0];
+      }
+      
+      if (!wrapperPath) throw new Error('Executable not found');
+
+      const realPath = fs.realpathSync(wrapperPath);
+      
+      let mjsPath = '';
+      const searchPaths = [
+        path.join(path.dirname(realPath), 'node_modules', 'openclaw', 'openclaw.mjs'),
+        path.join(path.dirname(realPath), '..', 'node_modules', 'openclaw', 'openclaw.mjs'),
+        path.join(path.dirname(realPath), '..', 'lib', 'node_modules', 'openclaw', 'openclaw.mjs'),
+      ];
+
+      for (const p of searchPaths) {
+        if (fs.existsSync(p)) {
+          mjsPath = p;
+          break;
+        }
+      }
+
+      if (!mjsPath) {
+        throw new Error(`Could not locate openclaw.mjs relative to ${realPath}`);
+      }
+
+      cachedOpenClawPath = mjsPath;
     } catch (err) {
       throw new Error(`Could not find openclaw executable in PATH: ${err.message}`);
     }
