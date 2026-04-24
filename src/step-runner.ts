@@ -628,15 +628,6 @@ export class CliAdapter {
 			};
 		}
 	}
-			return { status: "running", logs };
-		} catch (err) {
-			// If the job no longer exists (deleted after run), treat as done
-			if (err.message.includes("not found") || err.message.includes("404")) {
-				return { status: "done" };
-			}
-			return { status: "running" };
-		}
-	}
 }
 
 /**
