@@ -36,68 +36,15 @@
  * // result.status === 'ok' | 'failed'
  */
 
-import { execFile, spawn } from "node:child_process";
-import { extname } from "node:path";
+import { exec, spawn } from "node:child_process";
+import path from "node:path";
+import fs from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
 
-const execFileAsync = promisify(execFile);
-let cachedOpenClawCommand = null;
-
-async function findWindowsOpenClawCommand() {
-	if (cachedOpenClawCommand) return cachedOpenClawCommand;
-
-	const shellCandidates = ["pwsh.exe", "powershell.exe"];
-	let wrapperPath = "";
-	let discoveryError = null;
-
-	for (const shell of shellCandidates) {
-		try {
-			const { stdout } = await execFileAsync(shell, [
-				"-NoProfile",
-				"-Command",
-				"(Get-Command openclaw).Source",
-			]);
-			wrapperPath = stdout.trim().split(/\r?\n/)[0];
-			if (wrapperPath) break;
-		} catch (err) {
-			discoveryError = err;
-		}
-	}
-
-	if (!wrapperPath) {
-		try {
-			const { stdout } = await execFileAsync("where.exe", ["openclaw"]);
-			wrapperPath = stdout.trim().split(/\r?\n/)[0];
-		} catch (err) {
-			discoveryError = err;
-		}
-	}
-
-	if (!wrapperPath) {
-		throw new Error(
-			`Could not find openclaw executable in PATH: ${discoveryError?.message || "not found"}`,
-		);
-	}
-
-	const extension = extname(wrapperPath).toLowerCase();
-	cachedOpenClawCommand =
-		extension === ".ps1"
-			? {
-					command: "powershell.exe",
-					prefixArgs: [
-						"-NoProfile",
-						"-ExecutionPolicy",
-						"Bypass",
-						"-File",
-						wrapperPath,
-					],
-				}
-			: { command: wrapperPath, prefixArgs: [] };
-
-	return cachedOpenClawCommand;
-}
+const execAsync = promisify(exec);
+let cachedOpenClawPath = null;
 
 /**
  * Runs an OpenClaw CLI command with a structured argument array.
@@ -109,13 +56,61 @@ async function findWindowsOpenClawCommand() {
  */
 async function runOpenClaw(args, options = {}) {
 	const { timeout = 30000 } = options;
-	const command =
-		process.platform === "win32"
-			? await findWindowsOpenClawCommand()
-			: { command: "openclaw", prefixArgs: [] };
+
+	if (!cachedOpenClawPath) {
+		try {
+			let wrapperPath = "";
+			if (process.platform === "win32") {
+				try {
+					const { stdout } = await execAsync(
+						'powershell -Command "(Get-Command openclaw).Source"',
+					);
+					wrapperPath = stdout.trim().split(/\r?\n/)[0];
+				} catch {
+					const { stdout } = await execAsync("where openclaw");
+					wrapperPath = stdout.trim().split(/\r?\n/)[0];
+				}
+			} else {
+				const { stdout } = await execAsync("which openclaw");
+				wrapperPath = stdout.trim().split(/\r?\n/)[0];
+			}
+
+			if (!wrapperPath) throw new Error("Executable not found");
+
+			const realPath = fs.realpathSync(wrapperPath);
+			const searchPaths = [
+				path.join(path.dirname(realPath), "node_modules", "openclaw", "openclaw.mjs"),
+				path.join(path.dirname(realPath), "..", "node_modules", "openclaw", "openclaw.mjs"),
+				path.join(
+					path.dirname(realPath),
+					"..",
+					"lib",
+					"node_modules",
+					"openclaw",
+					"openclaw.mjs",
+				),
+			];
+
+			let mjsPath = "";
+			for (const candidate of searchPaths) {
+				if (fs.existsSync(candidate)) {
+					mjsPath = candidate;
+					break;
+				}
+			}
+
+			if (!mjsPath) {
+				throw new Error(`Could not locate openclaw.mjs relative to ${realPath}`);
+			}
+
+			cachedOpenClawPath = mjsPath;
+		} catch (err) {
+			throw new Error(`Could not find openclaw executable in PATH: ${err.message}`);
+		}
+	}
 
 	return new Promise((resolve, reject) => {
-		const child = spawn(command.command, [...command.prefixArgs, ...args], {
+		const child = spawn("node", [cachedOpenClawPath, ...args], {
 			shell: false,
 			windowsHide: true,
 			stdio: ["ignore", "pipe", "pipe"],
