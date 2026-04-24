@@ -290,6 +290,15 @@ export async function runStep(step, runId, api, options) {
 				break;
 			}
 			if (statusResult.status === "error") {
+				if (step.outputs && step.outputs.length > 0) {
+					outputCheck = await checkOutputs(step.outputs, baseDir);
+					if (outputCheck.passed) {
+						finalStatus = "ok";
+						logs = statusResult.logs;
+						break;
+					}
+				}
+
 				finalStatus = "failed";
 				errorMsg = statusResult.error || "Step session exited with error";
 				logs = statusResult.logs;
