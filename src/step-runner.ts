@@ -36,112 +36,129 @@
  * // result.status === 'ok' | 'failed'
  */
 
-import { execFile, spawn } from 'node:child_process';
-import { extname } from 'node:path';
-import { promisify } from 'node:util';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { checkOutputs } from './output-checker.js';
+import { execFile, spawn } from "node:child_process";
+import { extname } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
+import { checkOutputs } from "./output-checker.js";
 
 const execFileAsync = promisify(execFile);
 let cachedOpenClawCommand = null;
 
 async function findWindowsOpenClawCommand() {
-  if (cachedOpenClawCommand) return cachedOpenClawCommand;
+	if (cachedOpenClawCommand) return cachedOpenClawCommand;
 
-  const shellCandidates = ['pwsh.exe', 'powershell.exe'];
-  let wrapperPath = '';
-  let discoveryError = null;
+	const shellCandidates = ["pwsh.exe", "powershell.exe"];
+	let wrapperPath = "";
+	let discoveryError = null;
 
-  for (const shell of shellCandidates) {
-    try {
-      const { stdout } = await execFileAsync(shell, [
-        '-NoProfile',
-        '-Command',
-        '(Get-Command openclaw).Source',
-      ]);
-      wrapperPath = stdout.trim().split(/\r?\n/)[0];
-      if (wrapperPath) break;
-    } catch (err) {
-      discoveryError = err;
-    }
-  }
+	for (const shell of shellCandidates) {
+		try {
+			const { stdout } = await execFileAsync(shell, [
+				"-NoProfile",
+				"-Command",
+				"(Get-Command openclaw).Source",
+			]);
+			wrapperPath = stdout.trim().split(/\r?\n/)[0];
+			if (wrapperPath) break;
+		} catch (err) {
+			discoveryError = err;
+		}
+	}
 
-  if (!wrapperPath) {
-    try {
-      const { stdout } = await execFileAsync('where.exe', ['openclaw']);
-      wrapperPath = stdout.trim().split(/\r?\n/)[0];
-    } catch (err) {
-      discoveryError = err;
-    }
-  }
+	if (!wrapperPath) {
+		try {
+			const { stdout } = await execFileAsync("where.exe", ["openclaw"]);
+			wrapperPath = stdout.trim().split(/\r?\n/)[0];
+		} catch (err) {
+			discoveryError = err;
+		}
+	}
 
-  if (!wrapperPath) {
-    throw new Error(`Could not find openclaw executable in PATH: ${discoveryError?.message || 'not found'}`);
-  }
+	if (!wrapperPath) {
+		throw new Error(
+			`Could not find openclaw executable in PATH: ${discoveryError?.message || "not found"}`,
+		);
+	}
 
-  const extension = extname(wrapperPath).toLowerCase();
-  cachedOpenClawCommand = extension === '.ps1'
-    ? {
-        command: 'powershell.exe',
-        prefixArgs: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', wrapperPath],
-      }
-    : { command: wrapperPath, prefixArgs: [] };
+	const extension = extname(wrapperPath).toLowerCase();
+	cachedOpenClawCommand =
+		extension === ".ps1"
+			? {
+					command: "powershell.exe",
+					prefixArgs: [
+						"-NoProfile",
+						"-ExecutionPolicy",
+						"Bypass",
+						"-File",
+						wrapperPath,
+					],
+				}
+			: { command: wrapperPath, prefixArgs: [] };
 
-  return cachedOpenClawCommand;
+	return cachedOpenClawCommand;
 }
 
 /**
  * Runs an OpenClaw CLI command with a structured argument array.
  * Avoids shell interpolation by spawning the CLI directly with an argv array.
- * 
+ *
  * @param {string[]} args - Arguments for the openclaw command
  * @param {Object} options - Execution options (timeout)
  * @returns {Promise<{ stdout: string, stderr: string }>}
  */
 async function runOpenClaw(args, options = {}) {
-  const { timeout = 30000 } = options;
-  const command = process.platform === 'win32'
-    ? await findWindowsOpenClawCommand()
-    : { command: 'openclaw', prefixArgs: [] };
+	const { timeout = 30000 } = options;
+	const command =
+		process.platform === "win32"
+			? await findWindowsOpenClawCommand()
+			: { command: "openclaw", prefixArgs: [] };
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(command.command, [...command.prefixArgs, ...args], {
-      shell: false,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`OpenClaw CLI timed out after ${timeout}ms`));
-    }, timeout);
+	return new Promise((resolve, reject) => {
+		const child = spawn(command.command, [...command.prefixArgs, ...args], {
+			shell: false,
+			windowsHide: true,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 
-    let stdout = '';
-    let stderr = '';
+		const timer = setTimeout(() => {
+			child.kill();
+			reject(new Error(`OpenClaw CLI timed out after ${timeout}ms`));
+		}, timeout);
 
-    child.stdout.on('data', (data) => { 
-      stdout += data; 
-    });
-    child.stderr.on('data', (data) => { 
-      stderr += data; 
-    });
+		let stdout = "";
+		let stderr = "";
 
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(new Error(`OpenClaw CLI failed (code ${code}): ${stderr || stdout || 'Unknown error'}`));
-      }
-    });
+		child.stdout.on("data", (data) => {
+			stdout += data;
+		});
+		child.stderr.on("data", (data) => {
+			stderr += data;
+		});
 
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(new Error(`Failed to start OpenClaw CLI. Ensure "openclaw" is in PATH: ${err.message}`));
-    });
-  });
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			if (code === 0) {
+				resolve({ stdout, stderr });
+			} else {
+				reject(
+					new Error(
+						`OpenClaw CLI failed (code ${code}): ${stderr || stdout || "Unknown error"}`,
+					),
+				);
+			}
+		});
+
+		child.on("error", (err) => {
+			clearTimeout(timer);
+			reject(
+				new Error(
+					`Failed to start OpenClaw CLI. Ensure "openclaw" is in PATH: ${err.message}`,
+				),
+			);
+		});
+	});
 }
-
 
 /**
  * Preamble injected at the start of every step task prompt.
@@ -210,114 +227,114 @@ explicitly indicates an error.
  * );
  */
 export async function runStep(step, runId, api, options) {
-  const { pollIntervalMs = 5000, baseDir = process.cwd(), defaultModel } = options;
+	const {
+		pollIntervalMs = 5000,
+		baseDir = process.cwd(),
+		defaultModel,
+	} = options;
 
-  const startTime = Date.now();
+	const startTime = Date.now();
 
-  // Select adapter based on what OpenClaw exposes
-  const adapter = selectAdapter(api);
+	// Select adapter based on what OpenClaw exposes
+	const adapter = selectAdapter(api);
 
-  let sessionKey = null;
-  try {
-    // Build the model preference: step-level overrides plugin default
-    const model = step.model || defaultModel || null;
+	let sessionKey = null;
+	try {
+		// Build the model preference: step-level overrides plugin default
+		const model = step.model || defaultModel || null;
 
-    // Wrap the task with exec-poll instructions so the agent handles backgrounded
-    // bash commands correctly (commands taking >10s are backgrounded by the exec tool).
-    const taskWithPreamble = EXEC_POLL_PREAMBLE + step.task;
+		// Wrap the task with exec-poll instructions so the agent handles backgrounded
+		// bash commands correctly (commands taking >10s are backgrounded by the exec tool).
+		const taskWithPreamble = EXEC_POLL_PREAMBLE + step.task;
 
-    // Spawn the session
-    const spawnResult = await adapter.spawn(taskWithPreamble, {
-      model,
-      timeout: step.timeout,
-      sessionTarget: 'isolated',
-      label: `wf:${runId}:${step.id}`,
-    });
-    sessionKey = spawnResult.sessionKey;
+		// Spawn the session
+		const spawnResult = await adapter.spawn(taskWithPreamble, {
+			model,
+			timeout: step.timeout,
+			sessionTarget: "isolated",
+			label: `wf:${runId}:${step.id}`,
+		});
+		sessionKey = spawnResult.sessionKey;
 
-    // Poll until completion or timeout
-    const timeoutMs = step.timeout * 1000;
-    const deadline = Date.now() + timeoutMs;
+		// Poll until completion or timeout
+		const timeoutMs = step.timeout * 1000;
+		const deadline = Date.now() + timeoutMs;
 
-     let finalStatus = null;
-     let errorMsg = null;
-     let logs = null;
-     let outputCheck = { passed: false, missing_files: [], checked_files: [] };
+		let finalStatus = null;
+		let errorMsg = null;
+		let logs = null;
+		let outputCheck = { passed: false, missing_files: [], checked_files: [] };
 
+		while (Date.now() < deadline) {
+			await sleep(pollIntervalMs);
 
-    while (Date.now() < deadline) {
-      await sleep(pollIntervalMs);
+			// Early exit if outputs are already present (fast-path signal)
+			if (step.outputs && step.outputs.length > 0) {
+				outputCheck = await checkOutputs(step.outputs, baseDir);
+				if (outputCheck.passed) {
+					finalStatus = "ok";
+					break;
+				}
+			}
 
-      // Early exit if outputs are already present (fast-path signal)
-      if (step.outputs && step.outputs.length > 0) {
-        outputCheck = await checkOutputs(step.outputs, baseDir);
-        if (outputCheck.passed) {
-          finalStatus = 'ok';
-          break;
-        }
-      }
+			const statusResult = await adapter.getStatus(spawnResult.sessionId);
 
-       const statusResult = await adapter.getStatus(spawnResult.sessionId);
- 
-       if (statusResult.status === 'done') {
-         finalStatus = 'ok';
-         logs = statusResult.logs;
-         break;
-       }
-       if (statusResult.status === 'error') {
-         finalStatus = 'failed';
-         errorMsg = statusResult.error || 'Step session exited with error';
-         logs = statusResult.logs;
-         break;
-       }
+			if (statusResult.status === "done") {
+				finalStatus = "ok";
+				logs = statusResult.logs;
+				break;
+			}
+			if (statusResult.status === "error") {
+				finalStatus = "failed";
+				errorMsg = statusResult.error || "Step session exited with error";
+				logs = statusResult.logs;
+				break;
+			}
 
-      // status === 'running' — keep polling
-    }
+			// status === 'running' — keep polling
+		}
 
-    // Final verification: if the session claimed completion (or we broke early),
-    // ensure the output gate is actually satisfied.
-    if (finalStatus === 'ok' || finalStatus === null) {
-      outputCheck = await checkOutputs(step.outputs, baseDir);
-    }
+		// Final verification: if the session claimed completion (or we broke early),
+		// ensure the output gate is actually satisfied.
+		if (finalStatus === "ok" || finalStatus === null) {
+			outputCheck = await checkOutputs(step.outputs, baseDir);
+		}
 
-    if (finalStatus === null) {
-      // Deadline exceeded without completing.
-      // Rescue: if outputs are defined and all present, mark as ok.
-      const hasOutputs = step.outputs && step.outputs.length > 0;
-      if (hasOutputs && outputCheck.passed) {
-        finalStatus = 'ok';
-      } else {
-        finalStatus = 'failed';
-        errorMsg = `Step timed out after ${step.timeout}s`;
-      }
-    } else if (finalStatus === 'ok' && !outputCheck.passed) {
-      // If session said OK but output gate failed, treat as failure
-      finalStatus = 'failed';
-      errorMsg = `Output gate failed — missing files: ${outputCheck.missing_files.join(', ')}`;
-    }
+		if (finalStatus === null) {
+			// Deadline exceeded without completing.
+			// Rescue: if outputs are defined and all present, mark as ok.
+			const hasOutputs = step.outputs && step.outputs.length > 0;
+			if (hasOutputs && outputCheck.passed) {
+				finalStatus = "ok";
+			} else {
+				finalStatus = "failed";
+				errorMsg = `Step timed out after ${step.timeout}s`;
+			}
+		} else if (finalStatus === "ok" && !outputCheck.passed) {
+			// If session said OK but output gate failed, treat as failure
+			finalStatus = "failed";
+			errorMsg = `Output gate failed — missing files: ${outputCheck.missing_files.join(", ")}`;
+		}
 
-     return {
-       status: finalStatus,
-       session_key: sessionKey,
-       output_check: outputCheck,
-       error: errorMsg,
-       logs: logs,
-       duration_ms: Date.now() - startTime,
-     };
-
-
-     } catch (err) {
-       // Spawn itself failed (session system unavailable, etc.)
-       return {
-         status: 'failed',
-         session_key: sessionKey,
-         output_check: { passed: false, missing_files: [], checked_files: [] },
-         error: err.message,
-         logs: null,
-         duration_ms: Date.now() - startTime,
-       };
-     }
-
+		return {
+			status: finalStatus,
+			session_key: sessionKey,
+			output_check: outputCheck,
+			error: errorMsg,
+			logs: logs,
+			duration_ms: Date.now() - startTime,
+		};
+	} catch (err) {
+		// Spawn itself failed (session system unavailable, etc.)
+		return {
+			status: "failed",
+			session_key: sessionKey,
+			output_check: { passed: false, missing_files: [], checked_files: [] },
+			error: err.message,
+			logs: null,
+			duration_ms: Date.now() - startTime,
+		};
+	}
 }
 
 /**
@@ -329,14 +346,14 @@ export async function runStep(step, runId, api, options) {
  * @returns {SessionAdapter}
  */
 function selectAdapter(api) {
-  // Check if OpenClaw exposes a native sessions API on the plugin api object.
-  // This is the target state for the PR — once merged, this path will be taken.
-  if (api && api.sessions && typeof api.sessions.spawn === 'function') {
-    return new ApiAdapter(api.sessions);
-  }
+	// Check if OpenClaw exposes a native sessions API on the plugin api object.
+	// This is the target state for the PR — once merged, this path will be taken.
+	if (api && api.sessions && typeof api.sessions.spawn === "function") {
+		return new ApiAdapter(api.sessions);
+	}
 
-  // Fall back to CLI-based adapter
-  return new CliAdapter();
+	// Fall back to CLI-based adapter
+	return new CliAdapter();
 }
 
 /**
@@ -354,35 +371,34 @@ function selectAdapter(api) {
  *   getStatus(sessionId)   → Promise<{ status: 'running'|'done'|'error', error? }>
  */
 class ApiAdapter {
-  /**
-   * @param {Object} sessions - api.sessions object from OpenClaw
-   */
-  constructor(sessions) {
-    this.sessions = sessions;
-  }
+	/**
+	 * @param {Object} sessions - api.sessions object from OpenClaw
+	 */
+	constructor(sessions) {
+		this.sessions = sessions;
+	}
 
-  /**
-   * @param {string} prompt  - Task prompt for the subagent
-   * @param {Object} options - Spawn options (model, timeout, label, etc.)
-   * @returns {Promise<{ sessionId: string, sessionKey: string }>}
-   */
-  async spawn(prompt, options) {
-    return await this.sessions.spawn(prompt, options);
-  }
+	/**
+	 * @param {string} prompt  - Task prompt for the subagent
+	 * @param {Object} options - Spawn options (model, timeout, label, etc.)
+	 * @returns {Promise<{ sessionId: string, sessionKey: string }>}
+	 */
+	async spawn(prompt, options) {
+		return await this.sessions.spawn(prompt, options);
+	}
 
-  /**
-   * @param {string} sessionId - Session ID returned by spawn()
-   * @returns {Promise<{ status: string, error?: string }>}
-   */
-   async getStatus(sessionId) {
-     const status = await this.sessions.getStatus(sessionId);
-     return {
-       status: status.status === 'done' ? 'done' : status.status,
-       error: status.error,
-       logs: status.logs,
-     };
-   }
-
+	/**
+	 * @param {string} sessionId - Session ID returned by spawn()
+	 * @returns {Promise<{ status: string, error?: string }>}
+	 */
+	async getStatus(sessionId) {
+		const status = await this.sessions.getStatus(sessionId);
+		return {
+			status: status.status === "done" ? "done" : status.status,
+			error: status.error,
+			logs: status.logs,
+		};
+	}
 }
 
 /**
@@ -393,7 +409,7 @@ class ApiAdapter {
  * ## Approach
  * Since `openclaw sessions spawn` is not exposed as a CLI command, this adapter
  * uses the cron subsystem as a session-spawning mechanism:
- *   1. `openclaw cron add --at +5s --session isolated --message "..." --json`
+ *   1. `openclaw cron add --at 5s --session isolated --message "..." --json`
  *      creates a one-shot job and returns its job ID.
  *   2. `openclaw cron run <id>` triggers it immediately.
  *   3. `openclaw cron runs --id <id> --json` polls for the run result.
@@ -408,97 +424,102 @@ class ApiAdapter {
  * exec yieldMs) by polling via the process tool rather than seeing empty output.
  */
 export class CliAdapter {
-  /**
-   * @param {Function} [executor] - Optional function to execute OpenClaw commands. 
-   * Defaults to the module-level `runOpenClaw`.
-   */
-  constructor(executor = runOpenClaw) {
-    this.executor = executor;
-  }
+	/**
+	 * @param {Function} [executor] - Optional function to execute OpenClaw commands.
+	 * Defaults to the module-level `runOpenClaw`.
+	 */
+	constructor(executor = runOpenClaw) {
+		this.executor = executor;
+	}
 
-  /**
-   * @param {string} prompt  - Task prompt
-   * @param {Object} options - Options (model, timeout, label)
-   * @returns {Promise<{ sessionId: string, sessionKey: string }>}
-   */
-  async spawn(prompt, options) {
-    this._jobs = this._jobs || new Map();
+	/**
+	 * @param {string} prompt  - Task prompt
+	 * @param {Object} options - Options (model, timeout, label)
+	 * @returns {Promise<{ sessionId: string, sessionKey: string }>}
+	 */
+	async spawn(prompt, options) {
+		this._jobs = this._jobs || new Map();
 
-    const args = [
-      'cron', 'add',
-      '--at', '5s',
-      '--session', 'isolated',
-      '--message', prompt,
-      '--delete-after-run',
-      '--json'
-    ];
-    if (options.model) {
-      args.push('--model', options.model);
-    }
-    if (options.label) {
-      args.push('--name', options.label);
-    }
+		const args = [
+			"cron",
+			"add",
+			"--at",
+			"5s",
+			"--session",
+			"isolated",
+			"--message",
+			prompt,
+			"--delete-after-run",
+			"--json",
+		];
+		if (options.model) {
+			args.push("--model", options.model);
+		}
+		if (options.label) {
+			args.push("--name", options.label);
+		}
 
-    let jobId;
-    try {
-      const { stdout } = await this.executor(args, { timeout: 30000 });
-      const parsed = JSON.parse(stdout.trim());
-      jobId = parsed.id || parsed.job?.id;
-      if (!jobId) throw new Error(`Unexpected cron add output: ${stdout}`);
-    } catch (err) {
-      throw new Error(`CliAdapter: cron add failed — ${err.message}`);
-    }
+		let jobId;
+		try {
+			const { stdout } = await this.executor(args, { timeout: 30000 });
+			const parsed = JSON.parse(stdout.trim());
+			jobId = parsed.id || parsed.job?.id;
+			if (!jobId) throw new Error(`Unexpected cron add output: ${stdout}`);
+		} catch (err) {
+			throw new Error(`CliAdapter: cron add failed — ${err.message}`);
+		}
 
-    // Trigger the job immediately
-    try {
-      await this.executor(['cron', 'run', jobId], { timeout: 10000 });
-    } catch (err) {
-      // Non-fatal — the job may already be queued to run in 5s
-    }
+		// Trigger the job immediately
+		try {
+			await this.executor(["cron", "run", jobId], { timeout: 10000 });
+		} catch (err) {
+			// Non-fatal — the job may already be queued to run in 5s
+		}
 
-    this._jobs.set(jobId, { status: 'running' });
-    return { sessionId: jobId, sessionKey: `cli-cron:${jobId}` };
-  }
+		this._jobs.set(jobId, { status: "running" });
+		return { sessionId: jobId, sessionKey: `cli-cron:${jobId}` };
+	}
 
-  /**
-   * Poll the cron run history to check if the one-shot job has completed.
-   *
-   * @param {string} sessionId - The cron job ID returned by spawn()
-   * @returns {Promise<{ status: string, error?: string }>}
-   */
-  async getStatus(sessionId) {
-    const jobId = sessionId;
-    try {
-      const { stdout } = await this.executor([
-        'cron', 'runs', 
-        '--id', jobId, 
-        '--limit', '1', 
-        '--json'
-      ], { timeout: 15000 });
+	/**
+	 * Poll the cron run history to check if the one-shot job has completed.
+	 *
+	 * @param {string} sessionId - The cron job ID returned by spawn()
+	 * @returns {Promise<{ status: string, error?: string }>}
+	 */
+	async getStatus(sessionId) {
+		const jobId = sessionId;
+		try {
+			const { stdout } = await this.executor(
+				["cron", "runs", "--id", jobId, "--limit", "1", "--json"],
+				{ timeout: 15000 },
+			);
 
-      const lines = stdout.trim().split('\n').filter(Boolean);
-      if (!lines.length) return { status: 'running' };
+			const lines = stdout.trim().split("\n").filter(Boolean);
+			if (!lines.length) return { status: "running" };
 
-      // JSONL — take the last line
-       const entry = JSON.parse(lines[lines.length - 1]);
-       const logs = entry.logs || entry.stdout || entry.stderr || null;
-       if (entry.action === 'finished') {
-         // Clean up the cron job (best-effort — may already be deleted if --delete-after-run)
-         this.executor(['cron', 'remove', jobId]).catch(() => {});
-         return entry.status === 'ok'
-           ? { status: 'done', logs }
-           : { status: 'error', error: entry.error || entry.summary || 'Step failed', logs };
-       }
-       return { status: 'running', logs };
-
-    } catch (err) {
-      // If the job no longer exists (deleted after run), treat as done
-      if (err.message.includes('not found') || err.message.includes('404')) {
-        return { status: 'done' };
-      }
-      return { status: 'running' };
-    }
-  }
+			// JSONL — take the last line
+			const entry = JSON.parse(lines[lines.length - 1]);
+			const logs = entry.logs || entry.stdout || entry.stderr || null;
+			if (entry.action === "finished") {
+				// Clean up the cron job (best-effort — may already be deleted if --delete-after-run)
+				this.executor(["cron", "remove", jobId]).catch(() => {});
+				return entry.status === "ok"
+					? { status: "done", logs }
+					: {
+							status: "error",
+							error: entry.error || entry.summary || "Step failed",
+							logs,
+						};
+			}
+			return { status: "running", logs };
+		} catch (err) {
+			// If the job no longer exists (deleted after run), treat as done
+			if (err.message.includes("not found") || err.message.includes("404")) {
+				return { status: "done" };
+			}
+			return { status: "running" };
+		}
+	}
 }
 
 /**
@@ -511,39 +532,39 @@ export class CliAdapter {
  * // Steps using this adapter will complete in 100ms
  */
 export class MockAdapter {
-  /**
-   * @param {Object} options
-   * @param {number}  [options.resolveIn=100]    - Simulated duration in ms
-   * @param {boolean} [options.shouldFail=false] - Whether the session should fail
-   * @param {string}  [options.failMessage]      - Error message if shouldFail is true
-   */
-  constructor(options = {}) {
-    this.resolveIn = options.resolveIn ?? 100;
-    this.shouldFail = options.shouldFail ?? false;
-    this.failMessage = options.failMessage || 'Mock step failure';
-    this._sessions = new Map();
-    this._counter = 0;
-  }
+	/**
+	 * @param {Object} options
+	 * @param {number}  [options.resolveIn=100]    - Simulated duration in ms
+	 * @param {boolean} [options.shouldFail=false] - Whether the session should fail
+	 * @param {string}  [options.failMessage]      - Error message if shouldFail is true
+	 */
+	constructor(options = {}) {
+		this.resolveIn = options.resolveIn ?? 100;
+		this.shouldFail = options.shouldFail ?? false;
+		this.failMessage = options.failMessage || "Mock step failure";
+		this._sessions = new Map();
+		this._counter = 0;
+	}
 
-  async spawn(prompt, options) {
-    const sessionId = `mock-session-${++this._counter}`;
-    const sessionKey = `agent:mock:subagent:${sessionId}`;
+	async spawn(prompt, options) {
+		const sessionId = `mock-session-${++this._counter}`;
+		const sessionKey = `agent:mock:subagent:${sessionId}`;
 
-    // Schedule completion after resolveIn ms
-    const result = { status: this.shouldFail ? 'error' : 'done' };
-    if (this.shouldFail) result.error = this.failMessage;
+		// Schedule completion after resolveIn ms
+		const result = { status: this.shouldFail ? "error" : "done" };
+		if (this.shouldFail) result.error = this.failMessage;
 
-    setTimeout(() => {
-      this._sessions.set(sessionId, result);
-    }, this.resolveIn);
+		setTimeout(() => {
+			this._sessions.set(sessionId, result);
+		}, this.resolveIn);
 
-    this._sessions.set(sessionId, { status: 'running' });
-    return { sessionId, sessionKey };
-  }
+		this._sessions.set(sessionId, { status: "running" });
+		return { sessionId, sessionKey };
+	}
 
-  async getStatus(sessionId) {
-    return this._sessions.get(sessionId) || { status: 'running' };
-  }
+	async getStatus(sessionId) {
+		return this._sessions.get(sessionId) || { status: "running" };
+	}
 }
 
 /**
@@ -558,69 +579,84 @@ export class MockAdapter {
  * const result = await mockRunner(step, runId, api, options);
  */
 export function createStepRunner(adapter) {
-  return async function runStepWithAdapter(step, runId, _api, options) {
-    const { pollIntervalMs = 5000, baseDir = process.cwd() } = options;
-    const startTime = Date.now();
-    let sessionKey = null;
+	return async function runStepWithAdapter(step, runId, _api, options) {
+		const { pollIntervalMs = 5000, baseDir = process.cwd() } = options;
+		const startTime = Date.now();
+		let sessionKey = null;
 
-    try {
-      const model = step.model || options.defaultModel || null;
-      const taskWithPreamble = EXEC_POLL_PREAMBLE + step.task;
-      const spawnResult = await adapter.spawn(taskWithPreamble, {
-        model,
-        timeout: step.timeout,
-        sessionTarget: 'isolated',
-        label: `wf:${runId}:${step.id}`,
-      });
-      sessionKey = spawnResult.sessionKey;
+		try {
+			const model = step.model || options.defaultModel || null;
+			const taskWithPreamble = EXEC_POLL_PREAMBLE + step.task;
+			const spawnResult = await adapter.spawn(taskWithPreamble, {
+				model,
+				timeout: step.timeout,
+				sessionTarget: "isolated",
+				label: `wf:${runId}:${step.id}`,
+			});
+			sessionKey = spawnResult.sessionKey;
 
-      const timeoutMs = step.timeout * 1000;
-      const deadline = Date.now() + timeoutMs;
-      let finalStatus = null;
-      let errorMsg = null;
-      let outputCheck = { passed: false, missing_files: [], checked_files: [] };
+			const timeoutMs = step.timeout * 1000;
+			const deadline = Date.now() + timeoutMs;
+			let finalStatus = null;
+			let errorMsg = null;
+			let outputCheck = { passed: false, missing_files: [], checked_files: [] };
 
-      while (Date.now() < deadline) {
-        await sleep(pollIntervalMs);
+			while (Date.now() < deadline) {
+				await sleep(pollIntervalMs);
 
-        // Early exit if outputs are already present
-        if (step.outputs && step.outputs.length > 0) {
-          outputCheck = await checkOutputs(step.outputs, baseDir);
-          if (outputCheck.passed) {
-            finalStatus = 'ok';
-            break;
-          }
-        }
+				// Early exit if outputs are already present
+				if (step.outputs && step.outputs.length > 0) {
+					outputCheck = await checkOutputs(step.outputs, baseDir);
+					if (outputCheck.passed) {
+						finalStatus = "ok";
+						break;
+					}
+				}
 
-        const statusResult = await adapter.getStatus(spawnResult.sessionId);
-        if (statusResult.status === 'done') { finalStatus = 'ok'; break; }
-        if (statusResult.status === 'error') {
-          finalStatus = 'failed';
-          errorMsg = statusResult.error || 'Session error';
-          break;
-        }
-      }
+				const statusResult = await adapter.getStatus(spawnResult.sessionId);
+				if (statusResult.status === "done") {
+					finalStatus = "ok";
+					break;
+				}
+				if (statusResult.status === "error") {
+					finalStatus = "failed";
+					errorMsg = statusResult.error || "Session error";
+					break;
+				}
+			}
 
-      if (finalStatus === 'ok' || finalStatus === null) {
-        outputCheck = await checkOutputs(step.outputs, baseDir);
-      }
+			if (finalStatus === "ok" || finalStatus === null) {
+				outputCheck = await checkOutputs(step.outputs, baseDir);
+			}
 
-      if (finalStatus === null) {
-        const hasOutputs = step.outputs && step.outputs.length > 0;
-        if (hasOutputs && outputCheck.passed) {
-          finalStatus = 'ok';
-        } else {
-          finalStatus = 'failed';
-          errorMsg = `Step timed out after ${step.timeout}s`;
-        }
-      } else if (finalStatus === 'ok' && !outputCheck.passed) {
-        finalStatus = 'failed';
-        errorMsg = `Output gate failed — missing: ${outputCheck.missing_files.join(', ')}`;
-      }
+			if (finalStatus === null) {
+				const hasOutputs = step.outputs && step.outputs.length > 0;
+				if (hasOutputs && outputCheck.passed) {
+					finalStatus = "ok";
+				} else {
+					finalStatus = "failed";
+					errorMsg = `Step timed out after ${step.timeout}s`;
+				}
+			} else if (finalStatus === "ok" && !outputCheck.passed) {
+				finalStatus = "failed";
+				errorMsg = `Output gate failed — missing: ${outputCheck.missing_files.join(", ")}`;
+			}
 
-      return { status: finalStatus, session_key: sessionKey, output_check: outputCheck, error: errorMsg, duration_ms: Date.now() - startTime };
-    } catch (err) {
-      return { status: 'failed', session_key: sessionKey, output_check: { passed: false, missing_files: [], checked_files: [] }, error: err.message, duration_ms: Date.now() - startTime };
-    }
-  };
+			return {
+				status: finalStatus,
+				session_key: sessionKey,
+				output_check: outputCheck,
+				error: errorMsg,
+				duration_ms: Date.now() - startTime,
+			};
+		} catch (err) {
+			return {
+				status: "failed",
+				session_key: sessionKey,
+				output_check: { passed: false, missing_files: [], checked_files: [] },
+				error: err.message,
+				duration_ms: Date.now() - startTime,
+			};
+		}
+	};
 }
