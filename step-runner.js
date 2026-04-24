@@ -170,10 +170,12 @@ explicitly indicates an error.
 /**
  * @typedef {Object} StepRunResult
  * @property {'ok'|'failed'}   status       - Outcome of this attempt
- * @property {string|null}     session_key  - Session identifier (for logs/debugging)
- * @property {OutputCheckResult} output_check - Output file validation result
- * @property {string|null}     error        - Error message if failed
- * @property {number}          duration_ms  - Wall-clock time for this attempt
+  * @property {string|null}     session_key  - Session identifier (for logs/debugging)
+  * @property {OutputCheckResult} output_check - Output file validation result
+  * @property {string|null}     error        - Error message if failed
+  * @property {string|null}     logs         - Debug logs/output from the session
+  * @property {number}          duration_ms  - Wall-clock time for this attempt
+
  */
 
 /**
@@ -230,9 +232,11 @@ export async function runStep(step, runId, api, options) {
     const timeoutMs = step.timeout * 1000;
     const deadline = Date.now() + timeoutMs;
 
-    let finalStatus = null;
-    let errorMsg = null;
-    let outputCheck = { passed: false, missing_files: [], checked_files: [] };
+     let finalStatus = null;
+     let errorMsg = null;
+     let logs = null;
+     let outputCheck = { passed: false, missing_files: [], checked_files: [] };
+
 
     while (Date.now() < deadline) {
       await sleep(pollIntervalMs);
@@ -246,17 +250,20 @@ export async function runStep(step, runId, api, options) {
         }
       }
 
-      const statusResult = await adapter.getStatus(spawnResult.sessionId);
+       const statusResult = await adapter.getStatus(spawnResult.sessionId);
+ 
+       if (statusResult.status === 'done') {
+         finalStatus = 'ok';
+         logs = statusResult.logs;
+         break;
+       }
+       if (statusResult.status === 'error') {
+         finalStatus = 'failed';
+         errorMsg = statusResult.error || 'Step session exited with error';
+         logs = statusResult.logs;
+         break;
+       }
 
-      if (statusResult.status === 'done') {
-        finalStatus = 'ok';
-        break;
-      }
-      if (statusResult.status === 'error') {
-        finalStatus = 'failed';
-        errorMsg = statusResult.error || 'Step session exited with error';
-        break;
-      }
       // status === 'running' — keep polling
     }
 
@@ -282,24 +289,28 @@ export async function runStep(step, runId, api, options) {
       errorMsg = `Output gate failed — missing files: ${outputCheck.missing_files.join(', ')}`;
     }
 
-    return {
-      status: finalStatus,
-      session_key: sessionKey,
-      output_check: outputCheck,
-      error: errorMsg,
-      duration_ms: Date.now() - startTime,
-    };
+     return {
+       status: finalStatus,
+       session_key: sessionKey,
+       output_check: outputCheck,
+       error: errorMsg,
+       logs: logs,
+       duration_ms: Date.now() - startTime,
+     };
 
-  } catch (err) {
-    // Spawn itself failed (session system unavailable, etc.)
-    return {
-      status: 'failed',
-      session_key: sessionKey,
-      output_check: { passed: false, missing_files: [], checked_files: [] },
-      error: err.message,
-      duration_ms: Date.now() - startTime,
-    };
-  }
+
+     } catch (err) {
+       // Spawn itself failed (session system unavailable, etc.)
+       return {
+         status: 'failed',
+         session_key: sessionKey,
+         output_check: { passed: false, missing_files: [], checked_files: [] },
+         error: err.message,
+         logs: null,
+         duration_ms: Date.now() - startTime,
+       };
+     }
+
 }
 
 /**
@@ -356,9 +367,15 @@ class ApiAdapter {
    * @param {string} sessionId - Session ID returned by spawn()
    * @returns {Promise<{ status: string, error?: string }>}
    */
-  async getStatus(sessionId) {
-    return await this.sessions.getStatus(sessionId);
-  }
+   async getStatus(sessionId) {
+     const status = await this.sessions.getStatus(sessionId);
+     return {
+       status: status.status === 'done' ? 'done' : status.status,
+       error: status.error,
+       logs: status.logs,
+     };
+   }
+
 }
 
 /**
@@ -458,15 +475,17 @@ export class CliAdapter {
       if (!lines.length) return { status: 'running' };
 
       // JSONL — take the last line
-      const entry = JSON.parse(lines[lines.length - 1]);
-      if (entry.action === 'finished') {
-        // Clean up the cron job (best-effort — may already be deleted if --delete-after-run)
-        this.executor(['cron', 'remove', jobId]).catch(() => {});
-        return entry.status === 'ok'
-          ? { status: 'done' }
-          : { status: 'error', error: entry.error || entry.summary || 'Step failed' };
-      }
-      return { status: 'running' };
+       const entry = JSON.parse(lines[lines.length - 1]);
+       const logs = entry.logs || entry.stdout || entry.stderr || null;
+       if (entry.action === 'finished') {
+         // Clean up the cron job (best-effort — may already be deleted if --delete-after-run)
+         this.executor(['cron', 'remove', jobId]).catch(() => {});
+         return entry.status === 'ok'
+           ? { status: 'done', logs }
+           : { status: 'error', error: entry.error || entry.summary || 'Step failed', logs };
+       }
+       return { status: 'running', logs };
+
     } catch (err) {
       // If the job no longer exists (deleted after run), treat as done
       if (err.message.includes('not found') || err.message.includes('404')) {

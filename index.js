@@ -257,16 +257,18 @@ export default function (api) {
 
         // Build a human-friendly summary
         const stepSummary = {};
-        for (const [stepId, stepState] of Object.entries(state.steps)) {
-          stepSummary[stepId] = {
-            status: stepState.status,
-            attempts: stepState.attempts,
-            duration_s: stepState.duration_ms ? Math.round(stepState.duration_ms / 1000) : null,
-            error: stepState.error,
-            started_at: stepState.started_at,
-            completed_at: stepState.completed_at,
-          };
-        }
+         for (const [stepId, stepState] of Object.entries(state.steps)) {
+           stepSummary[stepId] = {
+             status: stepState.status,
+             attempts: stepState.attempts,
+             duration_s: stepState.duration_ms ? Math.round(stepState.duration_ms / 1000) : null,
+             error: stepState.error,
+             logs: stepState.logs,
+             started_at: stepState.started_at,
+             completed_at: stepState.completed_at,
+           };
+         }
+
 
         // Calculate elapsed time
         const elapsedMs = state.started_at

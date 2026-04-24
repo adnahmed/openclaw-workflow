@@ -230,17 +230,19 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
       const durationMs = result.duration_ms ||
         (startedAt ? Date.now() - new Date(startedAt).getTime() : 0);
 
-      if (result.status === 'ok') {
-        // Success path
-        state = await updateStepState(state, step.id, {
-          status: 'ok',
-          completed_at: completedAt,
-          duration_ms: durationMs,
-          session_key: result.session_key,
-          output_check: result.output_check,
-          error: null,
-          attempts,
-        }, runsDir);
+       if (result.status === 'ok') {
+         // Success path
+         state = await updateStepState(state, step.id, {
+           status: 'ok',
+           completed_at: completedAt,
+           duration_ms: durationMs,
+           session_key: result.session_key,
+           output_check: result.output_check,
+           error: null,
+           logs: result.logs,
+           attempts,
+         }, runsDir);
+
 
         const durationSec = Math.round(durationMs / 1000);
         await notify(`✅ ${step.name} complete (${durationSec}s)`);
@@ -256,11 +258,13 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
           await notify(`❌ ${step.name} failed — retrying (attempt ${nextAttempt}/${maxAttempts})`);
 
           // Mark as pending again so the scheduler will re-launch
-          state = await updateStepState(state, step.id, {
-            status: 'pending',
-            error: result.error,
-            attempts, // keep the attempt count so we know we've retried
-          }, runsDir);
+           state = await updateStepState(state, step.id, {
+             status: 'pending',
+             error: result.error,
+             logs: result.logs,
+             attempts, // keep the attempt count so we know we've retried
+           }, runsDir);
+
 
           // Schedule re-launch after retry_delay seconds
           // We use a flag on the step state to signal "ready to retry"
@@ -276,17 +280,19 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
           // 'pending' and re-launch it. But we need to ensure the attempts
           // counter is preserved. We handle this by storing attempts in state.
 
-        } else {
-          // All retries exhausted — mark as failed
-          state = await updateStepState(state, step.id, {
-            status: 'failed',
-            completed_at: completedAt,
-            duration_ms: durationMs,
-            session_key: result.session_key,
-            output_check: result.output_check,
-            error: result.error,
-            attempts,
-          }, runsDir);
+         } else {
+           // All retries exhausted — mark as failed
+           state = await updateStepState(state, step.id, {
+             status: 'failed',
+             completed_at: completedAt,
+             duration_ms: durationMs,
+             session_key: result.session_key,
+             output_check: result.output_check,
+             error: result.error,
+             logs: result.logs,
+             attempts,
+           }, runsDir);
+
 
           const wasRetried = step.retry > 0;
           if (wasRetried) {
