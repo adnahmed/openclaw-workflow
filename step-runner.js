@@ -250,18 +250,21 @@ export async function runStep(step, runId, api, options) {
       // status === 'running' — keep polling
     }
 
-    if (finalStatus === null) {
-      // Deadline exceeded without completing
-      finalStatus = 'failed';
-      errorMsg = `Step timed out after ${step.timeout}s`;
-    }
-
     // Check output files regardless of session status
-    // (a step might partially succeed — useful to know which files were written)
     const outputCheck = await checkOutputs(step.outputs, baseDir);
 
-    // If session said OK but output gate failed, treat as failure
-    if (finalStatus === 'ok' && !outputCheck.passed) {
+    if (finalStatus === null) {
+      // Deadline exceeded without completing.
+      // Rescue: if outputs are defined and all present, mark as ok.
+      const hasOutputs = step.outputs && step.outputs.length > 0;
+      if (hasOutputs && outputCheck.passed) {
+        finalStatus = 'ok';
+      } else {
+        finalStatus = 'failed';
+        errorMsg = `Step timed out after ${step.timeout}s`;
+      }
+    } else if (finalStatus === 'ok' && !outputCheck.passed) {
+      // If session said OK but output gate failed, treat as failure
       finalStatus = 'failed';
       errorMsg = `Output gate failed — missing files: ${outputCheck.missing_files.join(', ')}`;
     }
@@ -550,14 +553,17 @@ export function createStepRunner(adapter) {
         }
       }
 
-      if (finalStatus === null) {
-        finalStatus = 'failed';
-        errorMsg = `Step timed out after ${step.timeout}s`;
-      }
-
       const outputCheck = await checkOutputs(step.outputs, baseDir);
 
-      if (finalStatus === 'ok' && !outputCheck.passed) {
+      if (finalStatus === null) {
+        const hasOutputs = step.outputs && step.outputs.length > 0;
+        if (hasOutputs && outputCheck.passed) {
+          finalStatus = 'ok';
+        } else {
+          finalStatus = 'failed';
+          errorMsg = `Step timed out after ${step.timeout}s`;
+        }
+      } else if (finalStatus === 'ok' && !outputCheck.passed) {
         finalStatus = 'failed';
         errorMsg = `Output gate failed — missing: ${outputCheck.missing_files.join(', ')}`;
       }
