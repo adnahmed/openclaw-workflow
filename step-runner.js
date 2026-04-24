@@ -232,9 +232,19 @@ export async function runStep(step, runId, api, options) {
 
     let finalStatus = null;
     let errorMsg = null;
+    let outputCheck = { passed: false, missing_files: [], checked_files: [] };
 
     while (Date.now() < deadline) {
       await sleep(pollIntervalMs);
+
+      // Early exit if outputs are already present (fast-path signal)
+      if (step.outputs && step.outputs.length > 0) {
+        outputCheck = await checkOutputs(step.outputs, baseDir);
+        if (outputCheck.passed) {
+          finalStatus = 'ok';
+          break;
+        }
+      }
 
       const statusResult = await adapter.getStatus(spawnResult.sessionId);
 
@@ -250,8 +260,11 @@ export async function runStep(step, runId, api, options) {
       // status === 'running' — keep polling
     }
 
-    // Check output files regardless of session status
-    const outputCheck = await checkOutputs(step.outputs, baseDir);
+    // Final verification: if the session claimed completion (or we broke early),
+    // ensure the output gate is actually satisfied.
+    if (finalStatus === 'ok' || finalStatus === null) {
+      outputCheck = await checkOutputs(step.outputs, baseDir);
+    }
 
     if (finalStatus === null) {
       // Deadline exceeded without completing.
@@ -541,9 +554,20 @@ export function createStepRunner(adapter) {
       const deadline = Date.now() + timeoutMs;
       let finalStatus = null;
       let errorMsg = null;
+      let outputCheck = { passed: false, missing_files: [], checked_files: [] };
 
       while (Date.now() < deadline) {
         await sleep(pollIntervalMs);
+
+        // Early exit if outputs are already present
+        if (step.outputs && step.outputs.length > 0) {
+          outputCheck = await checkOutputs(step.outputs, baseDir);
+          if (outputCheck.passed) {
+            finalStatus = 'ok';
+            break;
+          }
+        }
+
         const statusResult = await adapter.getStatus(spawnResult.sessionId);
         if (statusResult.status === 'done') { finalStatus = 'ok'; break; }
         if (statusResult.status === 'error') {
@@ -553,7 +577,9 @@ export function createStepRunner(adapter) {
         }
       }
 
-      const outputCheck = await checkOutputs(step.outputs, baseDir);
+      if (finalStatus === 'ok' || finalStatus === null) {
+        outputCheck = await checkOutputs(step.outputs, baseDir);
+      }
 
       if (finalStatus === null) {
         const hasOutputs = step.outputs && step.outputs.length > 0;
