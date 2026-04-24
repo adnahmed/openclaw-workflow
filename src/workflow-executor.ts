@@ -62,6 +62,10 @@ const TICK_INTERVAL_MS = 500;
  * @property {'none'|'announce'} [cronDeliveryMode] - Delivery mode for cron jobs
  * @property {string}   [cronDeliveryChannel] - Delivery channel for cron jobs
  * @property {string}   [cronDeliveryTo] - Delivery target for cron jobs
+ * @property {number}   [cliTimeoutMs] - General CLI timeout (ms)
+ * @property {number}   [cronAddTimeoutMs] - Timeout for cron add (ms)
+ * @property {number}   [cronRunTimeoutMs] - Timeout for cron run (ms)
+ * @property {number}   [cronPollTimeoutMs] - Timeout for cron poll (ms)
  */
 
 /**
@@ -103,6 +107,10 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
     cronDeliveryMode = 'none',
     cronDeliveryChannel,
     cronDeliveryTo,
+    cliTimeoutMs,
+    cronAddTimeoutMs,
+    cronRunTimeoutMs,
+    cronPollTimeoutMs,
   } = config;
 
 
@@ -261,14 +269,18 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
       try {
         let result;
         try {
-        result = await stepRunner(step, runId, api, {
-          pollIntervalMs,
-          baseDir,
-          defaultModel,
-          cronDeliveryMode,
-          cronDeliveryChannel,
-          cronDeliveryTo,
-        });
+         result = await stepRunner(step, runId, api, {
+           pollIntervalMs,
+           baseDir,
+           defaultModel,
+           cronDeliveryMode,
+           cronDeliveryChannel,
+           cronDeliveryTo,
+           cliTimeoutMs,
+           cronAddTimeoutMs,
+           cronRunTimeoutMs,
+           cronPollTimeoutMs,
+         });
         } catch (err) {
           result = {
             status: 'failed',

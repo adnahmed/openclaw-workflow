@@ -37,8 +37,8 @@
  */
 
 import { exec, spawn } from "node:child_process";
-import path from "node:path";
 import fs from "node:fs";
+import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
@@ -55,7 +55,7 @@ let cachedOpenClawPath = null;
  * @returns {Promise<{ stdout: string, stderr: string }>}
  */
 async function runOpenClaw(args, options = {}) {
-	const { timeout = 30000 } = options;
+	const { timeout = 120000 } = options;
 
 	if (!cachedOpenClawPath) {
 		try {
@@ -79,8 +79,19 @@ async function runOpenClaw(args, options = {}) {
 
 			const realPath = fs.realpathSync(wrapperPath);
 			const searchPaths = [
-				path.join(path.dirname(realPath), "node_modules", "openclaw", "openclaw.mjs"),
-				path.join(path.dirname(realPath), "..", "node_modules", "openclaw", "openclaw.mjs"),
+				path.join(
+					path.dirname(realPath),
+					"node_modules",
+					"openclaw",
+					"openclaw.mjs",
+				),
+				path.join(
+					path.dirname(realPath),
+					"..",
+					"node_modules",
+					"openclaw",
+					"openclaw.mjs",
+				),
 				path.join(
 					path.dirname(realPath),
 					"..",
@@ -100,12 +111,16 @@ async function runOpenClaw(args, options = {}) {
 			}
 
 			if (!mjsPath) {
-				throw new Error(`Could not locate openclaw.mjs relative to ${realPath}`);
+				throw new Error(
+					`Could not locate openclaw.mjs relative to ${realPath}`,
+				);
 			}
 
 			cachedOpenClawPath = mjsPath;
 		} catch (err) {
-			throw new Error(`Could not find openclaw executable in PATH: ${err.message}`);
+			throw new Error(
+				`Could not find openclaw executable in PATH: ${err.message}`,
+			);
 		}
 	}
 
@@ -187,6 +202,10 @@ explicitly indicates an error.
  * @property {'none'|'announce'} [cronDeliveryMode] - Delivery mode for cron jobs
  * @property {string}   [cronDeliveryChannel] - Delivery channel for cron jobs
  * @property {string}   [cronDeliveryTo] - Delivery target for cron jobs
+ * @property {number}   [cliTimeoutMs] - General CLI timeout (ms)
+ * @property {number}   [cronAddTimeoutMs] - Timeout for cron add (ms)
+ * @property {number}   [cronRunTimeoutMs] - Timeout for cron run (ms)
+ * @property {number}   [cronPollTimeoutMs] - Timeout for cron poll (ms)
  */
 
 /**
@@ -229,11 +248,14 @@ export async function runStep(step, runId, api, options) {
 		pollIntervalMs = 5000,
 		baseDir = process.cwd(),
 		defaultModel,
-		cronDeliveryMode = 'none',
+		cronDeliveryMode = "none",
 		cronDeliveryChannel,
 		cronDeliveryTo,
+		cliTimeoutMs,
+		cronAddTimeoutMs,
+		cronRunTimeoutMs,
+		cronPollTimeoutMs,
 	} = options;
-
 
 	const startTime = Date.now();
 
@@ -258,6 +280,10 @@ export async function runStep(step, runId, api, options) {
 			cronDeliveryMode,
 			cronDeliveryChannel,
 			cronDeliveryTo,
+			cliTimeoutMs,
+			cronAddTimeoutMs,
+			cronRunTimeoutMs,
+			cronPollTimeoutMs,
 		});
 		sessionKey = spawnResult.sessionKey;
 
@@ -405,7 +431,7 @@ class ApiAdapter {
 	 * @param {string} sessionId - Session ID returned by spawn()
 	 * @returns {Promise<{ status: string, error?: string }>}
 	 */
-	async getStatus(sessionId) {
+	async getStatus(sessionId, options) {
 		const status = await this.sessions.getStatus(sessionId);
 		return {
 			status: status.status === "done" ? "done" : status.status,
@@ -423,10 +449,10 @@ class ApiAdapter {
  * ## Approach
  * Since `openclaw sessions spawn` is not exposed as a CLI command, this adapter
  * uses the cron subsystem as a session-spawning mechanism:
- *   1. `openclaw cron add --at 5s --session isolated --message "..." --json`
+ *   1. `openclaw cron add --at 5s --session isolated --message "..."`
  *      creates a one-shot job and returns its job ID.
  *   2. `openclaw cron run <id>` triggers it immediately.
- *   3. `openclaw cron runs --id <id> --json` polls for the run result.
+ *   3. `openclaw cron runs --id <id>` polls for the run result.
  *   4. `openclaw cron remove <id>` cleans up after completion.
  *
  * The spawn() call returns immediately with the cron job ID as the sessionId.
@@ -499,6 +525,11 @@ export class CliAdapter {
 	 */
 	async spawn(prompt, options) {
 		this._jobs = this._jobs || new Map();
+		const {
+			cliTimeoutMs = 120000,
+			cronAddTimeoutMs = 120000,
+			cronRunTimeoutMs = 60000,
+		} = options;
 
 		const args = [
 			"cron",
@@ -510,10 +541,9 @@ export class CliAdapter {
 			"--message",
 			prompt,
 			"--delete-after-run",
-			"--json",
 		];
 
-		if (options.cronDeliveryMode === 'announce') {
+		if (options.cronDeliveryMode === "announce") {
 			args.push("--announce");
 			args.push("--channel", options.cronDeliveryChannel || "discord");
 			if (options.cronDeliveryTo) {
@@ -537,7 +567,9 @@ export class CliAdapter {
 
 		let jobId;
 		try {
-			const { stdout } = await this.executor(args, { timeout: 30000 });
+			const { stdout } = await this.executor(args, {
+				timeout: cronAddTimeoutMs,
+			});
 			const parsed = JSON.parse(stdout.trim());
 			jobId = parsed.id || parsed.job?.id;
 			if (!jobId) throw new Error(`Unexpected cron add output: ${stdout}`);
@@ -547,7 +579,9 @@ export class CliAdapter {
 
 		// Trigger the job immediately
 		try {
-			await this.executor(["cron", "run", jobId], { timeout: 10000 });
+			await this.executor(["cron", "run", jobId], {
+				timeout: cronRunTimeoutMs,
+			});
 		} catch (err) {
 			// Non-fatal — the job may already be queued to run in 5s
 		}
@@ -560,14 +594,16 @@ export class CliAdapter {
 	 * Poll the cron run history to check if the one-shot job has completed.
 	 *
 	 * @param {string} sessionId - The cron job ID returned by spawn()
+	 * @param {Object} [options] - Options including cronPollTimeoutMs
 	 * @returns {Promise<{ status: string, error?: string }>}
 	 */
-	async getStatus(sessionId) {
+	async getStatus(sessionId, options = {}) {
+		const { cronPollTimeoutMs = 60000 } = options;
 		const jobId = sessionId;
 		try {
 			const { stdout, stderr } = await this.executor(
-				["cron", "runs", "--id", jobId, "--limit", "5", "--json"],
-				{ timeout: 15000 },
+				["cron", "runs", "--id", jobId, "--limit", "5"],
+				{ timeout: cronPollTimeoutMs },
 			);
 
 			const entries = parseCronRunsOutput(`${stdout}\n${stderr}`);
@@ -577,7 +613,9 @@ export class CliAdapter {
 			}
 
 			const matching = entries.filter((entry) => {
-				return entry.jobId === jobId || entry.id === jobId || entry.job_id === jobId;
+				return (
+					entry.jobId === jobId || entry.id === jobId || entry.job_id === jobId
+				);
 			});
 
 			const entry = matching.at(-1) || entries.at(-1);
@@ -587,11 +625,7 @@ export class CliAdapter {
 			}
 
 			const logs =
-				entry.logs ||
-				entry.stdout ||
-				entry.stderr ||
-				entry.summary ||
-				null;
+				entry.logs || entry.stdout || entry.stderr || entry.summary || null;
 
 			const isFinished =
 				entry.action === "finished" ||
@@ -721,7 +755,10 @@ export function createStepRunner(adapter) {
 					}
 				}
 
-				const statusResult = await adapter.getStatus(spawnResult.sessionId);
+				const statusResult = await adapter.getStatus(
+					spawnResult.sessionId,
+					options,
+				);
 				if (statusResult.status === "done") {
 					finalStatus = "ok";
 					break;

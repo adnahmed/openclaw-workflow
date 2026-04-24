@@ -17,6 +17,10 @@ type RawPluginConfig = {
   cronDeliveryMode?: 'none' | 'announce';
   cronDeliveryChannel?: string;
   cronDeliveryTo?: string;
+  cliTimeoutMs?: number;
+  cronAddTimeoutMs?: number;
+  cronRunTimeoutMs?: number;
+  cronPollTimeoutMs?: number;
 };
 
 type RuntimeConfig = {
@@ -57,5 +61,9 @@ export function normalizePluginConfig(rawConfig: RawPluginConfig = {}, runtime: 
     cronDeliveryMode: rawConfig.cronDeliveryMode || 'none',
     cronDeliveryChannel: rawConfig.cronDeliveryChannel || null,
     cronDeliveryTo: rawConfig.cronDeliveryTo || null,
+    cliTimeoutMs: rawConfig.cliTimeoutMs ?? 120000,
+    cronAddTimeoutMs: rawConfig.cronAddTimeoutMs ?? 120000,
+    cronRunTimeoutMs: rawConfig.cronRunTimeoutMs ?? 60000,
+    cronPollTimeoutMs: rawConfig.cronPollTimeoutMs ?? 60000,
   };
 }
