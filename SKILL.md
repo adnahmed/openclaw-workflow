@@ -32,7 +32,7 @@ Use these tools directly when appropriate:
 - `workflow_run({ name: "<workflow>" })` — start execution
 - `workflow_run({ name: "<workflow>", resume: true })` — resume a prior run
 - `workflow_status({ name: "<workflow>" })` — inspect current/latest status
-- `workflow_cancel({ name: "<workflow>" })` — stop a running workflow
+- `workflow_cancel({ run_id: "<run-id>" })` — stop a running workflow
 
 ## Preferred behavior
 
@@ -58,3 +58,21 @@ Assistant: call `workflow_run({ name: "deploy-pipeline", resume: true })`
 
 User: "Check status of hello"
 Assistant: call `workflow_status({ name: "hello" })`
+
+## Available tools
+
+IMPORTANT: These are OpenClaw plugin tools, not shell commands.
+
+Never execute `workflow`, `workflow run`, or `openclaw workflow` in a terminal for normal workflow requests.
+
+Use these tools directly:
+
+- `workflow_list()` — show available workflows
+- `workflow_run({ name: "<workflow>", dry_run: true })` — validate and preview execution
+- `workflow_run({ name: "<workflow>" })` — start execution
+- `workflow_run({ name: "<workflow>", resume: true })` — resume a prior run
+- `workflow_status({ name: "<workflow>" })` — inspect latest status by workflow name
+- `workflow_status({ run_id: "<run-id>" })` — inspect a specific run
+- `workflow_cancel({ run_id: "<run-id>" })` — cancel a running workflow
+
+If these tools are unavailable, report that the workflow plugin tools are not loaded. Do not invent a CLI fallback.

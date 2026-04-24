@@ -1,49 +1,89 @@
 {
   "id": "openclaw-workflow",
   "name": "Workflow Orchestrator",
-  "description": "YAML/JSON-driven multi-step workflow orchestration for OpenClaw agents. Supports parallel execution, dependency management, retry logic, output gates, and partial resume.",
+  "description": "YAML/JSON-driven workflow orchestration for OpenClaw agents with dependency graphs, parallel execution, retries, output gates, dry runs, cancellation, resume, and persisted run state.",
   "version": "1.0.0",
+  "contracts": {
+    "tools": [
+      "workflow_run",
+      "workflow_status",
+      "workflow_list",
+      "workflow_cancel"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "workflowsDir": {
         "type": "string",
-        "description": "Directory containing workflow definition files (YAML/JSON). Defaults to ~/.openclaw/workflows/"
+        "description": "Directory containing workflow definition files. Defaults to ~/.openclaw/workflows."
       },
       "runsDir": {
         "type": "string",
-        "description": "Directory where workflow run state files are stored. Defaults to ~/.openclaw/workflow-runs/"
+        "description": "Directory where workflow run state files are stored. Defaults to ~/.openclaw/workflow-runs."
       },
       "baseDir": {
         "type": "string",
-        "description": "Base directory for resolving relative output file paths in workflow steps. Defaults to process.cwd()."
+        "description": "Base directory for resolving relative output file paths. Defaults to the gateway working directory."
       },
       "concurrency": {
-        "type": "number",
-        "description": "Maximum number of steps that can run in parallel within a single workflow. Default: 3."
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10,
+        "description": "Maximum number of workflow steps that can run in parallel. Defaults to 3."
       },
       "notifyChannel": {
         "type": "string",
-        "description": "Channel ID or name to send step completion notifications. If omitted, notifications are suppressed."
+        "description": "Channel ID or name for workflow progress notifications. If omitted, notifications are logged only."
       },
       "sessionModel": {
         "type": "string",
-        "description": "Default model to use for spawned step sessions when a step doesn't specify its own model. Defaults to the OpenClaw default model."
+        "description": "Default model for spawned step sessions when a step does not specify its own model."
       },
       "pollIntervalMs": {
-        "type": "number",
-        "description": "How often (in milliseconds) to poll session status for running steps. Default: 5000."
+        "type": "integer",
+        "minimum": 250,
+        "description": "How often to poll step session status in milliseconds. Defaults to 5000."
       }
     }
   },
   "uiHints": {
-    "workflowsDir": { "label": "Workflows Directory", "placeholder": "~/.openclaw/workflows/" },
-    "runsDir": { "label": "Runs State Directory", "placeholder": "~/.openclaw/workflow-runs/" },
-    "baseDir": { "label": "Base Directory for Output Paths", "placeholder": "/home/user/projects/myapp" },
-    "concurrency": { "label": "Max Parallel Steps", "placeholder": "3" },
-    "notifyChannel": { "label": "Notification Channel", "placeholder": "telegram" },
-    "sessionModel": { "label": "Default Step Model", "placeholder": "anthropic/claude-sonnet-4-6" },
-    "pollIntervalMs": { "label": "Poll Interval (ms)", "placeholder": "5000" }
+    "workflowsDir": {
+      "label": "Workflows directory",
+      "help": "Folder containing .yml, .yaml, and .json workflow definitions.",
+      "placeholder": "~/.openclaw/workflows"
+    },
+    "runsDir": {
+      "label": "Run state directory",
+      "help": "Folder where workflow run JSON state files are written.",
+      "placeholder": "~/.openclaw/workflow-runs"
+    },
+    "baseDir": {
+      "label": "Base directory",
+      "help": "Relative output paths in workflow steps are resolved under this directory.",
+      "placeholder": "/home/user/project"
+    },
+    "concurrency": {
+      "label": "Max parallel steps",
+      "help": "Per-workflow concurrency cap from 1 to 10.",
+      "placeholder": "3"
+    },
+    "notifyChannel": {
+      "label": "Notification channel",
+      "help": "Optional channel for workflow progress messages.",
+      "placeholder": "telegram"
+    },
+    "sessionModel": {
+      "label": "Default step model",
+      "help": "Used by steps that do not declare their own model.",
+      "placeholder": "anthropic/claude-sonnet-4-6"
+    },
+    "pollIntervalMs": {
+      "label": "Poll interval",
+      "help": "Milliseconds between status checks for running step sessions.",
+      "placeholder": "5000",
+      "advanced": true
+    }
   }
 }

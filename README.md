@@ -22,38 +22,50 @@ Developers work around this with shell scripts, manual timing, and fragile cron 
 ## Installation
 
 ```bash
-# From npm (once published)
-cd ~/.openclaw/extensions
-npm install openclaw-workflow
-
-# From source (development)
-git clone https://github.com/openclaw/openclaw.git
-cd openclaw/plugins/openclaw-workflow
+# Local development
 npm install
-# Then symlink or copy to ~/.openclaw/extensions/openclaw-workflow/
+npm run build
+openclaw plugins install -l . --dangerously-force-unsafe-install
+
+# From npm once published
+openclaw plugins install openclaw-workflow --dangerously-force-unsafe-install
 ```
+
+`--dangerously-force-unsafe-install` is currently required because the plugin intentionally imports `node:child_process` for the CLI session fallback used when OpenClaw does not expose a stable native session API to plugins.
 
 Configure the plugin in your OpenClaw settings:
 
 ```json
 {
-  "openclaw-workflow": {
-    "workflowsDir": "~/.openclaw/workflows",
-    "runsDir": "~/.openclaw/workflow-runs",
-    "baseDir": "/home/user/myproject",
-    "concurrency": 3,
-    "notifyChannel": "telegram",
-    "sessionModel": "anthropic/claude-sonnet-4-6",
-    "pollIntervalMs": 5000
+  "plugins": {
+    "entries": {
+      "openclaw-workflow": {
+        "enabled": true,
+        "config": {
+          "workflowsDir": "~/.openclaw/workflows",
+          "runsDir": "~/.openclaw/workflow-runs",
+          "baseDir": "/home/user/myproject",
+          "concurrency": 3,
+          "notifyChannel": "telegram",
+          "sessionModel": "anthropic/claude-sonnet-4-6",
+          "pollIntervalMs": 5000
+        }
+      }
+    }
   }
 }
 ```
 
-Create your workflows directory:
+Create your workflows directory and restart/verify the gateway:
 
 ```bash
 mkdir -p ~/.openclaw/workflows
+openclaw plugins list --verbose
+openclaw plugins inspect openclaw-workflow --json
+openclaw plugins doctor
 ```
+
+On Windows/WSL-mounted directories, OpenClaw may block linked plugins when the source path is reported as world-writable (`mode=777`). Move or copy the plugin to a non-world-writable path if inspection says the plugin candidate was blocked.
 
 ---
 
@@ -164,6 +176,8 @@ outputs:
 ### `workflow_run`
 
 Start a workflow execution.
+
+This is registered as an optional tool because it starts background agent work and writes run state. Enable optional tools in the OpenClaw tool UI/config when you want agents to launch workflows.
 
 **Input:**
 ```json
@@ -307,6 +321,8 @@ List all available workflows and their last run status.
 
 Cancel a running workflow. In-flight steps finish; no new steps start.
 
+This is registered as an optional tool because it modifies persisted run state.
+
 **Input:**
 ```json
 { "run_id": "seo-pipeline-20260309T082000" }
@@ -432,34 +448,36 @@ Parallel fetch (primary + reference), then validate, transform, load, report. De
 ## Development & Testing
 
 ```bash
-cd ~/.openclaw/extensions/openclaw-workflow
 npm install
-
-# Run the full test suite
-node --test tests/
-
-# Run a specific test file
-node --test tests/workflow-loader.test.js
-
-# Watch mode
-node --test --watch tests/
+npm run typecheck
+npm run build
+npm test
+npm run check
 ```
 
-All tests use Node.js built-in `node:test` and `assert` — no external test dependencies.
+Tests use Node.js built-in `node:test` and mock step runners. They do not require a real OpenClaw CLI install unless you are doing the optional local plugin install smoke test.
 
 ---
 
-## PR Notes for OpenClaw Core Team
+## Operations and Security Notes
+
+- Workflows cause agents to perform real work. Review workflow YAML/JSON before enabling `workflow_run`.
+- Relative output paths are resolved under `baseDir`; set it to the workspace you expect agents to write into.
+- Each step can set its own `model` and `timeout`; otherwise the plugin-level `sessionModel` and default timeout are used.
+- If no stable native session runtime exists in the plugin API, `CliAdapter` falls back to the `openclaw` CLI and requires it in `PATH`.
+- The CLI fallback uses argument arrays and preserves the Windows `openclaw.ps1` wrapper case via PowerShell `-File`; workflow prompts are not shell-interpolated.
+
+---
+
+## Maintainer Notes
 
 ### Assumptions about OpenClaw internals
 
-1. **Plugin API shape**: Based on studying `openclaw-aegis-notes`, I assume `api.registerTool({ name, description, parameters, execute })` is the correct registration interface, with `execute(_agentId, params)` signature and MCP content response format.
+1. **Plugin API shape**: The entrypoint uses `definePluginEntry` from `openclaw/plugin-sdk/plugin-entry` and registers tools from `register(api)`.
 
-2. **`api.sessions` is not yet exposed**: The `step-runner.js` module has an `ApiAdapter` class designed for `api.sessions.spawn()` / `api.sessions.getStatus()`. Currently falls back to `CliAdapter` (runs `openclaw session run` as subprocess). **To enable native session spawning, OpenClaw needs to expose this API surface on the plugin `api` object.**
+2. **Native sessions**: `src/step-runner.ts` still has an `ApiAdapter` for `api.sessions.spawn()` / `api.sessions.getStatus()` if OpenClaw exposes that surface. Until then, the CLI fallback remains isolated behind the adapter.
 
-3. **Notifications via `console.log`**: Without access to the message-sending internals from within a plugin, notifications currently go to `console.log`. A proper `api.notify(channel, message)` method would be the right integration point.
-
-4. **`notifyChannel` config**: Currently used as a label in console output. Once `api.notify` is available, the plugin should call `api.notify(config.notifyChannel, message)`.
+3. **Notifications**: The plugin uses `api.notifications.send` if available and otherwise writes progress through `api.logger`.
 
 ### What OpenClaw should expose for full functionality
 
@@ -482,13 +500,13 @@ interface PluginApi {
 
 | File | Purpose |
 |------|---------|
-| `index.js` | Plugin entry: registers 4 tools |
-| `workflow-loader.js` | YAML/JSON parsing, validation, cycle detection |
-| `workflow-executor.js` | Core execution engine: scheduling, deps, retry, resume, dry run |
-| `workflow-state.js` | Atomic state file R/W, run listing |
-| `step-runner.js` | Session lifecycle: spawn, poll, output check. Includes MockAdapter |
-| `output-checker.js` | File existence validation for output gates |
-| `variable-substitution.js` | `{date}`, `{datetime}`, `{run_id}` substitution |
+| `src/index.ts` | Plugin entry: registers 4 tools |
+| `src/workflow-loader.ts` | YAML/JSON parsing, validation, cycle detection |
+| `src/workflow-executor.ts` | Core execution engine: scheduling, deps, retry, resume, dry run |
+| `src/workflow-state.ts` | Atomic state file R/W, run listing |
+| `src/step-runner.ts` | Session lifecycle: spawn, poll, output check. Includes MockAdapter |
+| `src/output-checker.ts` | File existence validation for output gates |
+| `src/variable-substitution.ts` | `{date}`, `{datetime}`, `{run_id}` substitution |
 | `openclaw.plugin.json` | Plugin manifest + config schema |
 | `package.json` | Package metadata |
 | `tests/*.test.js` | Full test suite (Node built-in test runner) |
@@ -501,7 +519,7 @@ interface PluginApi {
 
 1. Fork the [openclaw/openclaw](https://github.com/openclaw/openclaw) repository
 2. Copy this plugin to `plugins/openclaw-workflow/`
-3. Run `npm install && node --test tests/` to verify tests pass
+3. Run `npm install && npm run check` to verify tests pass
 4. Submit a PR with the title: `feat: add openclaw-workflow orchestration plugin`
 
 Please include test coverage for any new features or bug fixes.

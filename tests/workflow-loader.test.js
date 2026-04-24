@@ -7,26 +7,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeFile, rm, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { writeFile } from 'node:fs/promises';
 
-import { loadWorkflow, loadWorkflowFromFile, listWorkflows } from '../workflow-loader.js';
+import { loadWorkflow, loadWorkflowFromFile, listWorkflows } from '../dist/workflow-loader.js';
+import { withTempDir } from './temp-dir.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(__dirname, 'fixtures');
-
-// ── Helper ─────────────────────────────────────────────────────────────────
-
-async function withTempDir(fn) {
-  const dir = join(tmpdir(), `wf-test-${randomBytes(4).toString('hex')}`);
-  await mkdir(dir, { recursive: true });
-  try {
-    return await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
 
 // ── YAML fixture loading ───────────────────────────────────────────────────
 
@@ -65,7 +52,7 @@ test('loads retry-workflow.yml with retry config', async () => {
 // ── Default normalization ──────────────────────────────────────────────────
 
 test('normalizes missing optional fields to defaults', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'minimal.yml'), `
 name: Minimal Workflow
 steps:
@@ -89,7 +76,7 @@ steps:
 });
 
 test('step name defaults to id when not provided', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'wf.yml'), `
 name: Test
 steps:
@@ -102,7 +89,7 @@ steps:
 });
 
 test('concurrency is capped at 10', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'wf.yml'), `
 name: Test
 concurrency: 999
@@ -116,7 +103,7 @@ steps:
 });
 
 test('concurrency minimum is 1', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'wf.yml'), `
 name: Test
 concurrency: 0
@@ -132,7 +119,7 @@ steps:
 // ── JSON format ───────────────────────────────────────────────────────────
 
 test('loads workflow from JSON format', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     const workflow = {
       name: 'JSON Workflow',
       version: '1.0',
@@ -151,7 +138,7 @@ test('loads workflow from JSON format', async () => {
 // ── Validation errors ─────────────────────────────────────────────────────
 
 test('throws if workflow name is missing', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'bad.yml'), `
 steps:
   - id: step-1
@@ -165,7 +152,7 @@ steps:
 });
 
 test('throws if steps array is empty', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'empty.yml'), `
 name: Empty Workflow
 steps: []
@@ -178,7 +165,7 @@ steps: []
 });
 
 test('throws if step is missing id', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'bad.yml'), `
 name: Bad Workflow
 steps:
@@ -192,7 +179,7 @@ steps:
 });
 
 test('throws on duplicate step IDs', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'dup.yml'), `
 name: Dup IDs
 steps:
@@ -209,7 +196,7 @@ steps:
 });
 
 test('throws on unknown dependency reference', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'bad-dep.yml'), `
 name: Bad Dep
 steps:
@@ -227,7 +214,7 @@ steps:
 });
 
 test('throws on circular dependency A → B → A', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'cycle.yml'), `
 name: Circular
 steps:
@@ -246,7 +233,7 @@ steps:
 });
 
 test('throws on three-step cycle A → B → C → A', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'cycle3.yml'), `
 name: Three Cycle
 steps:
@@ -268,7 +255,7 @@ steps:
 });
 
 test('throws if step is missing task', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'notask.yml'), `
 name: No Task
 steps:
@@ -292,7 +279,7 @@ test('throws if workflow file not found', async () => {
 // ── YAML extension variants ────────────────────────────────────────────────
 
 test('loads .yaml extension', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     await writeFile(join(dir, 'wf.yaml'), `
 name: YAML Extension
 steps:
@@ -316,7 +303,7 @@ test('listWorkflows returns entries sorted by name', async () => {
 });
 
 test('listWorkflows returns empty array for empty dir', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-test', async (dir) => {
     const list = await listWorkflows(dir);
     assert.deepEqual(list, []);
   });

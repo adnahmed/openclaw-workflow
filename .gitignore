@@ -1,1 +1,5 @@
 node_modules/
+dist/
+.tmp-tests/
+.npm-cache/
+*.tgz

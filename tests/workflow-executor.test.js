@@ -11,29 +11,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rm, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
 
-import { executeWorkflow, resumeWorkflow, dryRun } from '../workflow-executor.js';
-import { MockAdapter, createStepRunner } from '../step-runner.js';
-import { loadWorkflow } from '../workflow-loader.js';
-import { createRunState, saveRunState } from '../workflow-state.js';
+import { executeWorkflow, resumeWorkflow, dryRun } from '../dist/workflow-executor.js';
+import { MockAdapter, createStepRunner } from '../dist/step-runner.js';
+import { loadWorkflow } from '../dist/workflow-loader.js';
+import { createRunState, saveRunState } from '../dist/workflow-state.js';
+import { withTempDir, testTempRoot } from './temp-dir.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(__dirname, 'fixtures');
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-async function withTempDir(fn) {
-  const dir = join(tmpdir(), `executor-test-${randomBytes(4).toString('hex')}`);
-  await mkdir(dir, { recursive: true });
-  try {
-    return await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
 
 /**
  * Build a mock config for executor tests.
@@ -54,7 +40,7 @@ function mockConfig(runsDir, overrides = {}) {
 // ── Linear pipeline (happy path) ───────────────────────────────────────────
 
 test('executes simple linear pipeline successfully', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     const wf = await loadWorkflow('simple-linear', FIXTURES_DIR);
     const adapter = new MockAdapter({ resolveIn: 50 });
     const runner = createStepRunner(adapter);
@@ -87,7 +73,7 @@ test('executes simple linear pipeline successfully', async () => {
 // ── Parallel execution ─────────────────────────────────────────────────────
 
 test('runs parallel steps concurrently', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     const wf = await loadWorkflow('parallel-steps', FIXTURES_DIR);
     const startTimes = {};
     const completeTimes = {};
@@ -117,7 +103,7 @@ test('runs parallel steps concurrently', async () => {
 // ── Optional step failure ──────────────────────────────────────────────────
 
 test('optional step failure does not fail the pipeline', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     const wf = await loadWorkflow('optional-step', FIXTURES_DIR);
 
     // Make optional-report always fail, main-task and final-step succeed
@@ -163,7 +149,7 @@ test('optional step failure does not fail the pipeline', async () => {
 // ── Non-optional step failure cascades ────────────────────────────────────
 
 test('non-optional failure cascades skip to dependents', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     const wf = await loadWorkflow('simple-linear', FIXTURES_DIR);
 
     // Make step-a fail
@@ -201,7 +187,7 @@ test('non-optional failure cascades skip to dependents', async () => {
 // ── Retry logic ────────────────────────────────────────────────────────────
 
 test('retries a failing step and succeeds on second attempt', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     const wf = await loadWorkflow('retry-workflow', FIXTURES_DIR);
 
     let flakyCallCount = 0;
@@ -257,7 +243,7 @@ test('retries a failing step and succeeds on second attempt', async () => {
 });
 
 test('marks step as failed after retry exhaustion', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     const wf = await loadWorkflow('retry-workflow', FIXTURES_DIR);
 
     // Always fail
@@ -286,7 +272,7 @@ test('marks step as failed after retry exhaustion', async () => {
 // ── Cancel mid-run ─────────────────────────────────────────────────────────
 
 test('workflow cancel stops launching new steps', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     const wf = await loadWorkflow('simple-linear', FIXTURES_DIR);
     const runId = 'cancel-run';
 
@@ -295,8 +281,8 @@ test('workflow cancel stops launching new steps', async () => {
     const runner = createStepRunner(adapter);
 
     // Cancel the run after 150ms (before step-b would launch)
-    const { updateRunState } = await import('../workflow-state.js');
-    const { createRunState, saveRunState } = await import('../workflow-state.js');
+    const { updateRunState } = await import('../dist/workflow-state.js');
+    const { createRunState, saveRunState } = await import('../dist/workflow-state.js');
 
     // Pre-create the run state so we can cancel it
     const initialState = createRunState(wf.name, wf.steps.map(s => s.id), runId);
@@ -305,7 +291,7 @@ test('workflow cancel stops launching new steps', async () => {
     // Schedule cancellation
     const cancelTimer = setTimeout(async () => {
       try {
-        const state = await import('../workflow-state.js').then(m => m.readRunState(runId, dir));
+        const state = await import('../dist/workflow-state.js').then(m => m.readRunState(runId, dir));
         await updateRunState(state, { status: 'cancelled', completed_at: new Date().toISOString() }, dir);
       } catch {}
     }, 150);
@@ -330,7 +316,7 @@ test('workflow cancel stops launching new steps', async () => {
 // ── Resume ────────────────────────────────────────────────────────────────
 
 test('resume skips already-ok steps', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     const wf = await loadWorkflow('resume-workflow', FIXTURES_DIR);
     const launchedStepIds = [];
 
@@ -433,7 +419,7 @@ test('dryRun substitutes variables in step tasks', () => {
 // ── Concurrency limit ─────────────────────────────────────────────────────
 
 test('respects concurrency limit', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('executor-test', async (dir) => {
     // Build a workflow with 5 independent steps and concurrency=2
     const wf = {
       name: 'Concurrency Test',
@@ -503,7 +489,7 @@ test('EXEC_POLL_PREAMBLE is prepended to step task before spawn', async (t) => {
     outputs: [],
   };
   const stepRunner = createStepRunner(capturingAdapter);
-  await stepRunner(step, 'run-test', {}, { pollIntervalMs: 10, baseDir: tmpdir() });
+  await stepRunner(step, 'run-test', {}, { pollIntervalMs: 10, baseDir: testTempRoot() });
 
   assert.ok(receivedPrompts.length === 1, 'spawn called once');
   assert.ok(

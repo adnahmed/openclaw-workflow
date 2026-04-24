@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * @module workflow-executor
  * @description The core workflow execution engine. Orchestrates step scheduling,
@@ -118,12 +119,25 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
   /** @type {Map<string, Promise<void>>} */
   const inFlight = new Map();
 
-  // Map of step ID → retry timer handle (so we can cancel on workflow cancel)
-  /** @type {Map<string, ReturnType<setTimeout>>} */
-  const retryTimers = new Map();
+  let cancelled = state.status === 'cancelled';
+
+  // Map of step ID -> retry waiter. Resolving the waiter lets cancellation
+  // drain in-flight promises without waiting for a long retry_delay.
+  const retryWaiters = new Map();
 
   // Step definitions keyed by ID for O(1) lookup
   const stepMap = new Map(steps.map(s => [s.id, s]));
+  let stateWriteQueue = Promise.resolve();
+
+  async function mutateState(mutator) {
+    let nextState;
+    stateWriteQueue = stateWriteQueue.then(async () => {
+      nextState = await mutator(state);
+      state = nextState;
+    });
+    await stateWriteQueue;
+    return nextState;
+  }
 
   /**
    * Determine if a step's dependencies are all satisfied.
@@ -185,8 +199,27 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
     }
 
     for (const stepId of toSkip) {
-      state = await updateStepState(state, stepId, { status: 'skipped' }, runsDir);
+      await mutateState(current => updateStepState(current, stepId, { status: 'skipped' }, runsDir));
     }
+  }
+
+  function clearRetryWaiters() {
+    cancelled = true;
+    for (const waiter of retryWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+    retryWaiters.clear();
+  }
+
+  async function waitForRetry(stepId, retryDelaySeconds) {
+    await new Promise(resolve => {
+      const timer = setTimeout(() => {
+        retryWaiters.delete(stepId);
+        resolve();
+      }, retryDelaySeconds * 1000);
+      retryWaiters.set(stepId, { timer, resolve });
+    });
   }
 
   /**
@@ -196,16 +229,20 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
    * @param {import('./workflow-loader.js').WorkflowStep} step
    */
   function launchStep(step) {
+    if (cancelled) return;
+
     // Increment attempts before launch
     const attempts = (state.steps[step.id]?.attempts || 0) + 1;
 
     // Mark as running immediately (synchronously update our local state snapshot)
     // We save this in the background — don't await here to avoid blocking the scheduler
-    updateStepState(state, step.id, {
+    mutateState(current => updateStepState(current, step.id, {
       status: 'running',
       started_at: new Date().toISOString(),
       attempts,
-    }, runsDir).then(newState => { state = newState; });
+    }, runsDir)).catch(err => {
+      api?.logger?.error?.(`[workflow:${runId}] failed to mark step running`, err);
+    });
 
     const promise = (async () => {
       let result;
@@ -232,7 +269,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
 
        if (result.status === 'ok') {
          // Success path
-         state = await updateStepState(state, step.id, {
+         await mutateState(current => updateStepState(current, step.id, {
            status: 'ok',
            completed_at: completedAt,
            duration_ms: durationMs,
@@ -241,7 +278,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
            error: null,
            logs: result.logs,
            attempts,
-         }, runsDir);
+         }, runsDir));
 
 
         const durationSec = Math.round(durationMs / 1000);
@@ -258,23 +295,16 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
           await notify(`❌ ${step.name} failed — retrying (attempt ${nextAttempt}/${maxAttempts})`);
 
           // Mark as pending again so the scheduler will re-launch
-           state = await updateStepState(state, step.id, {
+           await mutateState(current => updateStepState(current, step.id, {
              status: 'pending',
              error: result.error,
              logs: result.logs,
              attempts, // keep the attempt count so we know we've retried
-           }, runsDir);
+           }, runsDir));
 
 
-          // Schedule re-launch after retry_delay seconds
-          // We use a flag on the step state to signal "ready to retry"
-          await new Promise(resolve => {
-            const timer = setTimeout(() => {
-              retryTimers.delete(step.id);
-              resolve();
-            }, step.retry_delay * 1000);
-            retryTimers.set(step.id, timer);
-          });
+          await waitForRetry(step.id, step.retry_delay);
+          if (cancelled) return;
 
           // After the delay, the scheduler loop will detect the step as
           // 'pending' and re-launch it. But we need to ensure the attempts
@@ -282,7 +312,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
 
          } else {
            // All retries exhausted — mark as failed
-           state = await updateStepState(state, step.id, {
+           await mutateState(current => updateStepState(current, step.id, {
              status: 'failed',
              completed_at: completedAt,
              duration_ms: durationMs,
@@ -291,7 +321,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
              error: result.error,
              logs: result.logs,
              attempts,
-           }, runsDir);
+           }, runsDir));
 
 
           const wasRetried = step.retry > 0;
@@ -333,9 +363,9 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
         const { readRunState } = await import('./workflow-state.js');
         const diskState = await readRunState(runId, runsDir);
         if (diskState.status === 'cancelled') {
-          // External cancel — drain in-flight steps and exit
+          // External cancel: unblock retry waits, drain active promises, and exit.
+          clearRetryWaiters();
           await Promise.allSettled([...inFlight.values()]);
-          for (const timer of retryTimers.values()) clearTimeout(timer);
           return diskState;
         }
       } catch {
@@ -352,15 +382,12 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
     if (allTerminal) break;
 
     // Launch ready steps up to concurrency limit
-    const currentlyRunning = [...Object.entries(state.steps)]
-      .filter(([, s]) => s.status === 'running').length;
-
-    const slotsAvailable = concurrency - currentlyRunning;
+    const slotsAvailable = concurrency - inFlight.size;
 
     if (slotsAvailable > 0) {
       // Find all pending steps that could be launched
       for (const step of steps) {
-        if (inFlight.size - currentlyRunning >= slotsAvailable) break;
+        if (inFlight.size >= concurrency) break;
         if (state.steps[step.id]?.status !== 'pending') continue;
         if (inFlight.has(step.id)) continue; // Already tracked
 
@@ -368,8 +395,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
 
         if (blocked) {
           // Dep failed and not optional — skip this step
-          await updateStepState(state, step.id, { status: 'skipped' }, runsDir)
-            .then(ns => { state = ns; });
+          await mutateState(current => updateStepState(current, step.id, { status: 'skipped' }, runsDir));
           continue;
         }
 

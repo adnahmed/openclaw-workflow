@@ -3,12 +3,29 @@
   "version": "1.0.0",
   "description": "OpenClaw plugin for YAML/JSON-driven workflow orchestration with dependency management, parallel execution, retry logic, and output gates",
   "type": "module",
-  "main": "index.js",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "examples"
+  ],
   "openclaw": {
     "extensions": [
-      "./index.js"
+      "./src/index.ts"
     ],
-    "hooks": {}
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "hooks": {},
+    "compat": {
+      "minVersion": "0.6.0"
+    },
+    "build": {
+      "command": "npm run build",
+      "output": "dist"
+    }
   },
   "keywords": [
     "openclaw",
@@ -22,19 +39,27 @@
   "author": "OpenClaw Contributors",
   "license": "MIT",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
+    "@sinclair/typebox": "^0.34.38",
     "js-yaml": "^4.1.0"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  },
   "scripts": {
-    "test": "node --test tests/",
-    "test:watch": "node --test --watch tests/"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test \"tests/**/*.test.js\"",
+    "test:watch": "node --test --watch \"tests/**/*.test.js\"",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run typecheck && npm test"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/openclaw/openclaw.git",
-    "directory": "plugins/openclaw-workflow"
+    "url": "https://github.com/adnahmed/openclaw-workflow.git"
   }
 }

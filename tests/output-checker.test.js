@@ -6,23 +6,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { writeFile, rm, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { writeFile, mkdir } from 'node:fs/promises';
 
-import { checkOutputs } from '../output-checker.js';
-
-// ── Helper ─────────────────────────────────────────────────────────────────
-
-async function withTempDir(fn) {
-  const dir = join(tmpdir(), `output-check-${randomBytes(4).toString('hex')}`);
-  await mkdir(dir, { recursive: true });
-  try {
-    return await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
+import { checkOutputs } from '../dist/output-checker.js';
+import { withTempDir } from './temp-dir.js';
 
 // ── Empty / null paths ─────────────────────────────────────────────────────
 
@@ -46,7 +33,7 @@ test('passes trivially with undefined paths', async () => {
 // ── Existing files ─────────────────────────────────────────────────────────
 
 test('passes when all files exist (relative paths)', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('output-check', async (dir) => {
     await writeFile(join(dir, 'output.json'), '{}');
     await writeFile(join(dir, 'report.md'), '# Report');
 
@@ -58,7 +45,7 @@ test('passes when all files exist (relative paths)', async () => {
 });
 
 test('passes when all files exist (absolute paths)', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('output-check', async (dir) => {
     const absPath = join(dir, 'absolute.json');
     await writeFile(absPath, '{}');
 
@@ -70,7 +57,7 @@ test('passes when all files exist (absolute paths)', async () => {
 });
 
 test('resolves relative paths against baseDir', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('output-check', async (dir) => {
     await mkdir(join(dir, 'data', 'seo'), { recursive: true });
     const filePath = join(dir, 'data', 'seo', 'handoff.json');
     await writeFile(filePath, '{}');
@@ -85,7 +72,7 @@ test('resolves relative paths against baseDir', async () => {
 // ── Missing files ──────────────────────────────────────────────────────────
 
 test('fails when a file is missing', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('output-check', async (dir) => {
     const result = await checkOutputs(['missing-output.json'], dir);
     assert.equal(result.passed, false);
     assert.equal(result.missing_files.length, 1);
@@ -94,7 +81,7 @@ test('fails when a file is missing', async () => {
 });
 
 test('fails when some files are missing (partial)', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('output-check', async (dir) => {
     await writeFile(join(dir, 'exists.json'), '{}');
     // 'missing.json' is not created
 
@@ -108,7 +95,7 @@ test('fails when some files are missing (partial)', async () => {
 });
 
 test('all missing files are reported (not just first)', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('output-check', async (dir) => {
     const result = await checkOutputs(['a.json', 'b.json', 'c.json'], dir);
     assert.equal(result.passed, false);
     assert.equal(result.missing_files.length, 3);
@@ -118,7 +105,7 @@ test('all missing files are reported (not just first)', async () => {
 // ── Mixed absolute + relative ──────────────────────────────────────────────
 
 test('handles mix of absolute and relative paths', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('output-check', async (dir) => {
     const absFile = join(dir, 'absolute.json');
     await writeFile(absFile, '{}');
     await writeFile(join(dir, 'relative.json'), '{}');

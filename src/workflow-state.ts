@@ -31,8 +31,7 @@
  */
 
 import { readFile, writeFile, readdir, mkdir, rename } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 /**
@@ -149,7 +148,7 @@ export async function saveRunState(state, runsDir) {
   await mkdir(runsDir, { recursive: true });
 
   const targetPath = join(runsDir, `${state.run_id}.json`);
-  const tempPath = join(tmpdir(), `wf-state-${randomBytes(6).toString('hex')}.json`);
+  const tempPath = join(runsDir, `.${state.run_id}.${randomBytes(6).toString('hex')}.tmp`);
 
   const json = JSON.stringify(state, null, 2);
   await writeFile(tempPath, json, 'utf8');

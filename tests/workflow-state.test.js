@@ -6,9 +6,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { rm, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { randomBytes } from 'node:crypto';
 
 import {
   generateRunId,
@@ -19,19 +16,8 @@ import {
   updateStepState,
   listRuns,
   findLatestRun,
-} from '../workflow-state.js';
-
-// ── Helper ─────────────────────────────────────────────────────────────────
-
-async function withTempDir(fn) {
-  const dir = join(tmpdir(), `wf-state-test-${randomBytes(4).toString('hex')}`);
-  await mkdir(dir, { recursive: true });
-  try {
-    return await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
+} from '../dist/workflow-state.js';
+import { withTempDir } from './temp-dir.js';
 
 // ── generateRunId ──────────────────────────────────────────────────────────
 
@@ -95,7 +81,7 @@ test('createRunState started_at is a valid ISO date', () => {
 // ── saveRunState + readRunState ────────────────────────────────────────────
 
 test('saves and reads back run state correctly', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     const state = createRunState('test-wf', ['step-1', 'step-2'], 'test-run-42');
     await saveRunState(state, dir);
     const loaded = await readRunState('test-run-42', dir);
@@ -104,7 +90,7 @@ test('saves and reads back run state correctly', async () => {
 });
 
 test('readRunState throws ENOENT for non-existent run', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     await assert.rejects(
       () => readRunState('does-not-exist', dir),
       (err) => err.code === 'ENOENT'
@@ -113,7 +99,7 @@ test('readRunState throws ENOENT for non-existent run', async () => {
 });
 
 test('saveRunState creates directory if it does not exist', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     const nestedDir = join(dir, 'a', 'b', 'c');
     const state = createRunState('wf', ['step-1'], 'nested-run');
     // Should not throw even though dir doesn't exist
@@ -126,7 +112,7 @@ test('saveRunState creates directory if it does not exist', async () => {
 // ── updateRunState ─────────────────────────────────────────────────────────
 
 test('updateRunState returns new state and saves to disk', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     let state = createRunState('wf', ['step-1'], 'run-update-test');
     state = await updateRunState(state, { status: 'running' }, dir);
 
@@ -139,7 +125,7 @@ test('updateRunState returns new state and saves to disk', async () => {
 });
 
 test('updateRunState does not mutate original state object', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     const original = createRunState('wf', ['step-1'], 'immutable-test');
     const updated = await updateRunState(original, { status: 'running' }, dir);
 
@@ -151,7 +137,7 @@ test('updateRunState does not mutate original state object', async () => {
 // ── updateStepState ────────────────────────────────────────────────────────
 
 test('updateStepState updates a single step and saves', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     let state = createRunState('wf', ['step-a', 'step-b'], 'step-update-test');
     state = await updateStepState(state, 'step-a', {
       status: 'running',
@@ -170,7 +156,7 @@ test('updateStepState updates a single step and saves', async () => {
 });
 
 test('updateStepState merges — does not replace entire step', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     let state = createRunState('wf', ['step-1'], 'merge-test');
     // First update — set started_at
     state = await updateStepState(state, 'step-1', {
@@ -196,14 +182,14 @@ test('updateStepState merges — does not replace entire step', async () => {
 // ── listRuns ───────────────────────────────────────────────────────────────
 
 test('listRuns returns empty array when directory is empty', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     const runs = await listRuns(dir);
     assert.deepEqual(runs, []);
   });
 });
 
 test('listRuns returns all runs sorted newest first', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     // Create runs with different started_at
     const s1 = createRunState('wf', ['step-1'], 'run-1');
     s1.started_at = '2026-03-09T08:00:00.000Z';
@@ -225,7 +211,7 @@ test('listRuns returns all runs sorted newest first', async () => {
 });
 
 test('listRuns filters by workflow name', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     const s1 = createRunState('seo-pipeline', ['step-1'], 'seo-run-1');
     const s2 = createRunState('deploy-pipeline', ['step-1'], 'deploy-run-1');
     await saveRunState(s1, dir);
@@ -238,7 +224,7 @@ test('listRuns filters by workflow name', async () => {
 });
 
 test('listRuns skips non-JSON files gracefully', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     const { writeFile } = await import('node:fs/promises');
     // Write a non-JSON file into the runs dir
     await writeFile(join(dir, 'not-a-run.txt'), 'not json');
@@ -255,7 +241,7 @@ test('listRuns skips non-JSON files gracefully', async () => {
 // ── findLatestRun ──────────────────────────────────────────────────────────
 
 test('findLatestRun returns most recent run for workflow', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     const s1 = createRunState('my-wf', ['step-1'], 'my-wf-run-1');
     s1.started_at = '2026-03-09T08:00:00.000Z';
     const s2 = createRunState('my-wf', ['step-1'], 'my-wf-run-2');
@@ -270,7 +256,7 @@ test('findLatestRun returns most recent run for workflow', async () => {
 });
 
 test('findLatestRun returns null when no runs exist', async () => {
-  await withTempDir(async (dir) => {
+  await withTempDir('wf-state-test', async (dir) => {
     const result = await findLatestRun('nonexistent-wf', dir);
     assert.equal(result, null);
   });

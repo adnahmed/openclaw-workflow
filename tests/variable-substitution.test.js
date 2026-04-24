@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildContext, substituteVars, substituteDeep } from '../variable-substitution.js';
+import { buildContext, substituteVars, substituteDeep } from '../dist/variable-substitution.js';
 
 // ── buildContext ───────────────────────────────────────────────────────────
 

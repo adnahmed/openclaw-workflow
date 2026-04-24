@@ -1,7 +1,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CliAdapter } from '../step-runner.js';
+import { CliAdapter } from '../dist/step-runner.js';
 
 test('CliAdapter.spawn passes complex prompt safely as one argument', async () => {
   const capturedArgs = [];
