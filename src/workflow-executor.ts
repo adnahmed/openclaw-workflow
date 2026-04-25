@@ -320,7 +320,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
 
         } else {
           // Failure path — check for retry
-          const maxAttempts = step.retry + 1;
+           const maxAttempts = (step.retry || 0) + 1;
           const shouldRetry = attempts < maxAttempts;
 
           if (shouldRetry) {
@@ -450,7 +450,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
               
               // Assign unique expanded ID and update its internal dependencies
               substitutedInner.id = prefix + substitutedInner.id;
-              substitutedInner.depends_on = substitutedInner.depends_on.map(depId => {
+               substitutedInner.depends_on = (substitutedInner.depends_on || []).map(depId => {
                 if (innerStepsDef.some(s => s.id === depId)) {
                   return prefix + depId;
                 }
