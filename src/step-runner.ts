@@ -561,10 +561,6 @@ export class CliAdapter {
 			args.push("--name", options.label);
 		}
 
-		if (options.label) {
-			args.push("--name", options.label);
-		}
-
 		let jobId;
 		try {
 			const { stdout } = await this.executor(args, {
