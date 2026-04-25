@@ -495,7 +495,9 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
       
       if (step.skip_if_empty) {
         const checkPath = substituteDeep(step.skip_if_empty, varCtx);
+        await notify(`🔍 Checking skip_if_empty for ${step.id}: ${checkPath}`);
         const list = await resolvePathToList(checkPath, baseDir);
+        await notify(`📊 List length for ${step.id}: ${list.length}`);
         if (list.length === 0) {
           await mutateState(current => updateStepState(current, step.id, { 
             status: 'ok', 

@@ -14,7 +14,7 @@ import yaml from 'js-yaml';
 export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
   const fullPath = pathIsAbsolute(filePath) ? filePath : join(baseDir, filePath);
   try {
-
+ 
     const content = await readFile(fullPath, 'utf8');
     
     let effectiveParser = parser;
@@ -25,7 +25,7 @@ export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
       else if (fullPath.endsWith('.csv')) effectiveParser = 'csv';
       else if (fullPath.endsWith('.txt')) effectiveParser = 'newline';
     }
-
+ 
     return parseValue(content, effectiveParser);
   } catch {
     return [];
@@ -142,5 +142,7 @@ function parseValue(val, parser) {
 function normalizeToList(val) {
   if (Array.isArray(val)) return val;
   if (val === null || val === undefined) return [];
+  if (typeof val === 'string' && val.trim() === '') return [];
+  if (typeof val === 'object' && Object.keys(val).length === 0) return [];
   return [val];
 }
