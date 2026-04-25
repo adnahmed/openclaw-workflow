@@ -21,9 +21,10 @@ steps:
   # This step is a controller. It will be dynamically expanded at runtime.
   - id: process-songs
     name: "Process Songs"
-    for_each: "{songs}"
+    for_each: "data/songs.txt"
     parser: "newline" # Treats each line of data/songs.txt as an item
     depends_on: [find-songs]
+    skip_if_empty: "data/songs.txt"
     steps:
       - id: transcribe
         name: "Transcribe Audio"
@@ -48,6 +49,7 @@ steps:
   - id: final-report
     name: "Aggregate Summaries"
     depends_on: [process-songs]
+    skip_if_empty: "data/songs.txt"
     task: |
       All songs have been processed. 
       Read all files in data/summaries/*.txt and compile them into a single 

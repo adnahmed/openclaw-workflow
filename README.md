@@ -152,6 +152,16 @@ workflow_status({ name: "hello" })
 | `optional`     | boolean   | ❌       | `false` | If `true`, step failure doesn't fail the pipeline or block dependent steps. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 
+**Example Pattern: Conditional Execution**
+Use `skip_if_empty` to avoid launching expensive agents when there is no data to process:
+```yaml
+- id: generate_report
+  name: "Generate Daily Report"
+  depends_on: [collect_data]
+  skip_if_empty: "data/daily_metrics.json" # Skip if no metrics were collected
+  task: "Analyze metrics in data/daily_metrics.json and write a report..."
+```
+
 ---
 
 ## Variable Substitution
@@ -453,7 +463,8 @@ The engine resolves the `{variable}` (e.g., `{songs}`) by looking for a matching
     - id: process_songs
       name: "Process Songs"
       depends_on: [find_songs]
-      for_each: "{songs}" # Resolves to songs.txt
+      # use an explicit path for maximum clarity
+      for_each: "songs.txt" 
       parser: "newline"
       steps:
         - id: transcribe
