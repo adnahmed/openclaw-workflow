@@ -429,9 +429,12 @@ B ──┘
 When a non-optional step fails, all steps that depend on it (directly or transitively) are marked `skipped`. This prevents false failures and makes the status clear: the step didn't fail, it was never attempted.
  
 ### Loop Execution (`for_each`)
- 
+  
 Workflows can iterate over a list of items using the `for_each` field. 
- 
+
+**How it works:**
+The engine resolves the `{variable}` (e.g., `{songs}`) by looking for a matching file in the workspace (e.g., `songs.json`, `songs.txt`, or `songs.csv`). This allows you to have one step generate a list of items (like a list of songs to process) and a subsequent loop step iterate over them.
+
 - **Expansion**: A loop step is expanded into multiple unique step instances, one for each item in the list. An instance ID follows the pattern `loop_id:index:inner_step_id`.
 - **Dynamic Tasks**: Use the `{item}` variable in `task` or `outputs` fields to refer to the current iteration's value.
 - **Dependency Resolution**: If a step depends on a loop step, it will wait for all instances of the last step in that loop to complete before starting.
@@ -439,15 +442,23 @@ Workflows can iterate over a list of items using the `for_each` field.
   - `json` (default/auto for `.json`): Parses a JSON array.
   - `csv` (auto for `.csv`): Splits content by commas.
   - `newline` (auto for `.txt`): Treats each line as a separate item.
-- **Example**:
+- **Example:**
   ```yaml
-  - id: process_songs
-    for_each: "{songs}"
-    parser: "newline"
-    steps:
-      - id: transcribe
-        task: "Transcribe {item}..."
-```
+  steps:
+    - id: find_songs
+      name: "Find Songs"
+      task: "Find today's liked songs and write them to songs.txt (one per line)"
+      outputs: ["songs.txt"]
+
+    - id: process_songs
+      name: "Process Songs"
+      depends_on: [find_songs]
+      for_each: "{songs}" # Resolves to songs.txt
+      parser: "newline"
+      steps:
+        - id: transcribe
+          task: "Transcribe {item}..."
+  ```
 
  
 ### Resume

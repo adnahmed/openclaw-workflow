@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join, isAbsolute as pathIsAbsolute } from 'node:path';
+import yaml from 'js-yaml';
 
 
 /**
@@ -19,6 +20,8 @@ export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
     let effectiveParser = parser;
     if (parser === 'auto') {
       if (fullPath.endsWith('.json')) effectiveParser = 'json';
+      else if (fullPath.endsWith('.jsonl')) effectiveParser = 'jsonl';
+      else if (fullPath.endsWith('.yaml') || fullPath.endsWith('.yml')) effectiveParser = 'yaml';
       else if (fullPath.endsWith('.csv')) effectiveParser = 'csv';
       else if (fullPath.endsWith('.txt')) effectiveParser = 'newline';
     }
@@ -39,10 +42,16 @@ export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
  * @returns {Promise<any[]>} The resolved list of items
  */
 export async function resolveList(token, ctx, baseDir, parser = 'auto') {
-  // 1. Extract key from {key}
+  // 1. Check if 'token' is actually an explicit file path (not {variable})
+  if (!token.startsWith('{') || !token.endsWith('}')) {
+    return resolvePathToList(token, baseDir, parser);
+  }
+
+  // 2. Extract key from {key}
   const match = token.match(/\{(\w+)\}/);
   if (!match) return [];
   const key = match[1];
+
 
   // 2. Check static context first
   if (Object.prototype.hasOwnProperty.call(ctx, key)) {
@@ -95,6 +104,35 @@ function parseValue(val, parser) {
       } catch (e) {
         return [];
       }
+    case 'jsonl':
+      if (typeof val !== 'string') return [];
+      return val.split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => {
+          try { return JSON.parse(line); } catch { return null; }
+        })
+        .filter(Boolean);
+    case 'yaml':
+      try {
+        const parsed = typeof val === 'string' ? yaml.load(val) : val;
+        return normalizeToList(parsed);
+      } catch (e) {
+        return [];
+      }
+    case 'csv':
+      if (typeof val !== 'string') return [val];
+      // Simple CSV split (comma). Future: handle quoted commas.
+      return val.split(',').map(s => s.trim()).filter(Boolean);
+    case 'newline':
+      if (typeof val !== 'string') return [val];
+      return val.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    case 'auto':
+    default:
+      // Fallback: if it's already an array, return it. Otherwise, treat as single item.
+      return normalizeToList(val);
+  }
+
 
     case 'csv':
       if (typeof val !== 'string') return [val];
@@ -119,12 +157,6 @@ function parseValue(val, parser) {
  */
 function normalizeToList(val) {
   if (Array.isArray(val)) return val;
-  if (typeof val === 'string') {
-    return val.split(',').map(s => s.trim()).filter(Boolean);
-  }
-  if (val !== null && typeof val === 'object') {
-    return [val];
-  }
   if (val === null || val === undefined) return [];
   return [val];
 }
