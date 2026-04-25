@@ -132,22 +132,6 @@ function parseValue(val, parser) {
       // Fallback: if it's already an array, return it. Otherwise, treat as single item.
       return normalizeToList(val);
   }
-
-
-    case 'csv':
-      if (typeof val !== 'string') return [val];
-      // Simple CSV split (comma). Future: handle quoted commas.
-      return val.split(',').map(s => s.trim()).filter(Boolean);
-
-    case 'newline':
-      if (typeof val !== 'string') return [val];
-      return val.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-
-    case 'auto':
-    default:
-      // Fallback: if it's already an array, return it; if it's a string, treat as comma-separated.
-      return normalizeToList(val);
-  }
 }
 
 /**
