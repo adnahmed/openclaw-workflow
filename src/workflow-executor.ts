@@ -46,6 +46,7 @@ import {
   createRunState, updateRunState, updateStepState, saveRunState,
 } from './workflow-state.js';
 import { buildContext, substituteDeep } from './variable-substitution.js';
+import { resolveList } from './list-resolver.js';
 
 /** Scheduler tick interval in milliseconds. Lower = more responsive but more CPU. */
 const TICK_INTERVAL_MS = 500;
@@ -70,6 +71,7 @@ const TICK_INTERVAL_MS = 500;
 
 /**
  * Execute a workflow run to completion.
+
  *
  * This is the main entry point for the execution engine. It:
  *   1. Creates initial run state
@@ -117,10 +119,12 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
   // Build substitution context once for the entire run
   const varCtx = buildContext(runId);
 
-  // Apply variable substitution to all step fields (task prompts, output paths)
+  // Apply variable substitution to all top-level steps.
+  // Loop steps are preserved as-is (their inner steps will be substituted during expansion).
   const steps = workflow.steps.map(step => substituteDeep(step, varCtx));
 
   // Initialize run state — either use a provided initial state (for resume) or create fresh.
+
   // When resuming, the initialState already has 'ok' steps pre-populated so they are skipped.
   let state = initialState
     ? { ...initialState, run_id: runId }
@@ -421,9 +425,75 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
           continue;
         }
 
-        if (ready) {
-          launchStep(step);
+    if (ready) {
+      if (step.for_each) {
+        // ── Dynamic Loop Expansion ─────────────────────────────────────────────
+        
+        // 1. Resolve the list for this iteration
+        const list = await resolveList(step.for_each, varCtx, baseDir, step.parser);
+        
+        if (list.length > 0) {
+          const innerStepsDef = step.steps || [];
+          const lastInnerId = innerStepsDef.length > 0 ? innerStepsDef[innerStepsDef.length - 1].id : null;
+          const expandedChildren = [];
+
+          for (let i = 0; i < list.length; i++) {
+            const item = list[i];
+            const prefix = `${step.id}:${i}:`;
+            const itemCtx = { ...varCtx, item };
+
+            // Expand and substitute inner steps
+            for (const innerDef of innerStepsDef) {
+              const substitutedInner = substituteDeep(innerDef, itemCtx);
+              
+              // Assign unique expanded ID and update its internal dependencies
+              substitutedInner.id = prefix + substitutedInner.id;
+              substitutedInner.depends_on = substitutedInner.depends_on.map(depId => {
+                if (innerStepsDef.some(s => s.id === depId)) {
+                  return prefix + depId;
+                }
+                return depId;
+              });
+
+              expandedChildren.push(substitutedInner);
+            }
+          }
+
+          // 2. Inject new steps into the active workflow list and state
+          for (const child of expandedChildren) {
+            steps.push(child);
+            await mutateState(current => updateStepState(current, child.id, { status: 'pending' }, runsDir));
+          }
+
+          // 3. Rewire downstream dependencies
+          // Any step that depends on this loop step should now depend on the last step of every iteration.
+          if (lastInnerId) {
+            for (const s of steps) {
+              if (s.depends_on.includes(step.id)) {
+                const newDeps = s.depends_on.filter(d => d !== step.id);
+                const lastSteps = expandedChildren
+                  .filter(c => c.id.endsWith(`:${lastInnerId}`))
+                  .map(c => c.id);
+                s.depends_on = [...newDeps, ...lastSteps];
+              }
+            }
+          }
         }
+
+        // Mark the loop-controller step as 'ok' since expansion is complete
+        await mutateState(current => updateStepState(current, step.id, { 
+          status: 'ok', 
+          completed_at: new Date().toISOString(),
+          duration_ms: 0 
+        }, runsDir));
+        
+        await notify(`🔄 Expanded loop "${step.id}" into ${list.length} iterations`);
+        continue; // Move to next tick to pick up new steps
+      }
+      
+      launchStep(step);
+    }
+
       }
     }
 
@@ -532,12 +602,12 @@ export function dryRun(workflow, runId) {
   let remaining = [...steps];
 
   while (remaining.length > 0) {
-    const wave = remaining.filter(step =>
-      step.depends_on.every(dep => completed.has(dep))
-    );
+    const wave = remaining.filter(step => {
+      if (step.for_each) return true; // Loops are always ready as they are controllers
+      return step.depends_on.every(dep => completed.has(dep));
+    });
 
     if (wave.length === 0) {
-      // Shouldn't happen after cycle detection in loader, but be defensive
       break;
     }
 
@@ -549,6 +619,7 @@ export function dryRun(workflow, runId) {
       retry: s.retry,
       optional: s.optional,
       outputs: s.outputs,
+      is_dynamic_loop: !!s.for_each,
     })));
 
     wave.forEach(s => completed.add(s.id));
@@ -563,9 +634,10 @@ export function dryRun(workflow, runId) {
     concurrency: workflow.concurrency,
     execution_waves: waves,
     estimated_min_duration_s: waves.reduce((sum, wave) => {
-      const maxTimeout = Math.max(...wave.map(s => s.timeout_s));
+      const maxTimeout = Math.max(...wave.map(s => s.timeout_s || 0));
       return sum + maxTimeout;
     }, 0),
     variable_context: varCtx,
   };
 }
+

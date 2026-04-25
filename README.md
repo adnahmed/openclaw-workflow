@@ -139,9 +139,12 @@ workflow_status({ name: "hello" })
 |----------------|-----------|----------|---------|-------------|
 | `id`           | string    | ✅       | —       | Unique step identifier. Must match `[a-zA-Z0-9_-]+`. Used in `depends_on` references and state files. |
 | `name`         | string    | ❌       | Same as `id` | Human display name for notifications. |
-| `task`         | string    | ✅       | —       | The agent prompt / task description. Supports [variable substitution](#variable-substitution). |
+| `task`         | string    | ✅*      | —       | The agent prompt / task description. Supports [variable substitution](#variable-substitution). (*Not required if `for_each` is used) |
 | `depends_on`   | string[]  | ❌       | `[]`    | IDs of steps that must complete (`ok`) before this step runs. |
 | `outputs`      | string[]  | ❌       | `[]`    | File paths that must exist after the step completes. If any are missing, the step is marked `failed`. Supports [variable substitution](#variable-substitution). |
+| `for_each`     | string    | ❌       | —       | Variable containing a list to iterate over (e.g., `"{songs}"`). |
+| `parser`       | string    | ❌       | `"auto"` | Parser to use for the loop list (`"json"`, `"csv"`, `"newline"`, `"auto"`). |
+| `steps`        | array     | ❌       | `[]`    | Steps to execute for each item in the `for_each` list. |
 | `model`        | string    | ❌       | Plugin default | LLM model override for this step's session (e.g. `"anthropic/claude-opus-4"`). |
 | `timeout`      | number    | ❌       | `300`   | Maximum execution time in **seconds**. Step is marked failed on timeout. |
 | `retry`        | number    | ❌       | `0`     | Number of retry attempts after first failure. `retry: 2` = up to 3 total attempts. |
@@ -159,6 +162,7 @@ The following `{variable}` tokens are substituted in `task` and `outputs` fields
 | `{date}`      | `2026-03-09`                    | Current date as `YYYY-MM-DD` (UTC) |
 | `{datetime}`  | `2026-03-09T08:20:00.000Z`      | Current datetime as ISO 8601 (UTC) |
 | `{run_id}`    | `seo-pipeline-20260309T082000`  | The unique run identifier |
+| `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
 
 Unknown `{variables}` are left as-is (not an error).
 
@@ -420,10 +424,33 @@ B ──┘
 - **Wave 3**: D runs after C finishes
 
 ### Cascade Skip
-
+ 
 When a non-optional step fails, all steps that depend on it (directly or transitively) are marked `skipped`. This prevents false failures and makes the status clear: the step didn't fail, it was never attempted.
+ 
+### Loop Execution (`for_each`)
+ 
+Workflows can iterate over a list of items using the `for_each` field. 
+ 
+- **Expansion**: A loop step is expanded into multiple unique step instances, one for each item in the list. An instance ID follows the pattern `loop_id:index:inner_step_id`.
+- **Dynamic Tasks**: Use the `{item}` variable in `task` or `outputs` fields to refer to the current iteration's value.
+- **Dependency Resolution**: If a step depends on a loop step, it will wait for all instances of the last step in that loop to complete before starting.
+- **List Parsing**: The loop resolves the `for_each` variable using a `parser`:
+  - `json` (default/auto for `.json`): Parses a JSON array.
+  - `csv` (auto for `.csv`): Splits content by commas.
+  - `newline` (auto for `.txt`): Treats each line as a separate item.
+- **Example**:
+  ```yaml
+  - id: process_songs
+    for_each: "{songs}"
+    parser: "newline"
+    steps:
+      - id: transcribe
+        task: "Transcribe {item}..."
+```
 
+ 
 ### Resume
+
 
 `workflow_run({ name: "...", resume: true })` loads the most recent run, finds all steps with `status: "ok"`, marks them as already-completed in the new run, and only executes the rest. Use this to recover from partial failures without re-doing expensive work.
 
@@ -440,10 +467,15 @@ Three sequential agents: Technical Auditor → Content Creator → Standup Synth
 Four-stage gate: test → build → deploy → smoke-test. Uses `concurrency: 1` to enforce strict sequencing. Deploy has `retry: 1` for flaky network situations.
 
 ### Data ETL Pipeline (`examples/data-pipeline.yml`)
-
+ 
 Parallel fetch (primary + reference), then validate, transform, load, report. Demonstrates parallel steps fanning in to a single gate step, with the optional reporting stage at the end.
-
+ 
+### Music Processing Pipeline (`examples/music-pipeline.yml`)
+ 
+Iterates over a list of audio files. For each file, it transcribes the audio and then generates a summary. Demonstrates loop expansion and the use of `{item}`.
+ 
 ---
+
 
 ## Development & Testing
 

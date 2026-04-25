@@ -38,6 +38,9 @@ import yaml from 'js-yaml';
  * @property {string}   task         - The agent prompt / task description for this step
  * @property {string[]} depends_on   - IDs of steps that must complete before this step runs
  * @property {string[]} outputs      - File paths (possibly with {variables}) that must exist after step
+ * @property {string}   [for_each]    - Variable containing a list to iterate over
+ * @property {WorkflowStep[]} [steps] - Steps to execute for each item in the list
+ * @property {string}   [parser]      - Parser to use for the loop list ('json', 'csv', 'newline', 'auto')
  * @property {string}   [model]      - LLM model override for this step's session
  * @property {number}   timeout      - Maximum execution time in seconds (default: 300)
  * @property {number}   retry        - Number of retry attempts on failure (default: 0)
@@ -180,42 +183,60 @@ function normalizeAndValidate(raw, filePath) {
     throw new Error(`Workflow "${raw.name}" at ${filePath} must have a non-empty "steps" array`);
   }
 
-  // ── Normalize each step ────────────────────────────────────────────────────
-  const seenIds = new Set();
-  const steps = raw.steps.map((step, index) => {
-    if (!step.id || typeof step.id !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(step.id)) {
-      throw new Error(
-        `Step at index ${index} in workflow "${raw.name}" has invalid or missing "id". ` +
-        `IDs must be non-empty strings containing only letters, numbers, hyphens, and underscores.`
-      );
-    }
-    if (seenIds.has(step.id)) {
-      throw new Error(`Duplicate step ID "${step.id}" in workflow "${raw.name}"`);
-    }
-    seenIds.add(step.id);
+  const validateSteps = (stepsList, parentName = raw.name, isInner = false) => {
+    const seenIds = new Set();
+    return stepsList.map((step, index) => {
+      if (!step.id || typeof step.id !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(step.id)) {
+        throw new Error(
+          `Step at index ${index} in ${isInner ? 'loop' : 'workflow'} "${parentName}" has invalid or missing "id". ` +
+          `IDs must be non-empty strings containing only letters, numbers, hyphens, and underscores.`
+        );
+      }
+      if (seenIds.has(step.id)) {
+        throw new Error(`Duplicate step ID "${step.id}" in ${isInner ? 'loop' : 'workflow'} "${parentName}"`);
+      }
+      seenIds.add(step.id);
 
-    if (!step.task || typeof step.task !== 'string') {
-      throw new Error(
-        `Step "${step.id}" in workflow "${raw.name}" is missing required field "task" (string)`
-      );
-    }
+      if (!step.task || typeof step.task !== 'string') {
+        if (!step.for_each) {
+          throw new Error(
+            `Step "${step.id}" in ${isInner ? 'loop' : 'workflow'} "${parentName}" is missing required field "task" (string)`
+          );
+        }
+      }
 
-    // Normalize with defaults
-    return {
-      id: step.id,
-      name: step.name || step.id,
-      task: step.task,
-      depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
-      outputs: Array.isArray(step.outputs) ? step.outputs : [],
-      model: step.model || null,
-      timeout: typeof step.timeout === 'number' ? step.timeout : 300,
-      retry: typeof step.retry === 'number' ? Math.max(0, step.retry) : 0,
-      retry_delay: typeof step.retry_delay === 'number' ? step.retry_delay : 30,
-      optional: step.optional === true,
-    };
-  });
+      // Recursively validate inner steps for loop steps
+      if (step.for_each) {
+        if (!Array.isArray(step.steps) || step.steps.length === 0) {
+          throw new Error(`Loop step "${step.id}" in workflow "${parentName}" must have a non-empty "steps" array`);
+        }
+        validateSteps(step.steps, step.id, true);
+      }
 
+      // Normalize with defaults
+      return {
+        id: step.id,
+        name: step.name || step.id,
+        task: step.task || null,
+        depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
+        outputs: Array.isArray(step.outputs) ? step.outputs : [],
+        for_each: step.for_each || null,
+        parser: step.parser || 'auto',
+        steps: Array.isArray(step.steps) ? step.steps : [],
+        model: step.model || null,
+        timeout: typeof step.timeout === 'number' ? step.timeout : 300,
+        retry: typeof step.retry === 'number' ? Math.max(0, step.retry) : 0,
+        retry_delay: typeof step.retry_delay === 'number' ? step.retry_delay : 30,
+        optional: step.optional === true,
+      };
+    });
+  };
+
+  const steps = validateSteps(raw.steps);
+  const seenIds = new Set(steps.map(s => s.id));
+ 
   // ── Validate dependency references ─────────────────────────────────────────
+
   for (const step of steps) {
     for (const depId of step.depends_on) {
       if (!seenIds.has(depId)) {

@@ -291,9 +291,97 @@ steps:
   });
 });
 
-// ── listWorkflows ──────────────────────────────────────────────────────────
+// ── Loop validation ──────────────────────────────────────────────────────────
+ 
+test('loads workflow with for_each loops correctly', async () => {
+  await withTempDir('wf-test', async (dir) => {
+    await writeFile(join(dir, 'loop.yml'), `
+name: Loop Workflow
+steps:
+  - id: process-items
+    for_each: "{items}"
+    steps:
+      - id: sub-step-1
+        task: "Do part 1"
+      - id: sub-step-2
+        depends_on: [sub-step-1]
+        task: "Do part 2"
+`);
+    const wf = await loadWorkflow('loop', dir);
+    assert.equal(wf.steps[0].id, 'process-items');
+    assert.equal(wf.steps[0].for_each, '{items}');
+    assert.equal(wf.steps[0].steps.length, 2);
+    assert.equal(wf.steps[0].steps[0].id, 'sub-step-1');
+  });
+});
+ 
+test('throws if loop step is missing steps array', async () => {
+  await withTempDir('wf-test', async (dir) => {
+    await writeFile(join(dir, 'bad-loop.yml'), `
+name: Bad Loop
+steps:
+  - id: my-loop
+    for_each: "{items}"
+`);
+    await assert.rejects(
+      () => loadWorkflow('bad-loop', dir),
+      /must have a non-empty "steps" array/
+    );
+  });
+});
+ 
+test('throws if inner loop step is missing task', async () => {
+  await withTempDir('wf-test', async (dir) => {
+    await writeFile(join(dir, 'bad-inner.yml'), `
+name: Bad Inner
+steps:
+  - id: my-loop
+    for_each: "{items}"
+    steps:
+      - id: inner-1
+`);
+    await assert.rejects(
+      () => loadWorkflow('bad-inner', dir),
+      /missing required field "task"/
+    );
+  });
+});
+ 
+test('throws on duplicate IDs within a loop', async () => {
+  await withTempDir('wf-test', async (dir) => {
+    await writeFile(join(dir, 'dup-inner.yml'), `
+name: Dup Inner
+steps:
+  - id: my-loop
+    for_each: "{items}"
+    steps:
+      - id: step-1
+        task: First
+      - id: step-1
+        task: Duplicate
+`);
+    await assert.rejects(
+      () => loadWorkflow('dup-inner', dir),
+      /Duplicate step ID "step-1" in loop "my-loop"/
+    );
+  });
+});
 
-test('listWorkflows returns entries sorted by name', async () => {
+test('normalizes parser to "auto" when not provided', async () => {
+  await withTempDir('wf-test', async (dir) => {
+    await writeFile(join(dir, 'parser.yml'), `
+name: Parser Test
+steps:
+  - id: loop-step
+    for_each: "{items}"
+    steps:
+      - id: inner
+        task: Do it
+`);
+    const wf = await loadWorkflow('parser', dir);
+    assert.equal(wf.steps[0].parser, 'auto');
+  });
+});
   const list = await listWorkflows(FIXTURES_DIR);
   assert.ok(list.length >= 5, `Expected at least 5 fixtures, got ${list.length}`);
   // Verify sorted

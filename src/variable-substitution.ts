@@ -26,6 +26,7 @@
  * @property {string} date     - Current date as YYYY-MM-DD (UTC)
  * @property {string} datetime - Current datetime as ISO 8601 string
  * @property {string} run_id   - The workflow run identifier
+ * @property {Object.<string, any>} [vars] - Additional workflow variables
  */
 
 /**

@@ -1,0 +1,56 @@
+# music-pipeline.yml
+# Music Processing Pipeline: Find → Process (Loop) → Aggregate
+# Demonstrates: dynamic loop expansion, explicit newline parsing, and fan-in dependencies.
+
+name: Music Processing Pipeline
+version: "1.0"
+description: "Finds audio files, transcribes and summarizes each, then aggregates results."
+concurrency: 5
+
+steps:
+  # ── Stage 1: Discovery ──────────────────────────────────────────────────────
+  - id: find-songs
+    name: "Find Audio Files"
+    task: |
+      Search the workspace for all .mp3 and .wav files.
+      Write the list of found files to: data/songs.txt (one file path per line).
+    outputs:
+      - "data/songs.txt"
+
+  # ── Stage 2: Processing Loop ────────────────────────────────────────────────
+  # This step is a controller. It will be dynamically expanded at runtime.
+  - id: process-songs
+    name: "Process Songs"
+    for_each: "{songs}"
+    parser: "newline" # Treats each line of data/songs.txt as an item
+    depends_on: [find-songs]
+    steps:
+      - id: transcribe
+        name: "Transcribe Audio"
+        task: |
+          Transcribe the audio file: {item}
+          Write the transcription to: data/transcripts/{item}_text.txt
+        outputs:
+          - "data/transcripts/{item}_text.txt"
+
+      - id: summarize
+        name: "Summarize Transcription"
+        depends_on: [transcribe]
+        task: |
+          Read the transcription from: data/transcripts/{item}_text.txt
+          Generate a concise summary of the song's content.
+          Write summary to: data/summaries/{item}_summary.txt
+        outputs:
+          - "data/summaries/{item}_summary.txt"
+
+  # ── Stage 3: Aggregation ────────────────────────────────────────────────────
+  # This step depends on the loop. It waits for ALL iterations to complete.
+  - id: final-report
+    name: "Aggregate Summaries"
+    depends_on: [process-songs]
+    task: |
+      All songs have been processed. 
+      Read all files in data/summaries/*.txt and compile them into a single 
+      final report: reports/music-summary-report-{date}.md
+    outputs:
+      - "reports/music-summary-report-{date}.md"
