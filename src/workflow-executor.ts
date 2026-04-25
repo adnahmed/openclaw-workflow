@@ -42,11 +42,13 @@
  */
 
 import { setTimeout as sleep } from 'node:timers/promises';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import {
   createRunState, updateRunState, updateStepState, saveRunState,
 } from './workflow-state.js';
 import { buildContext, substituteDeep } from './variable-substitution.js';
-import { resolveList } from './list-resolver.js';
+import { resolveList, resolvePathToList } from './list-resolver.js';
 
 /** Scheduler tick interval in milliseconds. Lower = more responsive but more CPU. */
 const TICK_INTERVAL_MS = 500;
@@ -491,6 +493,19 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
         continue; // Move to next tick to pick up new steps
       }
       
+      if (step.skip_if_empty) {
+        const checkPath = substituteDeep(step.skip_if_empty, varCtx);
+        const list = await resolvePathToList(checkPath, baseDir);
+        if (list.length === 0) {
+          await mutateState(current => updateStepState(current, step.id, { 
+            status: 'ok', 
+            completed_at: new Date().toISOString(),
+            duration_ms: 0 
+          }, runsDir));
+          await notify(`⏩ Skipped ${step.name} (input data empty)`);
+          continue;
+        }
+      }
       launchStep(step);
     }
 

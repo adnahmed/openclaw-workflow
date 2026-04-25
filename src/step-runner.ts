@@ -184,6 +184,10 @@ async function runOpenClaw(args, options = {}) {
  * @constant {string}
  */
 const EXEC_POLL_PREAMBLE = `\
+IMPORTANT — Autonomous Execution: You are running in a non-interactive, automated mode. 
+Do NOT ask for user confirmation, "OK", "Go", or any other permission to proceed. 
+Execute the task fully and autonomously.
+
 IMPORTANT — exec tool behaviour: if any exec call returns "Command still running \
 (session <name>...)", the command was backgrounded because it takes >10s. In that \
 case you MUST call process(action="poll", sessionId="<name>", timeout=60000) to \

@@ -1,5 +1,33 @@
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, isAbsolute as pathIsAbsolute } from 'node:path';
+
+
+/**
+ * Resolves a specific file path into a list of items.
+ * 
+ * @param {string} filePath - Absolute or relative path to the file
+ * @param {string} baseDir   - Base directory for resolving relative paths
+ * @param {string} [parser='auto'] - Parser to use ('json', 'csv', 'newline', 'auto')
+ * @returns {Promise<any[]>} The resolved list of items
+ */
+export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
+  const fullPath = pathIsAbsolute(filePath) ? filePath : join(baseDir, filePath);
+  try {
+
+    const content = await readFile(fullPath, 'utf8');
+    
+    let effectiveParser = parser;
+    if (parser === 'auto') {
+      if (fullPath.endsWith('.json')) effectiveParser = 'json';
+      else if (fullPath.endsWith('.csv')) effectiveParser = 'csv';
+      else if (fullPath.endsWith('.txt')) effectiveParser = 'newline';
+    }
+
+    return parseValue(content, effectiveParser);
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Resolves a variable token (e.g. "{songs}") into a list of items.

@@ -150,6 +150,7 @@ workflow_status({ name: "hello" })
 | `retry`        | number    | ❌       | `0`     | Number of retry attempts after first failure. `retry: 2` = up to 3 total attempts. |
 | `retry_delay`  | number    | ❌       | `30`    | Seconds to wait between retry attempts. |
 | `optional`     | boolean   | ❌       | `false` | If `true`, step failure doesn't fail the pipeline or block dependent steps. |
+| `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 
 ---
 
