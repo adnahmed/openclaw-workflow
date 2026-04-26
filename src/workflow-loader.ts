@@ -39,6 +39,7 @@ import yaml from 'js-yaml';
  * @property {string[]} depends_on   - IDs of steps that must complete before this step runs
  * @property {string[]} outputs      - File paths (possibly with {variables}) that must exist after step
  * @property {string}   [for_each]    - Variable containing a list to iterate over
+ * @property {string}   [skip_if_empty] - File path to check; if empty/missing, skip this step
  * @property {WorkflowStep[]} [steps] - Steps to execute for each item in the list
  * @property {string}   [parser]      - Parser to use for the loop list ('json', 'csv', 'newline', 'auto')
  * @property {string}   [model]      - LLM model override for this step's session
@@ -207,13 +208,17 @@ function normalizeAndValidate(raw, filePath) {
         }
       }
 
-      // Recursively validate inner steps for loop steps
-      if (step.for_each) {
-        if (!Array.isArray(step.steps) || step.steps.length === 0) {
-          throw new Error(`Loop step "${step.id}" in workflow "${parentName}" must have a non-empty "steps" array`);
-        }
-        validateSteps(step.steps, step.id, true);
-      }
+       // Recursively validate inner steps for loop steps
+       if (step.for_each) {
+         const hasTask = typeof step.task === 'string' && step.task.trim().length > 0;
+         const hasSteps = Array.isArray(step.steps) && step.steps.length > 0;
+         if (!hasTask && !hasSteps) {
+           throw new Error(`Loop step "${step.id}" in workflow "${parentName}" must have either a "task" or a non-empty "steps" array`);
+         }
+         if (hasSteps) {
+           validateSteps(step.steps, step.id, true);
+         }
+       }
 
       // Normalize with defaults
       return {
@@ -221,10 +226,11 @@ function normalizeAndValidate(raw, filePath) {
         name: step.name || step.id,
         task: step.task || null,
         depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
-        outputs: Array.isArray(step.outputs) ? step.outputs : [],
-        for_each: step.for_each || null,
-        parser: step.parser || 'auto',
-        steps: Array.isArray(step.steps) ? step.steps : [],
+         outputs: Array.isArray(step.outputs) ? step.outputs : [],
+         for_each: step.for_each || null,
+         skip_if_empty: step.skip_if_empty || null,
+         parser: step.parser || 'auto',
+         steps: Array.isArray(step.steps) ? step.steps : [],
          model: step.model || null,
          concurrency: typeof step.concurrency === 'number' ? Math.max(1, step.concurrency) : null,
          timeout: typeof step.timeout === 'number' ? step.timeout : 300,

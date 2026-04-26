@@ -323,10 +323,10 @@ steps:
   - id: my-loop
     for_each: "{items}"
 `);
-    await assert.rejects(
-      () => loadWorkflow('bad-loop', dir),
-      /must have a non-empty "steps" array/
-    );
+     await assert.rejects(
+       () => loadWorkflow('bad-loop', dir),
+       /must have either a "task" or a non-empty "steps" array/
+     );
   });
 });
  
@@ -382,6 +382,7 @@ steps:
     assert.equal(wf.steps[0].parser, 'auto');
   });
 });
+test('listWorkflows returns sorted list of available workflows', async () => {
   const list = await listWorkflows(FIXTURES_DIR);
   assert.ok(list.length >= 5, `Expected at least 5 fixtures, got ${list.length}`);
   // Verify sorted
