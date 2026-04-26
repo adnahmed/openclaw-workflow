@@ -42,6 +42,7 @@ import yaml from 'js-yaml';
  * @property {WorkflowStep[]} [steps] - Steps to execute for each item in the list
  * @property {string}   [parser]      - Parser to use for the loop list ('json', 'csv', 'newline', 'auto')
  * @property {string}   [model]      - LLM model override for this step's session
+ * @property {number}   [concurrency]   - Max parallel instances of this step (default: global)
  * @property {number}   timeout      - Maximum execution time in seconds (default: 300)
  * @property {number}   retry        - Number of retry attempts on failure (default: 0)
  * @property {number}   retry_delay  - Seconds to wait between retries (default: 30)
@@ -224,8 +225,9 @@ function normalizeAndValidate(raw, filePath) {
         for_each: step.for_each || null,
         parser: step.parser || 'auto',
         steps: Array.isArray(step.steps) ? step.steps : [],
-        model: step.model || null,
-        timeout: typeof step.timeout === 'number' ? step.timeout : 300,
+         model: step.model || null,
+         concurrency: typeof step.concurrency === 'number' ? Math.max(1, step.concurrency) : null,
+         timeout: typeof step.timeout === 'number' ? step.timeout : 300,
         retry: typeof step.retry === 'number' ? Math.max(0, step.retry) : 0,
         retry_delay: typeof step.retry_delay === 'number' ? step.retry_delay : 30,
         optional: step.optional === true,

@@ -1,0 +1,36 @@
+name: Concurrency Demo Pipeline
+version: "1.0"
+description: Demonstrates the difference between global concurrency and per-step concurrency limits.
+concurrency: 10 # Global limit: up to 10 steps can run in parallel
+
+steps:
+  - id: generate_urls
+    name: "Generate URL List"
+    task: "Find 20 interesting tech news URLs and write them to urls.txt (one per line)"
+    outputs: ["urls.txt"]
+
+  - id: process_urls
+    name: "Process URLs"
+    depends_on: [generate_urls]
+    for_each: "urls.txt"
+    parser: "newline"
+    steps:
+      - id: scrape_content
+        name: "Scrape Content"
+        # This step might hit a rate-limited API. 
+        # Even though global concurrency is 10, we limit this specific task to 2 at a time.
+        concurrency: 2 
+        task: "Scrape the content of {item} and save it to output/scrape-{item}.txt"
+        outputs: ["output/scrape-{item}.txt"]
+
+      - id: summarize
+        name: "Summarize"
+        # This step is not rate-limited, so it can use the full global concurrency (up to 10).
+        task: "Summarize the content of output/scrape-{item}.txt"
+        outputs: ["output/summary-{item}.txt"]
+
+  - id: final_report
+    name: "Final Report"
+    depends_on: [process_urls]
+    task: "Combine all summaries from output/summary-*.txt into a final report.md"
+    outputs: ["report.md"]

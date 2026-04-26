@@ -155,8 +155,10 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
   const retryWaiters = new Map();
 
   // Step definitions keyed by ID for O(1) lookup
-  const stepMap = new Map(steps.map(s => [s.id, s]));
-  let stateWriteQueue = Promise.resolve();
+   const stepMap = new Map(steps.map(s => [s.id, s]));
+   /** @type {Map<string, number>} */
+   const runningCounts = new Map();
+   let stateWriteQueue = Promise.resolve();
 
   async function mutateState(mutator) {
     let nextState;
@@ -263,10 +265,13 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
    *
    * @param {import('./workflow-loader.js').WorkflowStep} step
    */
-  function launchStep(step) {
-    if (cancelled) return;
+   function launchStep(step) {
+     if (cancelled) return;
 
-    // Increment attempts before launch
+     const trackingId = step.original_id || step.id;
+     runningCounts.set(trackingId, (runningCounts.get(trackingId) || 0) + 1);
+
+     // Increment attempts before launch
     const attempts = (state.steps[step.id]?.attempts || 0) + 1;
 
     // Mark as running immediately (synchronously update our local state snapshot)
@@ -376,11 +381,13 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
             }
           }
         }
-      } finally {
-        // Remove from in-flight map when done (whether ok, failed, or retrying)
-        inFlight.delete(step.id);
-      }
-    })();
+       } finally {
+         // Remove from in-flight map when done (whether ok, failed, or retrying)
+         inFlight.delete(step.id);
+         const trackingId = step.original_id || step.id;
+         runningCounts.set(trackingId, Math.max(0, (runningCounts.get(trackingId) || 1) - 1));
+       }
+     })();
 
     inFlight.set(step.id, promise);
   }
@@ -441,14 +448,20 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
     // Launch ready steps up to concurrency limit
     const slotsAvailable = concurrency - inFlight.size;
 
-    if (slotsAvailable > 0) {
-      // Find all pending steps that could be launched
-      for (const step of steps) {
-        if (inFlight.size >= concurrency) break;
-        if (state.steps[step.id]?.status !== 'pending') continue;
-        if (inFlight.has(step.id)) continue; // Already tracked
+     if (slotsAvailable > 0) {
+       // Find all pending steps that could be launched
+       for (const step of steps) {
+         if (inFlight.size >= concurrency) break;
+         if (state.steps[step.id]?.status !== 'pending') continue;
+         if (inFlight.has(step.id)) continue; // Already tracked
 
-        const { ready, blocked } = evalDependencies(step);
+         if (step.concurrency) {
+           const trackingId = step.original_id || step.id;
+           const currentRunning = runningCounts.get(trackingId) || 0;
+           if (currentRunning >= step.concurrency) continue;
+         }
+
+         const { ready, blocked } = evalDependencies(step);
 
         if (blocked) {
           // Dep failed and not optional — skip this step
@@ -477,8 +490,9 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
             for (const innerDef of innerStepsDef) {
               const substitutedInner = substituteDeep(innerDef, itemCtx);
               
-              // Assign unique expanded ID and update its internal dependencies
-              substitutedInner.id = prefix + substitutedInner.id;
+               // Assign unique expanded ID and update its internal dependencies
+               substitutedInner.id = prefix + substitutedInner.id;
+               substitutedInner.original_id = `${step.id}:${substitutedInner.id.split(':').pop()}`;
                substitutedInner.depends_on = (substitutedInner.depends_on || []).map(depId => {
                 if (innerStepsDef.some(s => s.id === depId)) {
                   return prefix + depId;

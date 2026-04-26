@@ -145,8 +145,9 @@ workflow_status({ name: "hello" })
 | `for_each`     | string    | ❌       | —       | Variable containing a list to iterate over (e.g., `"{songs}"`). |
 | `parser`       | string    | ❌       | `"auto"` | Parser to use for the loop list (`"json"`, `"csv"`, `"newline"`, `"auto"`). |
 | `steps`        | array     | ❌       | `[]`    | Steps to execute for each item in the `for_each` list. |
-| `model`        | string    | ❌       | Plugin default | LLM model override for this step's session (e.g. `"anthropic/claude-opus-4"`). |
-| `timeout`      | number    | ❌       | `300`   | Maximum execution time in **seconds**. Step is marked failed on timeout. |
+ | `model`        | string    | ❌       | Plugin default | LLM model override for this step's session (e.g. `"anthropic/claude-opus-4"`). |
+ | `concurrency`   | number    | ❌       | Global limit | Max parallel instances of this specific step. Useful for avoiding rate limits on specific tools/APIs. |
+ | `timeout`      | number    | ❌       | `300`   | Maximum execution time in **seconds**. Step is marked failed on timeout. |
 | `retry`        | number    | ❌       | `0`     | Number of retry attempts after first failure. `retry: 2` = up to 3 total attempts. |
 | `retry_delay`  | number    | ❌       | `30`    | Seconds to wait between retry attempts. |
 | `optional`     | boolean   | ❌       | `false` | If `true`, step failure doesn't fail the pipeline or block dependent steps. |
@@ -168,14 +169,15 @@ Use `skip_if_empty` to avoid launching expensive agents when there is no data to
 
 The following `{variable}` tokens are substituted in `task` and `outputs` fields at run time:
 
-| Variable      | Example value                   | Description |
-|---------------|---------------------------------|-------------|
-| `{date}`      | `2026-03-09`                    | Current date as `YYYY-MM-DD` (UTC) |
-| `{datetime}`  | `2026-03-09T08:20:00.000Z`      | Current datetime as ISO 8601 (UTC) |
-| `{run_id}`    | `seo-pipeline-20260309T082000`  | The unique run identifier |
-| `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
-
-Unknown `{variables}` are left as-is (not an error).
+ | Variable      | Example value                   | Description |
+ |---------------|---------------------------------|-------------|
+ | `{date}`      | `2026-03-09`                    | Current date as `YYYY-MM-DD` (UTC) |
+ | `{datetime}`  | `2026-03-09T08:20:00.000Z`      | Current datetime as ISO 8601 (UTC) |
+ | `{run_id}`    | `seo-pipeline-20260309T082000`  | The unique run identifier |
+ | `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
+ | `{config.X}`  | `my-custom-value`               | Value of variable `X` from the workflow's `config` block |
+ 
+ Unknown `{variables}` are left as-is (not an error).
 
 **Example:**
 ```yaml
@@ -493,14 +495,17 @@ Four-stage gate: test → build → deploy → smoke-test. Uses `concurrency: 1`
  
 Parallel fetch (primary + reference), then validate, transform, load, report. Demonstrates parallel steps fanning in to a single gate step, with the optional reporting stage at the end.
  
-### Music Processing Pipeline (`examples/music-pipeline.yml`)
+ ### Music Processing Pipeline (`examples/music-pipeline.yml`)
  
-Iterates over a list of audio files. For each file, it transcribes the audio and then generates a summary. Demonstrates loop expansion and the use of `{item}`.
+ Iterates over a list of audio files. For each file, it transcribes the audio and then generates a summary. Demonstrates loop expansion and the use of `{item}`.
  
----
-
-
-## Development & Testing
+ ### Concurrency Demo (`examples/concurrency-demo.yml`)
+ 
+ Demonstrates how to use per-step concurrency limits to avoid rate-limiting on specific tasks while maintaining high global parallelism.
+ 
+ ---
+ 
+ ## Development & Testing
 
 ```bash
 npm install
