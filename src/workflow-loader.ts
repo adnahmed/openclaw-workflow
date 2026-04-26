@@ -53,6 +53,7 @@ import yaml from 'js-yaml';
  * @property {string}         name        - Workflow display name
  * @property {string}         version     - Workflow schema version (default: "1.0")
  * @property {string}         description - Human description of what this workflow does
+ * @property {Object}         [config]    - User-defined configuration variables
  * @property {WorkflowStep[]} steps       - Ordered list of steps
  * @property {number}         concurrency - Max parallel steps (default: 3, capped at 10)
  */
@@ -258,6 +259,7 @@ function normalizeAndValidate(raw, filePath) {
     name: raw.name.trim(),
     version: raw.version ? String(raw.version) : '1.0',
     description: raw.description || '',
+    config: raw.config || {},
     steps,
     concurrency: typeof raw.concurrency === 'number'
       ? Math.min(Math.max(1, raw.concurrency), 10)

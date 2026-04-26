@@ -7,6 +7,7 @@
  *   {date}     → Current date in YYYY-MM-DD format (UTC)
  *   {datetime} → Current datetime as full ISO 8601 string (e.g. 2026-03-09T14:22:00.000Z)
  *   {run_id}   → The unique run identifier for this workflow execution
+ *   {config.X} → Value of variable X from the workflow's config block
  *
  * Why UTC? Workflows often run on servers without a specific timezone configuration.
  * Using UTC ensures consistent, reproducible filenames and logs regardless of the
@@ -26,6 +27,7 @@
  * @property {string} date     - Current date as YYYY-MM-DD (UTC)
  * @property {string} datetime - Current datetime as ISO 8601 string
  * @property {string} run_id   - The workflow run identifier
+ * @property {Object} [config] - Workflow-specific configuration variables
  * @property {Object.<string, any>} [vars] - Additional workflow variables
  */
 
@@ -34,16 +36,11 @@
  * Snapshot the current time once so all substitutions within a run are consistent.
  *
  * @param {string} runId - The workflow run ID
+ * @param {Object} [workflowConfig={}] - Configuration block from the workflow definition
  * @param {Date} [now=new Date()] - Optional fixed timestamp (useful for testing)
  * @returns {SubstitutionContext}
- *
- * @example
- * const ctx = buildContext('seo-pipeline-2026-03-09T082000');
- * // ctx.date === '2026-03-09'
- * // ctx.datetime === '2026-03-09T08:20:00.000Z'  (approx)
- * // ctx.run_id === 'seo-pipeline-2026-03-09T082000'
  */
-export function buildContext(runId, now = new Date()) {
+export function buildContext(runId, workflowConfig = {}, now = new Date()) {
   const isoString = now.toISOString();
   // Extract YYYY-MM-DD from the ISO string prefix
   const date = isoString.slice(0, 10);
@@ -52,6 +49,7 @@ export function buildContext(runId, now = new Date()) {
     date,
     datetime: isoString,
     run_id: runId,
+    config: workflowConfig,
   };
 }
 
@@ -78,10 +76,20 @@ export function substituteVars(template, ctx) {
   if (typeof template !== 'string') return template;
 
   // Replace all {key} tokens where key is a known context variable.
-  // The regex captures the inner key so we can look it up in ctx.
-  return template.replace(/\{(\w+)\}/g, (match, key) => {
-    // Only replace if the key exists in ctx; leave unknown tokens as-is
-    return Object.prototype.hasOwnProperty.call(ctx, key) ? ctx[key] : match;
+  // Supports nested properties via dot notation (e.g. {config.browser_upload_dir}).
+  return template.replace(/\{([\w.]+)\}/g, (match, path) => {
+    const parts = path.split('.');
+    let current = ctx;
+
+    for (const part of parts) {
+      if (current !== null && typeof current === 'object' && part in current) {
+        current = current[part];
+      } else {
+        return match; // Variable not found, return original token
+      }
+    }
+
+    return current !== undefined ? String(current) : match;
   });
 }
 

@@ -1,6 +1,12 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, appendFile } from 'node:fs/promises';
 import { join, isAbsolute as pathIsAbsolute } from 'node:path';
 import yaml from 'js-yaml';
+
+async function logSkipDebug(msg: string) {
+  try {
+    await appendFile(join(process.cwd(), 'skip-debug.log'), `${new Date().toISOString()} [list-resolver] ${msg}\n`);
+  } catch {}
+}
 
 
 /**
@@ -14,8 +20,9 @@ import yaml from 'js-yaml';
 export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
   const fullPath = pathIsAbsolute(filePath) ? filePath : join(baseDir, filePath);
   try {
- 
+    await logSkipDebug(`Resolving path: ${fullPath} (parser: ${parser})`);
     const content = await readFile(fullPath, 'utf8');
+    await logSkipDebug(`Raw content length: ${content.length} | Content: ${JSON.stringify(content)}`);
     
     let effectiveParser = parser;
     if (parser === 'auto') {
@@ -25,9 +32,13 @@ export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
       else if (fullPath.endsWith('.csv')) effectiveParser = 'csv';
       else if (fullPath.endsWith('.txt')) effectiveParser = 'newline';
     }
- 
-    return parseValue(content, effectiveParser);
-  } catch {
+    await logSkipDebug(`Effective parser: ${effectiveParser}`);
+
+    const result = parseValue(content, effectiveParser);
+    await logSkipDebug(`Parse result length: ${result.length} | Result: ${JSON.stringify(result)}`);
+    return result;
+  } catch (e) {
+    await logSkipDebug(`Error resolving path ${fullPath}: ${e.message}`);
     return [];
   }
 }
