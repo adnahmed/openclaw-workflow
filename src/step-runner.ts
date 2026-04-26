@@ -195,6 +195,48 @@ retrieve the full output before proceeding. Never interpret a backgrounded exec 
 a failure. Only report failure if the final exit code is non-zero or the output \
 explicitly indicates an error.
 
+Browser File Upload Protocol:
+The file to upload is already present in OpenClaw's uploads directory.
+Never interact with the native OS file picker. Do not click inside it, type a
+filename into it, or wait for a human to choose a file.
+
+Use OpenClaw's upload command as the upload mechanism.
+
+For JS upload buttons, hidden file inputs, or dynamically-created file inputs:
+1. Take a fresh browser snapshot.
+2. Find the ref for the visible upload button, upload area, dropzone, or control
+   that would normally open the file chooser.
+3. Run:
+   openclaw browser upload "<UPLOADS_DIR>\\<FILE>" --ref <UPLOAD_TRIGGER_REF>
+4. Do NOT click the upload button normally before running upload.
+5. Do NOT try to operate the native OS file picker if it appears.
+6. If the ref is stale or upload fails, take a fresh snapshot and retry with the
+   new upload trigger ref.
+
+For already-visible file inputs:
+1. Take a fresh browser snapshot.
+2. Find the ref for the actual file input.
+3. Run:
+   openclaw browser upload "<UPLOADS_DIR>\\<FILE>" --input-ref <INPUT_REF>
+
+Path rules:
+- On Windows-native OpenClaw, <UPLOADS_DIR> is usually:
+  %TEMP%\\openclaw\\uploads
+- On WSL/Docker/Linux OpenClaw, <UPLOADS_DIR> is usually:
+  /tmp/openclaw/uploads
+- Use the path visible to the OpenClaw Gateway/browser-control process.
+- Do not mix Windows host paths with WSL/Docker/Linux paths.
+
+Important distinction:
+- Use --ref for a visible upload button/dropzone/control that opens the chooser.
+- Use --input-ref only when the real file input itself is visible in the snapshot.
+- Prefer --ref for hidden or dynamically-created file inputs.
+- Do not use CSS --element targeting in existing-session/user-profile uploads.
+
+Browser-use rule:
+Use browser-use upload_file only when a real file input is available. Do not click an
+upload button and then wait on the native OS picker. If browser-use cannot access a
+usable file input, use OpenClaw's upload flow above.
 `;
 
 /**
