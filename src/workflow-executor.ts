@@ -475,9 +475,24 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
         
         // 1. Resolve the list for this iteration
         const list = await resolveList(step.for_each, varCtx, baseDir, step.parser);
+        const expandedChildren = [];
         
         if (list.length > 0) {
-          const innerStepsDef = step.steps || [];
+          let innerStepsDef = step.steps || [];
+          if (innerStepsDef.length === 0 && step.task) {
+            innerStepsDef = [{
+              id: 'task',
+              name: step.name,
+              task: step.task,
+              concurrency: step.concurrency,
+              timeout: step.timeout,
+              retry: step.retry,
+              retry_delay: step.retry_delay,
+              optional: step.optional,
+              outputs: step.outputs,
+              depends_on: [],
+            }];
+          }
           const lastInnerId = innerStepsDef.length > 0 ? innerStepsDef[innerStepsDef.length - 1].id : null;
           const expandedChildren = [];
 
@@ -526,7 +541,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
         }
 
         // Mark the loop-controller step as 'running' if there are iterations, otherwise 'ok'
-        if (list.length > 0) {
+        if (expandedChildren.length > 0) {
           await mutateState(current => updateStepState(current, step.id, { 
             status: 'running', 
             started_at: new Date().toISOString(),
