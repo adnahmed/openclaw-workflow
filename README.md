@@ -132,6 +132,7 @@ workflow_status({ name: "hello" })
 | `description` | string   | ❌       | `""`    | Human description shown in `workflow_list`. |
 | `steps`       | array    | ✅       | —       | Ordered list of step definitions. |
 | `concurrency` | number   | ❌       | `3`     | Max steps that run in parallel. Range: 1–10. |
+| `config`       | object   | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
 
 ### Step fields
 
@@ -175,7 +176,7 @@ The following `{variable}` tokens are substituted in `task` and `outputs` fields
  | `{datetime}`  | `2026-03-09T08:20:00.000Z`      | Current datetime as ISO 8601 (UTC) |
  | `{run_id}`    | `seo-pipeline-20260309T082000`  | The unique run identifier |
  | `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
- | `{config.X}`  | `my-custom-value`               | Value of variable `X` from the workflow's `config` block |
+ | `{config.X}`  | `my-custom-value`               | Value of variable `X` from the top-level `config` block |
  
  Unknown `{variables}` are left as-is (not an error).
 
