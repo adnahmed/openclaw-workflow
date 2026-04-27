@@ -294,6 +294,7 @@ export async function runStep(step, runId, api, options) {
 		pollIntervalMs = 5000,
 		baseDir = process.cwd(),
 		defaultModel,
+		cancelled,
 		cronDeliveryMode = "none",
 		cronDeliveryChannel,
 		cronDeliveryTo,
@@ -302,6 +303,17 @@ export async function runStep(step, runId, api, options) {
 		cronRunTimeoutMs,
 		cronPollTimeoutMs,
 	} = options;
+
+	if (cancelled) {
+		return {
+			status: "failed",
+			session_key: null,
+			output_check: { passed: false, missing_files: [], checked_files: [] },
+			error: "Step was cancelled",
+			logs: null,
+			duration_ms: 0,
+		};
+	}
 
 	const startTime = Date.now();
 
@@ -354,7 +366,7 @@ export async function runStep(step, runId, api, options) {
 				}
 			}
 
-			const statusResult = await adapter.getStatus(spawnResult.sessionId);
+			const statusResult = await adapter.getStatus(spawnResult.sessionId, options);
 
 			if (statusResult.status === "done") {
 				finalStatus = "ok";
@@ -764,7 +776,16 @@ export class MockAdapter {
  */
 export function createStepRunner(adapter) {
 	return async function runStepWithAdapter(step, runId, _api, options) {
-		const { pollIntervalMs = 5000, baseDir = process.cwd() } = options;
+		const { pollIntervalMs = 5000, baseDir = process.cwd(), cancelled } = options;
+		if (cancelled) {
+			return {
+				status: "failed",
+				session_key: null,
+				output_check: { passed: false, missing_files: [], checked_files: [] },
+				error: "Step was cancelled",
+				duration_ms: 0,
+			};
+		}
 		const startTime = Date.now();
 		let sessionKey = null;
 
