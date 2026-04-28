@@ -17,6 +17,7 @@ import { listWorkflows, loadWorkflow } from "./workflow-loader.js";
 import {
 	findLatestRun,
 	generateRunId,
+	createRunState,
 	readRunState,
 	updateRunState,
 } from "./workflow-state.js";
@@ -142,7 +143,11 @@ export default definePluginEntry({
 
 		async function markBackgroundFailure(runId, err) {
 			const message = err instanceof Error ? err.message : String(err);
-			logger.error(`[workflow:${runId}] background execution failed`, err);
+			logger.error(
+				`[workflow:${runId}] background execution failed: ${
+					err instanceof Error ? `${err.message}\n${err.stack}` : String(err)
+				}`,
+			);
 			try {
 				const state = await readRunState(runId, runsDir);
 				if (!["ok", "failed", "cancelled"].includes(state.status)) {
@@ -158,8 +163,9 @@ export default definePluginEntry({
 				}
 			} catch (stateErr) {
 				logger.error(
-					`[workflow:${runId}] failed to persist background failure`,
-					stateErr,
+					`[workflow:${runId}] failed to persist background failure: ${
+						stateErr instanceof Error ? `${stateErr.message}\n${stateErr.stack}` : String(stateErr)
+					}`,
 				);
 			}
 		}
@@ -234,12 +240,27 @@ export default definePluginEntry({
 						});
 					}
 
+					const initialState = createRunState(
+						workflow.name,
+						workflow.steps.map((s) => s.id),
+						runId,
+					);
+
+					await updateRunState(
+						initialState,
+						{
+							status: 'running',
+							completed_at: null,
+						},
+						runsDir,
+					);
+
 					runInBackground(
 						runId,
 						executeWorkflow(workflow, runId, api, {
 							...execConfig,
 							sessionAdapter,
-						}),
+						}, runStep, initialState),
 					);
 
 					const stepSummary = {};
