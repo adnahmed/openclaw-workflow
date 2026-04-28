@@ -151,6 +151,7 @@ export async function compileWorkflow(workflow, runId, config) {
  */
 export async function executeWorkflow(workflow, runId, api, config, stepRunner = runStep, initialState = null) {
 	try {
+		await fs.mkdir(config.runsDir, { recursive: true });
 		const plan = await compileWorkflow(workflow, runId, config);
 		await fs.writeFile(join(config.runsDir, `${runId}.plan.json`), JSON.stringify(plan, null, 2));
 	} catch (err) {
@@ -158,7 +159,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 		return await updateRunState(state, {
 			status: 'failed',
 			phase: 'compile',
-			error: err.message,
+			error: err instanceof Error ? err.message : String(err),
 			spawned_sessions: 0,
 		}, config.runsDir);
 	}
