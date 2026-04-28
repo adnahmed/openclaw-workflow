@@ -544,8 +544,35 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
         // ── Dynamic Loop Expansion ─────────────────────────────────────────────
         
         // 1. Resolve the list for this iteration
-        const list = await resolveList(step.for_each, varCtx, baseDir, step.parser);
-        validateLoopItems(step, list);
+        let list: any[];
+
+        try {
+          list = await resolveList(step.for_each, varCtx, baseDir, step.parser);
+          validateLoopItems(step, list);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+
+          await mutateState(current =>
+            updateStepState(current, step.id, {
+              status: 'failed',
+              completed_at: new Date().toISOString(),
+              error: message,
+              attempts: state.steps[step.id]?.attempts || 0,
+              output_check: {
+                passed: false,
+                missing_files: [],
+                checked_files: [],
+              },
+            }, runsDir)
+          );
+
+          if (!step.optional) {
+            await cascadeSkip(step.id);
+          }
+
+          await notify(`❌ Loop "${step.id}" failed before expansion: ${message}`);
+          continue;
+        }
         const expandedChildren = [];
         
         if (list.length > 0) {
