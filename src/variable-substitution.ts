@@ -53,43 +53,57 @@ export function buildContext(runId, workflowConfig = {}, now = new Date()) {
   };
 }
 
-/**
- * Replace all {variable} placeholders in a string using the given context.
- * Unknown placeholders are left unchanged (not treated as errors) so that
- * workflow authors can use braces for other purposes in their task prompts
- * without breaking substitution.
- *
- * @param {string} template - String containing zero or more {variable} placeholders
- * @param {SubstitutionContext} ctx - Context object supplying variable values
- * @returns {string} The template with all known variables replaced
- *
- * @example
- * const ctx = buildContext('my-run');
- * substituteVars('Audit output: data/{date}/results.json', ctx);
- * // → 'Audit output: data/2026-03-09/results.json'
- *
- * // Unknown variables are passed through:
- * substituteVars('Hello {name}, run={run_id}', ctx);
- * // → 'Hello {name}, run=my-run'
- */
-export function substituteVars(template, ctx) {
-  if (typeof template !== 'string') return template;
+export class TemplateSubstitutionError extends Error {
+  constructor(
+    public token: string,
+    public value: unknown,
+    public hint?: string,
+  ) {
+    super(
+      `Invalid template token ${token}: resolved to ${Object.prototype.toString.call(value)}. ` +
+        (hint || "Use a scalar path such as {item.alert_key}."),
+    );
 
-  // Replace all {key} tokens where key is a known context variable.
-  // Supports nested properties via dot notation (e.g. {config.browser_upload_dir}).
+    this.name = "TemplateSubstitutionError";
+  }
+}
+
+function isScalar(value: unknown): value is string | number | boolean {
+  return (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  );
+}
+
+export function substituteVars(template: unknown, ctx: any): unknown {
+  if (typeof template !== "string") return template;
+
   return template.replace(/\{([\w.]+)\}/g, (match, path) => {
-    const parts = path.split('.');
-    let current = ctx;
+    const parts = path.split(".");
+    let current: any = ctx;
 
     for (const part of parts) {
-      if (current !== null && typeof current === 'object' && part in current) {
+      if (current !== null && typeof current === "object" && part in current) {
         current = current[part];
       } else {
-        return match; // Variable not found, return original token
+        throw new TemplateSubstitutionError(
+          match,
+          undefined,
+          `Unknown token path: ${path}`,
+        );
       }
     }
 
-    return current !== undefined ? String(current) : match;
+    if (!isScalar(current)) {
+      throw new TemplateSubstitutionError(
+        match,
+        current,
+        `Token "${match}" is not scalar. Did you mean "{${path}.alert_key}"?`,
+      );
+    }
+
+    return String(current);
   });
 }
 
