@@ -44,6 +44,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { validateWorkflowTemplates } from './template-schema-validator.js';
 import {
   createRunState, updateRunState, updateStepState, saveRunState,
 } from './workflow-state.js';
@@ -80,6 +81,7 @@ const TICK_INTERVAL_MS = 500;
  */
 
 export async function compileWorkflow(workflow, runId, config) {
+  validateWorkflowTemplates(workflow);
   const varCtx = buildContext(runId, workflow.config);
   const plannedSteps = [];
 

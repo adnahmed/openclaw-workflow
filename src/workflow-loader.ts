@@ -30,6 +30,7 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import yaml from "js-yaml";
+import { validateWorkflowTemplates } from "./template-schema-validator.js";
 
 /**
  * @typedef {Object} WorkflowStep
@@ -285,7 +286,7 @@ function normalizeAndValidate(raw, filePath) {
 	detectCycles(depMap, raw.name);
 
 	// ── Normalize top-level fields ─────────────────────────────────────────────
-	return {
+	const normalizedWorkflow = {
 		name: raw.name.trim(),
 		version: raw.version ? String(raw.version) : "1.0",
 		description: raw.description || "",
@@ -296,6 +297,10 @@ function normalizeAndValidate(raw, filePath) {
 				? Math.max(1, raw.concurrency)
 				: 3,
 	};
+
+	validateWorkflowTemplates(normalizedWorkflow);
+
+	return normalizedWorkflow;
 }
 
 /**
