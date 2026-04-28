@@ -679,18 +679,19 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
             }
           }
 
-          await mutateState(current =>
-            updateStepState(
-              current,
-              step.id,
-              {
-                status: expandedChildren.length > 0 ? "running" : "ok",
-                completed_at: expandedChildren.length > 0 ? undefined : new Date().toISOString(),
-                duration_ms: expandedChildren.length > 0 ? undefined : 0,
-              },
-              runsDir,
-            ),
-          );
+           if (expandedChildren.length > 0) {
+             await mutateState(current =>
+               updateStepState(current, step.id, { status: "running" }, runsDir)
+             );
+           } else {
+             await mutateState(current =>
+               updateStepState(current, step.id, {
+                 status: "ok",
+                 completed_at: new Date().toISOString(),
+                 duration_ms: 0,
+               }, runsDir)
+             );
+           }
 
           if (list.length > 0) {
             await notify(`🔄 Expanded loop "${step.id}" into ${list.length} iterations`);
@@ -835,6 +836,7 @@ export async function resumeWorkflow(previousState, workflow, newRunId, api, con
  * console.log(report.execution_plan);
  */
 export function dryRun(workflow, runId) {
+  validateWorkflowTemplates(workflow);
   const varCtx = buildContext(runId, workflow.config);
   const steps = workflow.steps.map(step => step.for_each ? { ...step } : substituteDeep(step, varCtx));
 
