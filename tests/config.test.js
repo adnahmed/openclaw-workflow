@@ -21,6 +21,7 @@ test('normalizePluginConfig preserves documented defaults', () => {
   assert.equal(config.pollIntervalMs, 5000);
   assert.equal(config.notifyChannel, null);
   assert.equal(config.defaultModel, null);
+  assert.equal(config.sessionAdapter, 'auto');
 });
 
 test('normalizePluginConfig clamps concurrency and poll interval', () => {
