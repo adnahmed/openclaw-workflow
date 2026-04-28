@@ -145,6 +145,7 @@ workflow_status({ name: "hello" })
 | `outputs`      | string[]  | ❌       | `[]`    | File paths that must exist after the step completes. If any are missing, the step is marked `failed`. Supports [variable substitution](#variable-substitution). |
 | `for_each`     | string    | ❌       | —       | Variable containing a list to iterate over (e.g., `"{songs}"`). |
 | `parser`       | string    | ❌       | `"auto"` | Parser to use for the loop list (`"json"`, `"csv"`, `"newline"`, `"auto"`). |
+| `item_schema`    | object    | ❌       | —       | Optional schema to validate each item in the loop list (type, required fields, patterns). |
 | `steps`        | array     | ❌       | `[]`    | Steps to execute for each item in the `for_each` list. |
  | `model`        | string    | ❌       | Plugin default | LLM model override for this step's session (e.g. `"anthropic/claude-opus-4"`). |
  | `concurrency`   | number    | ❌       | Global limit | Max parallel instances of this specific step. Useful for avoiding rate limits on specific tools/APIs. |
@@ -442,16 +443,25 @@ B ──┘
 When a non-optional step fails, all steps that depend on it (directly or transitively) are marked `skipped`. This prevents false failures and makes the status clear: the step didn't fail, it was never attempted.
  
 ### Loop Execution (`for_each`)
-  
+   
 Workflows can iterate over a list of items using the `for_each` field. 
 
 **How it works:**
-The engine resolves the `{variable}` (e.g., `{songs}`) by looking for a matching file in the workspace (e.g., `songs.json`, `songs.txt`, or `songs.csv`). This allows you to have one step generate a list of items (like a list of songs to process) and a subsequent loop step iterate over them.
+The engine resolves the list based on the format of the `for_each` value:
+
+1. **Whole-Token References** (e.g., `{songs}`):
+   - First, it looks for the key in the current context.
+   - If not found or not an array, it falls back to looking for a file named `songs.json` in the workspace.
+2. **Path Templates** (e.g., `manifest-{date}.json`):
+   - Variables are substituted strictly. If a variable (like `{date}`) is missing or invalid, the workflow fails immediately.
+   - The resulting path is then resolved as a file.
+3. **Explicit Paths** (e.g., `songs.txt`):
+   - Resolved directly as a file.
 
 - **Expansion**: A loop step is expanded into multiple unique step instances, one for each item in the list. An instance ID follows the pattern `loop_id:index:inner_step_id`.
 - **Dynamic Tasks**: Use the `{item}` variable in `task` or `outputs` fields to refer to the current iteration's value.
 - **Dependency Resolution**: If a step depends on a loop step, it will wait for all instances of the last step in that loop to complete before starting.
-- **List Parsing**: The loop resolves the `for_each` variable using a `parser`:
+- **List Parsing**: The loop resolves the `for_each` value using a `parser`:
   - `json` (default/auto for `.json`): Parses a JSON array.
   - `csv` (auto for `.csv`): Splits content by commas.
   - `newline` (auto for `.txt`): Treats each line as a separate item.
@@ -466,12 +476,29 @@ The engine resolves the `{variable}` (e.g., `{songs}`) by looking for a matching
     - id: process_songs
       name: "Process Songs"
       depends_on: [find_songs]
-      # use an explicit path for maximum clarity
       for_each: "songs.txt" 
       parser: "newline"
       steps:
         - id: transcribe
           task: "Transcribe {item}..."
+  ```
+
+- **Example with Validation:**
+  Use `item_schema` to ensure the resolved list contains the expected data before expanding the loop:
+  ```yaml
+  - id: process_alerts
+    for_each: "data/linkedin/job-alerts/alerts-execution-manifest-{date}.json"
+    parser: "json"
+    item_schema:
+      type: object
+      required: [alert_key]
+      properties:
+        alert_key:
+          type: string
+          pattern: "^alert_[a-z0-9_:-]+$"
+    steps:
+      - id: notify
+        task: "Send notification for {item.alert_key}"
   ```
 
  

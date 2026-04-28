@@ -1,6 +1,7 @@
 import { readFile, appendFile } from 'node:fs/promises';
 import { join, isAbsolute as pathIsAbsolute } from 'node:path';
 import yaml from 'js-yaml';
+import { substituteVars } from './variable-substitution.js';
 
 async function logSkipDebug(msg: string) {
   try {
@@ -8,6 +9,44 @@ async function logSkipDebug(msg: string) {
   } catch {}
 }
 
+
+/**
+ * Validates each item in a resolved list against an optional schema.
+ * 
+ * @param {any} step - The workflow step definition containing the schema
+ * @param {any[]} list - The resolved list of items to validate
+ * @throws {Error} If an item fails validation
+ */
+export function validateLoopItems(step: any, list: any[]) {
+  if (!step.item_schema) return;
+
+  for (const [index, item] of list.entries()) {
+    if (step.item_schema.type === "object" && (item === null || typeof item !== "object" || Array.isArray(item))) {
+      throw new Error(`${step.id}[${index}] expected object, got ${typeof item}`);
+    }
+
+    for (const field of step.item_schema.required || []) {
+      if (!(field in item)) {
+        throw new Error(`${step.id}[${index}] missing required field: ${field}`);
+      }
+    }
+
+    for (const [field, rule] of Object.entries(step.item_schema.properties || {})) {
+      if (!(field in item)) continue;
+
+      const value = (item as any)[field];
+      const r = rule as any;
+
+      if (r.type === "string" && typeof value !== "string") {
+        throw new Error(`${step.id}[${index}].${field} expected string`);
+      }
+
+      if (r.pattern && !new RegExp(r.pattern).test(value)) {
+        throw new Error(`${step.id}[${index}].${field} failed pattern: ${value}`);
+      }
+    }
+  }
+}
 
 /**
  * Resolves a specific file path into a list of items.
@@ -53,49 +92,48 @@ export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
  * @returns {Promise<any[]>} The resolved list of items
  */
 export async function resolveList(token, ctx, baseDir, parser = 'auto') {
-  // 1. Check if 'token' is actually an explicit file path (not {variable})
-  if (!token.startsWith('{') || !token.endsWith('}')) {
-    return resolvePathToList(token, baseDir, parser);
+  const isWholeTokenRef = /^\{[\w.]+\}$/.test(token);
+
+  // Path template case:
+  // e.g. data/linkedin/job-alerts/alerts-execution-manifest-{date}.json
+  // This must be strict. If {date} is missing, fail loudly.
+  if (!isWholeTokenRef) {
+    const substitutedPath = substituteVars(token, ctx);
+
+    if (typeof substitutedPath !== 'string') {
+      throw new Error(`for_each path did not resolve to a string: ${token}`);
+    }
+
+    return resolvePathToList(substitutedPath, baseDir, parser);
   }
 
-  // 2. Extract key from {key}
-  const match = token.match(/\{(\w+)\}/);
+  // Whole-token case:
+  // e.g. {songs}
+  // Keep old behavior: first check ctx, then file fallback.
+  const match = token.match(/^\{([\w.]+)\}$/);
   if (!match) return [];
+
   const key = match[1];
 
-
-  // 2. Check static context first
-  if (Object.prototype.hasOwnProperty.call(ctx, key)) {
-    const val = ctx[key];
-    return parseValue(val, parser);
-  }
-
-  // 3. Attempt to find a file named `key.json`, `key.txt`, etc.
-  const candidates = [
-    join(baseDir, `${key}.json`),
-    join(baseDir, `${key}.txt`),
-    join(baseDir, `${key}.csv`),
-  ];
-
-  for (const path of candidates) {
-    try {
-      const content = await readFile(path, 'utf8');
-      
-      // If parser is 'auto', we guess based on extension
-      let effectiveParser = parser;
-      if (parser === 'auto') {
-        if (path.endsWith('.json')) effectiveParser = 'json';
-        else if (path.endsWith('.csv')) effectiveParser = 'csv';
-        else if (path.endsWith('.txt')) effectiveParser = 'newline';
-      }
-
-      return parseValue(content, effectiveParser);
-    } catch {
-      // File not found or unparseable, try next candidate
+  let current = ctx;
+  for (const part of key.split('.')) {
+    if (current !== null && typeof current === 'object' && part in current) {
+      current = current[part];
+    } else {
+      current = undefined;
+      break;
     }
   }
 
-  return [];
+  if (Array.isArray(current)) {
+    return current;
+  }
+
+  if (typeof current === 'string') {
+    return resolvePathToList(current, baseDir, parser);
+  }
+
+  return resolvePathToList(`${key}.json`, baseDir, parser);
 }
 
 /**

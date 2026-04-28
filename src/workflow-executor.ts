@@ -48,7 +48,7 @@ import {
   createRunState, updateRunState, updateStepState, saveRunState,
 } from './workflow-state.js';
 import { buildContext, substituteDeep, assertSafeOutputPath } from './variable-substitution.js';
-import { resolveList, resolvePathToList } from './list-resolver.js';
+import { resolveList, resolvePathToList, validateLoopItems } from './list-resolver.js';
 import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -482,6 +482,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
         
         // 1. Resolve the list for this iteration
         const list = await resolveList(step.for_each, varCtx, baseDir, step.parser);
+        validateLoopItems(step, list);
         const expandedChildren = [];
         
         if (list.length > 0) {
