@@ -145,3 +145,26 @@ export function substituteDeep(value, ctx) {
   // Primitives (number, boolean, null, undefined) pass through unchanged
   return value;
 }
+
+const BAD_PATH_FRAGMENTS = [
+  "[object Object]",
+  "undefined",
+  "null",
+  "NaN",
+];
+
+export function assertSafeOutputPath(outputPath: string) {
+  for (const bad of BAD_PATH_FRAGMENTS) {
+    if (outputPath.includes(bad)) {
+      throw new Error(`Unsafe output path "${outputPath}" contains "${bad}"`);
+    }
+  }
+
+  if (outputPath.includes("..")) {
+    throw new Error(`Unsafe output path "${outputPath}" contains path traversal`);
+  }
+
+  if (/[<>:"|?*]/.test(outputPath)) {
+    throw new Error(`Unsafe output path "${outputPath}" contains forbidden filename characters`);
+  }
+}

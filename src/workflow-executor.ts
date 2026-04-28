@@ -47,7 +47,7 @@ import path from 'node:path';
 import {
   createRunState, updateRunState, updateStepState, saveRunState,
 } from './workflow-state.js';
-import { buildContext, substituteDeep } from './variable-substitution.js';
+import { buildContext, substituteDeep, assertSafeOutputPath } from './variable-substitution.js';
 import { resolveList, resolvePathToList } from './list-resolver.js';
 import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -286,6 +286,13 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
 
     const promise = (async () => {
       try {
+        // Path safety gate: ensure substituted output paths are safe before execution
+        if (step.outputs) {
+          for (const outPath of step.outputs) {
+            assertSafeOutputPath(outPath);
+          }
+        }
+
         let result;
         try {
          result = await stepRunner(step, runId, api, {
