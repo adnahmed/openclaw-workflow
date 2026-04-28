@@ -409,19 +409,26 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
       // Check if any running loop-controllers have all their iterations finished.
       for (const step of steps) {
         if (step.for_each && state.steps[step.id]?.status === 'running') {
-          const childrenIds = Object.keys(state.steps).filter(id => id.startsWith(`${step.id}:`));
-          if (childrenIds.length > 0 && childrenIds.every(id => ['ok', 'failed', 'skipped'].includes(state.steps[id]?.status))) {
-            const startedAt = state.steps[step.id]?.started_at;
-            const completedAt = new Date().toISOString();
-            const durationMs = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
+           const childrenIds = Object.keys(state.steps).filter(id => id.startsWith(`${step.id}:`));
+           const childStates = childrenIds.map(id => state.steps[id]?.status);
 
-            await mutateState(current => updateStepState(current, step.id, { 
-              status: 'ok', 
-              completed_at: completedAt,
-              duration_ms: durationMs
-            }, runsDir));
-            await notify(`✅ Loop "${step.id}" complete`);
-          }
+           if (childrenIds.length > 0 && childStates.every(s => ['ok', 'failed', 'skipped'].includes(s))) {
+             const anyFailed = childStates.includes('failed');
+             const startedAt = state.steps[step.id]?.started_at;
+             const completedAt = new Date().toISOString();
+             const durationMs = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
+
+             await mutateState(current => updateStepState(current, step.id, { 
+               status: anyFailed && !step.optional ? 'failed' : 'ok', 
+               completed_at: completedAt,
+               duration_ms: durationMs
+             }, runsDir));
+
+             if (anyFailed && !step.optional) {
+               await cascadeSkip(step.id);
+             }
+             await notify(`${anyFailed && !step.optional ? '❌' : '✅'} Loop "${step.id}" complete`);
+           }
         }
       }
 
