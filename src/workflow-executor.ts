@@ -296,6 +296,52 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
     }
   }
 
+  async function failLoopExpansion(step, err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const now = new Date().toISOString();
+
+    await mutateState(async current => {
+      let next = await updateStepState(
+        current,
+        step.id,
+        {
+          status: step.optional ? "ok" : "failed",
+          started_at: current.steps[step.id]?.started_at ?? now,
+          completed_at: now,
+          duration_ms: current.steps[step.id]?.started_at
+            ? Date.now() - new Date(current.steps[step.id].started_at).getTime()
+            : 0,
+          error: step.optional ? null : `Loop expansion failed: ${message}`,
+          logs: JSON.stringify(
+            {
+              phase: "expand_loop",
+              loop_step: step.id,
+              error: message,
+            },
+            null,
+            2,
+          ),
+        },
+        runsDir,
+      );
+
+      if (!step.optional) {
+        next = await updateRunState(
+          next,
+          {
+            status: "failed",
+            phase: "expand_loop",
+            completed_at: now,
+            error: `Loop expansion failed in ${step.id}: ${message}`,
+          },
+          runsDir,
+        );
+      }
+
+      return next;
+    });
+  }
+
   function clearRetryWaiters() {
     cancelled = true;
     for (const waiter of retryWaiters.values()) {
@@ -543,120 +589,128 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 
     if (ready) {
       if (step.for_each) {
-        // ── Dynamic Loop Expansion ─────────────────────────────────────────────
-        
-        // 1. Resolve the list for this iteration
-        let list: any[];
+        await mutateState(current =>
+          updateStepState(
+            current,
+            step.id,
+            {
+              status: "running",
+              started_at: current.steps[step.id]?.started_at ?? new Date().toISOString(),
+              attempts: (current.steps[step.id]?.attempts || 0) + 1,
+              error: null,
+            },
+            runsDir,
+          ),
+        );
 
         try {
-          list = await resolveList(step.for_each, varCtx, baseDir, step.parser);
+          const list = await resolveList(step.for_each, varCtx, baseDir, step.parser);
           validateLoopItems(step, list);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+
+          const expandedChildren = [];
+
+          if (list.length > 0) {
+            let innerStepsDef = step.steps || [];
+
+            if (innerStepsDef.length === 0 && step.task) {
+              innerStepsDef = [
+                {
+                  id: "task",
+                  name: step.name,
+                  task: step.task,
+                  concurrency: step.concurrency,
+                  timeout: step.timeout,
+                  retry: step.retry,
+                  retry_delay: step.retry_delay,
+                  optional: step.optional,
+                  outputs: step.outputs,
+                  depends_on: [],
+                },
+              ];
+            }
+
+            const lastInnerId =
+              innerStepsDef.length > 0
+                ? innerStepsDef[innerStepsDef.length - 1].id
+                : null;
+
+            for (let i = 0; i < list.length; i++) {
+              const item = list[i];
+              const prefix = `${step.id}:${i}:`;
+              const itemCtx = { ...varCtx, item };
+
+              for (const innerDef of innerStepsDef) {
+                const substitutedInner = substituteDeep(innerDef, itemCtx);
+
+                const originalInnerId = substitutedInner.id;
+                substitutedInner.id = prefix + originalInnerId;
+                substitutedInner.original_id = `${step.id}:${originalInnerId}`;
+
+                substitutedInner.depends_on = (substitutedInner.depends_on || []).map(depId => {
+                  if (innerStepsDef.some(s => s.id === depId)) {
+                    return prefix + depId;
+                  }
+
+                  return depId;
+                });
+
+                expandedChildren.push(substitutedInner);
+              }
+            }
+
+            for (const child of expandedChildren) {
+              steps.push(child);
+              await mutateState(current =>
+                updateStepState(current, child.id, { status: "pending" }, runsDir),
+              );
+            }
+
+            if (lastInnerId) {
+              const lastSteps = expandedChildren
+                .filter(child => child.id.endsWith(`:${lastInnerId}`))
+                .map(child => child.id);
+
+              for (const s of steps) {
+                if (s.depends_on?.includes(step.id)) {
+                  const newDeps = s.depends_on.filter(d => d !== step.id);
+                  s.depends_on = [...newDeps, ...lastSteps];
+                }
+              }
+            }
+          }
 
           await mutateState(current =>
-            updateStepState(current, step.id, {
-              status: 'failed',
-              completed_at: new Date().toISOString(),
-              error: message,
-              attempts: state.steps[step.id]?.attempts || 0,
-              output_check: {
-                passed: false,
-                missing_files: [],
-                checked_files: [],
+            updateStepState(
+              current,
+              step.id,
+              {
+                status: expandedChildren.length > 0 ? "running" : "ok",
+                completed_at: expandedChildren.length > 0 ? undefined : new Date().toISOString(),
+                duration_ms: expandedChildren.length > 0 ? undefined : 0,
               },
-            }, runsDir)
+              runsDir,
+            ),
           );
+
+          if (list.length > 0) {
+            await notify(`🔄 Expanded loop "${step.id}" into ${list.length} iterations`);
+          }
+
+          continue;
+        } catch (err) {
+          await failLoopExpansion(step, err);
 
           if (!step.optional) {
             await cascadeSkip(step.id);
           }
 
-          await notify(`❌ Loop "${step.id}" failed before expansion: ${message}`);
+          const message = err instanceof Error ? err.message : String(err);
+          await notify(`❌ Loop "${step.id}" failed during expansion: ${message}`);
+
           continue;
         }
-        const expandedChildren = [];
-        
-        if (list.length > 0) {
-          let innerStepsDef = step.steps || [];
-          if (innerStepsDef.length === 0 && step.task) {
-            innerStepsDef = [{
-              id: 'task',
-              name: step.name,
-              task: step.task,
-              concurrency: step.concurrency,
-              timeout: step.timeout,
-              retry: step.retry,
-              retry_delay: step.retry_delay,
-              optional: step.optional,
-              outputs: step.outputs,
-              depends_on: [],
-            }];
-          }
-          const lastInnerId = innerStepsDef.length > 0 ? innerStepsDef[innerStepsDef.length - 1].id : null;
-           for (let i = 0; i < list.length; i++) {
-            const item = list[i];
-            const prefix = `${step.id}:${i}:`;
-            const itemCtx = { ...varCtx, item };
-
-            // Expand and substitute inner steps
-            for (const innerDef of innerStepsDef) {
-              const substitutedInner = substituteDeep(innerDef, itemCtx);
-              
-               // Assign unique expanded ID and update its internal dependencies
-               substitutedInner.id = prefix + substitutedInner.id;
-               substitutedInner.original_id = `${step.id}:${substitutedInner.id.split(':').pop()}`;
-               substitutedInner.depends_on = (substitutedInner.depends_on || []).map(depId => {
-                if (innerStepsDef.some(s => s.id === depId)) {
-                  return prefix + depId;
-                }
-                return depId;
-              });
-
-              expandedChildren.push(substitutedInner);
-            }
-          }
-
-          // 2. Inject new steps into the active workflow list and state
-          for (const child of expandedChildren) {
-            steps.push(child);
-            await mutateState(current => updateStepState(current, child.id, { status: 'pending' }, runsDir));
-          }
-
-          // 3. Rewire downstream dependencies
-          // Any step that depends on this loop step should now depend on the last step of every iteration.
-          if (lastInnerId) {
-            for (const s of steps) {
-              if (s.depends_on.includes(step.id)) {
-                const newDeps = s.depends_on.filter(d => d !== step.id);
-                const lastSteps = expandedChildren
-                  .filter(c => c.id.endsWith(`:${lastInnerId}`))
-                  .map(c => c.id);
-                s.depends_on = [...newDeps, ...lastSteps];
-              }
-            }
-          }
-        }
-
-        // Mark the loop-controller step as 'running' if there are iterations, otherwise 'ok'
-        if (expandedChildren.length > 0) {
-          await mutateState(current => updateStepState(current, step.id, { 
-            status: 'running', 
-            started_at: new Date().toISOString(),
-          }, runsDir));
-        } else {
-          await mutateState(current => updateStepState(current, step.id, { 
-            status: 'ok', 
-            completed_at: new Date().toISOString(),
-            duration_ms: 0 
-          }, runsDir));
-        }
-        
-        if (list.length > 0) {
-          await notify(`🔄 Expanded loop "${step.id}" into ${list.length} iterations`);
-        }
-        continue; // Move to next tick to pick up new steps
       }
+
       
       if (step.skip_if_empty) {
         const checkPath = substituteDeep(step.skip_if_empty, varCtx);
