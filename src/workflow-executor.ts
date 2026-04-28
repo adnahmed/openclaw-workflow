@@ -85,36 +85,28 @@ export async function compileWorkflow(workflow, runId, config) {
 
   for (const step of workflow.steps) {
     if (step.for_each) {
-      const list = await resolveList(step.for_each, varCtx, config.baseDir, step.parser);
-      validateLoopItems(step, list);
-
-      for (const [i, item] of list.entries()) {
-        const itemCtx = { ...varCtx, item };
-        const expanded = substituteDeep(step, itemCtx);
-
-        for (const output of expanded.outputs || []) {
-          assertSafeOutputPath(output);
-        }
-
-        plannedSteps.push({
-          controller: step.id,
-          index: i,
-          item,
-          outputs: expanded.outputs || [],
-        });
-      }
-    } else {
-      const expanded = substituteDeep(step, varCtx);
-
-      for (const output of expanded.outputs || []) {
-        assertSafeOutputPath(output);
-      }
-
       plannedSteps.push({
         id: step.id,
-        outputs: expanded.outputs || [],
+        controller: step.id,
+        dynamic: true,
+        for_each: substituteDeep(step.for_each, varCtx),
+        parser: step.parser || "auto",
+        outputs: step.outputs || [],
       });
+
+      continue;
     }
+
+    const expanded = substituteDeep(step, varCtx);
+
+    for (const output of expanded.outputs || []) {
+      assertSafeOutputPath(output);
+    }
+
+    plannedSteps.push({
+      id: step.id,
+      outputs: expanded.outputs || [],
+    });
   }
 
   return plannedSteps;
@@ -155,11 +147,12 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 		const plan = await compileWorkflow(workflow, runId, config);
 		await fs.writeFile(join(config.runsDir, `${runId}.plan.json`), JSON.stringify(plan, null, 2));
 	} catch (err) {
-		const state = createRunState(workflow.name, workflow.steps.map(s => s.id), runId);
+		const state = initialState ?? createRunState(workflow.name, workflow.steps.map(s => s.id), runId);
 		return await updateRunState(state, {
 			status: 'failed',
 			phase: 'compile',
 			error: err instanceof Error ? err.message : String(err),
+			completed_at: new Date().toISOString(),
 			spawned_sessions: 0,
 		}, config.runsDir);
 	}
