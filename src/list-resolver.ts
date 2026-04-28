@@ -56,7 +56,7 @@ export function validateLoopItems(step: any, list: any[]) {
  * @param {string} [parser='auto'] - Parser to use ('json', 'csv', 'newline', 'auto')
  * @returns {Promise<any[]>} The resolved list of items
  */
-export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
+export async function resolvePathToList(filePath, baseDir, parser = 'auto', strict = false) {
   const fullPath = pathIsAbsolute(filePath) ? filePath : join(baseDir, filePath);
   try {
     await logSkipDebug(`Resolving path: ${fullPath} (parser: ${parser})`);
@@ -78,6 +78,7 @@ export async function resolvePathToList(filePath, baseDir, parser = 'auto') {
     return result;
   } catch (e) {
     await logSkipDebug(`Error resolving path ${fullPath}: ${e.message}`);
+    if (strict) throw e;
     return [];
   }
 }
@@ -104,7 +105,8 @@ export async function resolveList(token, ctx, baseDir, parser = 'auto') {
       throw new Error(`for_each path did not resolve to a string: ${token}`);
     }
 
-    return resolvePathToList(substitutedPath, baseDir, parser);
+    return resolvePathToList(substitutedPath, baseDir, parser, true);
+
   }
 
   // Whole-token case:
@@ -147,28 +149,21 @@ function parseValue(val, parser) {
 
   switch (parser) {
     case 'json':
-      try {
-        const parsed = typeof val === 'string' ? JSON.parse(val) : val;
-        return normalizeToList(parsed);
-      } catch (e) {
-        return [];
-      }
+      const parsed = typeof val === 'string' ? JSON.parse(val) : val;
+      return normalizeToList(parsed);
+
     case 'jsonl':
       if (typeof val !== 'string') return [];
       return val.split(/\r?\n/)
         .map(line => line.trim())
         .filter(Boolean)
-        .map(line => {
-          try { return JSON.parse(line); } catch { return null; }
-        })
+        .map(line => JSON.parse(line))
         .filter(Boolean);
+
     case 'yaml':
-      try {
-        const parsed = typeof val === 'string' ? yaml.load(val) : val;
-        return normalizeToList(parsed);
-      } catch (e) {
-        return [];
-      }
+      const parsed = typeof val === 'string' ? yaml.load(val) : val;
+      return normalizeToList(parsed);
+
     case 'csv':
       if (typeof val !== 'string') return [val];
       // Simple CSV split (comma). Future: handle quoted commas.
