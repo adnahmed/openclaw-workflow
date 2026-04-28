@@ -148,7 +148,7 @@ workflow_status({ name: "hello" })
 | `version`     | string   | ❌       | `"1.0"` | Schema version for future compatibility. |
 | `description` | string   | ❌       | `""`    | Human description shown in `workflow_list`. |
 | `steps`       | array    | ✅       | —       | Ordered list of step definitions. |
-| `concurrency` | number   | ❌       | `3`     | Max steps that run in parallel. Range: 1–10. |
+| `concurrency` | number   | ❌       | `3`     | Max steps that run in parallel. |
 | `config`       | object   | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
 
 ### Step fields
