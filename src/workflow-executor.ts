@@ -759,7 +759,7 @@ export async function resumeWorkflow(previousState, workflow, newRunId, api, con
  */
 export function dryRun(workflow, runId) {
   const varCtx = buildContext(runId, workflow.config);
-  const steps = workflow.steps.map(step => substituteDeep(step, varCtx));
+  const steps = workflow.steps.map(step => step.for_each ? { ...step } : substituteDeep(step, varCtx));
 
   // Build execution waves (steps with no unresolved deps execute together)
   const waves = [];
