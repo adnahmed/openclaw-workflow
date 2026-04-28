@@ -494,9 +494,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
             }];
           }
           const lastInnerId = innerStepsDef.length > 0 ? innerStepsDef[innerStepsDef.length - 1].id : null;
-          const expandedChildren = [];
-
-          for (let i = 0; i < list.length; i++) {
+           for (let i = 0; i < list.length; i++) {
             const item = list[i];
             const prefix = `${step.id}:${i}:`;
             const itemCtx = { ...varCtx, item };
