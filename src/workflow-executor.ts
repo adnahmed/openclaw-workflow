@@ -79,6 +79,47 @@ const TICK_INTERVAL_MS = 500;
  * @property {number}   [cronPollTimeoutMs] - Timeout for cron poll (ms)
  */
 
+export async function compileWorkflow(workflow, runId, config) {
+  const varCtx = buildContext(runId, workflow.config);
+  const plannedSteps = [];
+
+  for (const step of workflow.steps) {
+    if (step.for_each) {
+      const list = await resolveList(step.for_each, varCtx, config.baseDir, step.parser);
+      validateLoopItems(step, list);
+
+      for (const [i, item] of list.entries()) {
+        const itemCtx = { ...varCtx, item };
+        const expanded = substituteDeep(step, itemCtx);
+
+        for (const output of expanded.outputs || []) {
+          assertSafeOutputPath(output);
+        }
+
+        plannedSteps.push({
+          controller: step.id,
+          index: i,
+          item,
+          outputs: expanded.outputs || [],
+        });
+      }
+    } else {
+      const expanded = substituteDeep(step, varCtx);
+
+      for (const output of expanded.outputs || []) {
+        assertSafeOutputPath(output);
+      }
+
+      plannedSteps.push({
+        id: step.id,
+        outputs: expanded.outputs || [],
+      });
+    }
+  }
+
+  return plannedSteps;
+}
+
 /**
  * Execute a workflow run to completion.
 
@@ -109,6 +150,17 @@ const TICK_INTERVAL_MS = 500;
  * );
  */
 export async function executeWorkflow(workflow, runId, api, config, stepRunner, initialState = null) {
+  try {
+    const plan = await compileWorkflow(workflow, runId, config);
+    await fs.writeFile(join(config.runsDir, `${runId}.plan.json`), JSON.stringify(plan, null, 2));
+  } catch (err) {
+    return {
+      status: 'failed',
+      phase: 'compile',
+      spawned_sessions: 0,
+    };
+  }
+
   const {
     runsDir,
     baseDir,
