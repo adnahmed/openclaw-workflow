@@ -247,6 +247,7 @@ function normalizeAndValidate(raw, filePath) {
 				for_each: step.for_each || null,
 				skip_if_empty: step.skip_if_empty || null,
 				parser: step.parser || "auto",
+				item_schema: step.item_schema || null,
 				steps: Array.isArray(step.steps) ? step.steps : [],
 				model: step.model || null,
 				concurrency:
