@@ -74,10 +74,7 @@ export default definePluginEntry({
 			api?.config?.plugins?.entries?.["openclaw-workflow"]?.config ??
 			{};
 
-		const config = normalizePluginConfig(
-			rawPluginConfig,
-			api?.runtime ?? {},
-		);
+		const config = normalizePluginConfig(rawPluginConfig, api?.runtime ?? {});
 
 		const sessionAdapter =
 			process.env.OPENCLAW_WORKFLOW_SESSION_ADAPTER ||
@@ -89,26 +86,9 @@ export default definePluginEntry({
 			source: process.env.OPENCLAW_WORKFLOW_SESSION_ADAPTER
 				? "env"
 				: config.sessionAdapter !== "auto"
-				? "plugin-config"
-				: "default",
+					? "plugin-config"
+					: "default",
 		});
-
-		const {
-			workflowsDir,
-			runsDir,
-			baseDir,
-			concurrency: concurrencyDefault,
-			pollIntervalMs,
-			defaultModel,
-			notifyChannel,
-			cronDeliveryMode,
-			cronDeliveryChannel,
-			cronDeliveryTo,
-			cliTimeoutMs,
-			cronAddTimeoutMs,
-			cronRunTimeoutMs,
-			cronPollTimeoutMs,
-		} = config;
 
 		const {
 			workflowsDir,
