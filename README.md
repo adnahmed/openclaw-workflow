@@ -48,6 +48,7 @@ Configure the plugin in your OpenClaw settings:
           "concurrency": 3,
           "notifyChannel": "telegram",
           "sessionModel": "anthropic/claude-sonnet-4-6",
+          "sessionAdapter": "auto",
           "pollIntervalMs": 5000
         }
       }
@@ -69,7 +70,23 @@ On Windows/WSL-mounted directories, OpenClaw may block linked plugins when the s
 
 ---
 
-## Quick Start (10 minutes)
+## Session Adapter Selection
+The plugin chooses how to spawn subagent sessions based on the available OpenClaw API surface.
+
+**Precedence:**
+1. `OPENCLAW_WORKFLOW_SESSION_ADAPTER` environment variable (override)
+2. `sessionAdapter` plugin configuration
+3. Default: `"auto"` (selects the best available)
+
+**Available Adapters:**
+- `runtime-subagent` (Preferred): Uses the modern `api.runtime.subagent` SDK.
+- `legacy-api`: Uses the older `api.sessions` surface.
+- `cli`: Fallback to `openclaw` CLI cron jobs.
+- `auto`: Tries `runtime-subagent` $\rightarrow$ `legacy-api` $\rightarrow$ `cli`.
+
+If a specific adapter is forced but the required API is missing, the plugin will fail fast with an error.
+
+---
 
 **1. Create a workflow file:**
 
@@ -563,11 +580,13 @@ Tests use Node.js built-in `node:test` and mock step runners. They do not requir
 
 1. **Plugin API shape**: The entrypoint uses `definePluginEntry` from `openclaw/plugin-sdk/plugin-entry` and registers tools from `register(api)`.
 
-2. **Native sessions**: `src/step-runner.ts` still has an `ApiAdapter` for `api.sessions.spawn()` / `api.sessions.getStatus()` if OpenClaw exposes that surface. Until then, the CLI fallback remains isolated behind the adapter.
+  2. **Native sessions**: `src/step-runner.ts` prefers the modern `api.runtime.subagent` API (via `RuntimeSubagentAdapter`), with fallbacks to a legacy `api.sessions` surface and finally the OpenClaw CLI.
+
 
 3. **Notifications**: The plugin uses `api.notifications.send` if available and otherwise writes progress through `api.logger`.
 
 ### What OpenClaw should expose for full functionality
+The plugin is designed to use the `api.runtime.subagent` surface for isolated background runs:
 
 ```typescript
 interface PluginApi {
@@ -575,12 +594,22 @@ interface PluginApi {
   registerTool(tool: ToolDefinition): void;
   pluginConfig: Record<string, unknown>;
 
-  // Needed for openclaw-workflow:
-  sessions?: {
-    spawn(prompt: string, options: SessionSpawnOptions): Promise<{ sessionId: string; sessionKey: string }>;
-    getStatus(sessionId: string): Promise<{ status: 'running' | 'done' | 'error'; error?: string }>;
+  // Preferred surface:
+  runtime: {
+    subagent: {
+      run(args: { 
+        sessionKey: string; 
+        message: string; 
+        provider?: string; 
+        model?: string; 
+        deliver: boolean 
+      }): Promise<{ runId: string }>;
+      waitForRun(args: { 
+        runId: string; 
+        timeoutMs: number 
+      }): Promise<{ status: string; logs?: string; error?: string }>;
+    };
   };
-  notify?(channel: string, message: string): Promise<void>;
 }
 ```
 

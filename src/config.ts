@@ -13,6 +13,7 @@ type RawPluginConfig = {
   concurrency?: number;
   notifyChannel?: string;
   sessionModel?: string;
+  sessionAdapter?: 'auto' | 'runtime-subagent' | 'legacy-api' | 'cli';
   pollIntervalMs?: number;
   cronDeliveryMode?: 'none' | 'announce';
   cronDeliveryChannel?: string;
@@ -22,6 +23,7 @@ type RawPluginConfig = {
   cronRunTimeoutMs?: number;
   cronPollTimeoutMs?: number;
 };
+
 
 type RuntimeConfig = {
   cwd?: string;
@@ -50,6 +52,22 @@ export function normalizePluginConfig(rawConfig: RawPluginConfig = {}, runtime: 
     ? Math.max(rawConfig.pollIntervalMs, 250)
     : DEFAULT_POLL_INTERVAL_MS;
 
+  const allowedSessionAdapters = new Set([
+    'auto',
+    'runtime-subagent',
+    'legacy-api',
+    'cli',
+  ]);
+
+  if (
+    rawConfig.sessionAdapter &&
+    !allowedSessionAdapters.has(rawConfig.sessionAdapter)
+  ) {
+    throw new Error(
+      `Invalid sessionAdapter "${rawConfig.sessionAdapter}". Expected auto, runtime-subagent, legacy-api, or cli.`,
+    );
+  }
+
   return {
     workflowsDir: resolveConfigPath(rawConfig.workflowsDir, DEFAULT_WORKFLOWS_DIR, cwd),
     runsDir: resolveConfigPath(rawConfig.runsDir, DEFAULT_RUNS_DIR, cwd),
@@ -58,6 +76,7 @@ export function normalizePluginConfig(rawConfig: RawPluginConfig = {}, runtime: 
     notifyChannel: rawConfig.notifyChannel || null,
     defaultModel: rawConfig.sessionModel || null,
     pollIntervalMs,
+    sessionAdapter: rawConfig.sessionAdapter || 'auto',
     cronDeliveryMode: rawConfig.cronDeliveryMode || 'none',
     cronDeliveryChannel: rawConfig.cronDeliveryChannel || null,
     cronDeliveryTo: rawConfig.cronDeliveryTo || null,

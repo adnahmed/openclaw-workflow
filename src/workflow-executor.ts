@@ -149,33 +149,36 @@ export async function compileWorkflow(workflow, runId, config) {
  *   runStep
  * );
  */
-export async function executeWorkflow(workflow, runId, api, config, stepRunner, initialState = null) {
-  try {
-    const plan = await compileWorkflow(workflow, runId, config);
-    await fs.writeFile(join(config.runsDir, `${runId}.plan.json`), JSON.stringify(plan, null, 2));
-  } catch (err) {
-    return {
-      status: 'failed',
-      phase: 'compile',
-      spawned_sessions: 0,
-    };
-  }
+export async function executeWorkflow(workflow, runId, api, config, stepRunner = runStep, initialState = null) {
+	try {
+		const plan = await compileWorkflow(workflow, runId, config);
+		await fs.writeFile(join(config.runsDir, `${runId}.plan.json`), JSON.stringify(plan, null, 2));
+	} catch (err) {
+		return {
+			status: 'failed',
+			phase: 'compile',
+			spawned_sessions: 0,
+		};
+	}
 
-  const {
-    runsDir,
-    baseDir,
-    concurrency,
-    notify = () => {},
-    pollIntervalMs = 5000,
-    defaultModel,
-    cronDeliveryMode = 'none',
-    cronDeliveryChannel,
-    cronDeliveryTo,
-    cliTimeoutMs,
-    cronAddTimeoutMs,
-    cronRunTimeoutMs,
-    cronPollTimeoutMs,
-  } = config;
+
+	const {
+		runsDir,
+		baseDir,
+		concurrency,
+		notify = () => {},
+		pollIntervalMs = 5000,
+		defaultModel,
+		sessionAdapter = 'auto',
+		cronDeliveryMode = 'none',
+		cronDeliveryChannel,
+		cronDeliveryTo,
+		cliTimeoutMs,
+		cronAddTimeoutMs,
+		cronRunTimeoutMs,
+		cronPollTimeoutMs,
+	} = config;
+
 
 
   // Build substitution context once for the entire run
@@ -346,20 +349,22 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner, 
         }
 
         let result;
-        try {
-         result = await stepRunner(step, runId, api, {
-           pollIntervalMs,
-           baseDir,
-           defaultModel,
-           cronDeliveryMode,
-           cronDeliveryChannel,
-           cronDeliveryTo,
-           cliTimeoutMs,
-           cronAddTimeoutMs,
-           cronRunTimeoutMs,
-           cronPollTimeoutMs,
-         });
-        } catch (err) {
+		try {
+			result = await stepRunner(step, runId, api, {
+				pollIntervalMs,
+				baseDir,
+				defaultModel,
+				cronDeliveryMode,
+				cronDeliveryChannel,
+				cronDeliveryTo,
+				cliTimeoutMs,
+				cronAddTimeoutMs,
+				cronRunTimeoutMs,
+				cronPollTimeoutMs,
+				sessionAdapter,
+			});
+		} catch (err) {
+
           result = {
             status: 'failed',
             session_key: null,

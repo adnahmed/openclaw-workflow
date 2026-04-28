@@ -57,12 +57,59 @@ export default definePluginEntry({
 	description: "YAML/JSON workflow orchestration for OpenClaw agents.",
 	register(api) {
 		const logger = getLogger(api);
-		const config = normalizePluginConfig(
+		logger.info("[workflow] plugin api capabilities", {
+			hasTopLevelSessions: !!api?.sessions,
+			hasTopLevelSessionsSpawn: typeof api?.sessions?.spawn === "function",
+			hasRuntime: !!api?.runtime,
+			hasRuntimeSubagent: !!api?.runtime?.subagent,
+			hasRuntimeSubagentRun: typeof api?.runtime?.subagent?.run === "function",
+			hasRuntimeSubagentWaitForRun:
+				typeof api?.runtime?.subagent?.waitForRun === "function",
+			hasRuntimeAgentRunEmbeddedPiAgent:
+				typeof api?.runtime?.agent?.runEmbeddedPiAgent === "function",
+		});
+
+		const rawPluginConfig =
 			api?.pluginConfig ??
-				api?.config?.plugins?.entries?.["openclaw-workflow"]?.config ??
-				{},
+			api?.config?.plugins?.entries?.["openclaw-workflow"]?.config ??
+			{};
+
+		const config = normalizePluginConfig(
+			rawPluginConfig,
 			api?.runtime ?? {},
 		);
+
+		const sessionAdapter =
+			process.env.OPENCLAW_WORKFLOW_SESSION_ADAPTER ||
+			config.sessionAdapter ||
+			"auto";
+
+		logger.info("[workflow] session adapter requested", {
+			sessionAdapter,
+			source: process.env.OPENCLAW_WORKFLOW_SESSION_ADAPTER
+				? "env"
+				: config.sessionAdapter !== "auto"
+				? "plugin-config"
+				: "default",
+		});
+
+		const {
+			workflowsDir,
+			runsDir,
+			baseDir,
+			concurrency: concurrencyDefault,
+			pollIntervalMs,
+			defaultModel,
+			notifyChannel,
+			cronDeliveryMode,
+			cronDeliveryChannel,
+			cronDeliveryTo,
+			cliTimeoutMs,
+			cronAddTimeoutMs,
+			cronRunTimeoutMs,
+			cronPollTimeoutMs,
+		} = config;
+
 		const {
 			workflowsDir,
 			runsDir,
@@ -186,7 +233,10 @@ export default definePluginEntry({
 								workflow,
 								runId,
 								api,
-								execConfig,
+								{
+									...execConfig,
+									sessionAdapter,
+								},
 								runStep,
 							),
 						);
@@ -206,7 +256,10 @@ export default definePluginEntry({
 
 					runInBackground(
 						runId,
-						executeWorkflow(workflow, runId, api, execConfig, runStep),
+						executeWorkflow(workflow, runId, api, {
+							...execConfig,
+							sessionAdapter,
+						}),
 					);
 
 					const stepSummary = {};

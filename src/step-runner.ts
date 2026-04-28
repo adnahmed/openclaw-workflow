@@ -318,7 +318,7 @@ export async function runStep(step, runId, api, options) {
 	const startTime = Date.now();
 
 	// Select adapter based on what OpenClaw exposes
-	const adapter = selectAdapter(api);
+	const adapter = selectAdapter(api, options.sessionAdapter || "auto");
 
 	let sessionKey = null;
 	try {
@@ -436,21 +436,227 @@ export async function runStep(step, runId, api, options) {
 }
 
 /**
+ * Sanitizes a string for use in a session key.
+ * @param {any} value
+ * @returns {string}
+ */
+function safeSessionKeyPart(value) {
+	return String(value || "")
+		.replace(/[^a-zA-Z0-9:_-]/g, "_")
+		.slice(0, 120);
+}
+
+/**
+ * Splits a model reference (e.g., "openai/gpt-4") into provider and model.
+ * @param {string} modelRef
+ * @returns {{provider?: string, model?: string}}
+ */
+function splitModelRef(modelRef) {
+	if (!modelRef || typeof modelRef !== "string") return {};
+
+	const slash = modelRef.indexOf("/");
+	if (slash <= 0) {
+		return { model: modelRef };
+	}
+
+	return {
+		provider: modelRef.slice(0, slash),
+		model: modelRef.slice(slash + 1),
+	};
+}
+
+/**
+ * @class RuntimeSubagentAdapter
+ * @description Uses the modern OpenClaw Runtime SDK (api.runtime.subagent) to 
+ * launch and manage isolated subagent runs.
+ */
+class RuntimeSubagentAdapter {
+	/**
+	 * @param {Object} subagent - api.runtime.subagent object
+	 * @param {Object} [logger=console] - Plugin logger
+	 */
+	constructor(subagent, logger = console) {
+		this.subagent = subagent;
+		this.logger = logger;
+		this.sessionsByRunId = new Map();
+	}
+
+	/**
+	 * @param {string} prompt - Task prompt
+	 * @param {Object} options - Spawn options (model, timeout, label, etc.)
+	 * @returns {Promise<{ sessionId: string, sessionKey: string }>}
+	 */
+	async spawn(prompt, options = {}) {
+		const label = options.label || `workflow-${Date.now()}`;
+		const unique = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+		const sessionKey =
+			options.sessionKey ||
+			`agent:main:subagent:${safeSessionKeyPart(label)}:${unique}`;
+
+		const modelFields = splitModelRef(options.model);
+
+		const args = {
+			sessionKey,
+			message: prompt,
+			deliver: false,
+			...modelFields,
+		};
+
+		const result = await this.subagent.run(args);
+
+		if (!result?.runId) {
+			throw new Error(
+				`RuntimeSubagentAdapter: subagent.run did not return runId: ${JSON.stringify(result)}`,
+			);
+		}
+
+		this.sessionsByRunId.set(result.runId, { sessionKey });
+
+		return {
+			sessionId: result.runId,
+			sessionKey,
+		};
+	}
+
+	/**
+	 * @param {string} runId - Run ID returned by spawn()
+	 * @param {Object} [options] - Polling options
+	 * @returns {Promise<{ status: string, error?: string, logs?: string }>}
+	 */
+	async getStatus(runId, options = {}) {
+		try {
+			const timeoutMs = Math.min(
+				Math.max(options.pollIntervalMs || 1000, 250),
+				5000,
+			);
+
+			const result = await this.subagent.waitForRun({
+				runId,
+				timeoutMs,
+			});
+
+			const status = result?.status || result?.state;
+
+			if (
+				status === "ok" ||
+				status === "done" ||
+				status === "success" ||
+				status === "completed"
+			) {
+				return {
+					status: "done",
+					logs: result?.logs || result?.summary || null,
+				};
+			}
+
+			if (status === "error" || status === "failed") {
+				return {
+					status: "error",
+					error: result?.error || result?.message || "Subagent run failed",
+					logs: result?.logs || result?.summary || null,
+				};
+			}
+
+			return {
+				status: "running",
+				logs: result?.logs || result?.summary || null,
+			};
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+
+			if (
+				message.toLowerCase().includes("timeout") ||
+				message.toLowerCase().includes("timed out")
+			) {
+				return { status: "running" };
+			}
+
+			return {
+				status: "error",
+				error: `Failed to wait for subagent run: ${message}`,
+			};
+		}
+	}
+}
+
+/**
  * Select the best available session adapter.
- * Prefers the native API adapter if OpenClaw exposes the sessions API.
- * Falls back to the CLI adapter otherwise.
+ * Prefers the modern Runtime SDK, falls back to legacy ApiAdapter, then CliAdapter.
  *
  * @param {Object} api - OpenClaw plugin api object
  * @returns {SessionAdapter}
  */
-function selectAdapter(api) {
-	// Check if OpenClaw exposes a native sessions API on the plugin api object.
-	// This is the target state for the PR — once merged, this path will be taken.
-	if (api && api.sessions && typeof api.sessions.spawn === "function") {
+/**
+ * Select the best available session adapter.
+ *
+ * @param {Object} api - OpenClaw plugin api object
+ * @param {string} [requestedAdapter="auto"] - The adapter to use
+ * @returns {SessionAdapter}
+ */
+function selectAdapter(api, requestedAdapter = "auto") {
+	const logger = api?.logger;
+
+	const hasRuntimeSubagent =
+		api?.runtime?.subagent &&
+		typeof api.runtime.subagent.run === "function" &&
+		typeof api.runtime.subagent.waitForRun === "function";
+
+	const hasLegacyApi =
+		api?.sessions &&
+		typeof api.sessions.spawn === "function" &&
+		typeof api.sessions.getStatus === "function";
+
+	logger?.info?.("[workflow] selectAdapter capability check", {
+		requestedAdapter,
+		hasRuntimeSubagent,
+		hasLegacyApi,
+	});
+
+	if (requestedAdapter === "runtime-subagent") {
+		if (!hasRuntimeSubagent) {
+			throw new Error(
+				"sessionAdapter=runtime-subagent requested, but api.runtime.subagent.run/waitForRun is unavailable",
+			);
+		}
+
+		logger?.info?.("[workflow] using RuntimeSubagentAdapter");
+		return new RuntimeSubagentAdapter(api.runtime.subagent, logger);
+	}
+
+	if (requestedAdapter === "legacy-api") {
+		if (!hasLegacyApi) {
+			throw new Error(
+				"sessionAdapter=legacy-api requested, but api.sessions.spawn/getStatus is unavailable",
+			);
+		}
+
+		logger?.info?.("[workflow] using legacy ApiAdapter");
 		return new ApiAdapter(api.sessions);
 	}
 
-	// Fall back to CLI-based adapter
+	if (requestedAdapter === "cli") {
+		logger?.warn?.("[workflow] using CliAdapter because sessionAdapter=cli");
+		return new CliAdapter();
+	}
+
+	if (requestedAdapter !== "auto") {
+		throw new Error(
+			`Invalid sessionAdapter "${requestedAdapter}". Expected auto, runtime-subagent, legacy-api, or cli.`,
+		);
+	}
+
+	if (hasRuntimeSubagent) {
+		logger?.info?.("[workflow] using RuntimeSubagentAdapter");
+		return new RuntimeSubagentAdapter(api.runtime.subagent, logger);
+	}
+
+	if (hasLegacyApi) {
+		logger?.info?.("[workflow] using legacy ApiAdapter");
+		return new ApiAdapter(api.sessions);
+	}
+
+	logger?.warn?.("[workflow] using CliAdapter fallback; steps will run through cron");
 	return new CliAdapter();
 }
 
