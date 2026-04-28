@@ -246,7 +246,7 @@ export default definePluginEntry({
 						runId,
 					);
 
-					await updateRunState(
+					const runningState = await updateRunState(
 						initialState,
 						{
 							status: 'running',
@@ -260,7 +260,7 @@ export default definePluginEntry({
 						executeWorkflow(workflow, runId, api, {
 							...execConfig,
 							sessionAdapter,
-						}, runStep, initialState),
+						}, runStep, runningState),
 					);
 
 					const stepSummary = {};
