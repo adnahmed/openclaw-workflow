@@ -18,33 +18,66 @@ async function logSkipDebug(msg: string) {
  * @throws {Error} If an item fails validation
  */
 export function validateLoopItems(step: any, list: any[]) {
-  if (!step.item_schema) return;
+  const schema = step.item_schema;
+  if (!schema) return;
 
   for (const [index, item] of list.entries()) {
-    if (step.item_schema.type === "object" && (item === null || typeof item !== "object" || Array.isArray(item))) {
-      throw new Error(`${step.id}[${index}] expected object, got ${typeof item}`);
-    }
-
-    for (const field of step.item_schema.required || []) {
-      if (!(field in item)) {
-        throw new Error(`${step.id}[${index}] missing required field: ${field}`);
-      }
-    }
-
-    for (const [field, rule] of Object.entries(step.item_schema.properties || {})) {
-      if (!(field in item)) continue;
-
-      const value = (item as any)[field];
-      const r = rule as any;
-
-      if (r.type === "string" && typeof value !== "string") {
-        throw new Error(`${step.id}[${index}].${field} expected string`);
+    if (schema.type === "string") {
+      if (typeof item !== "string") {
+        throw new Error(`${step.id}[${index}] expected string, got ${typeof item}`);
       }
 
-      if (r.pattern && !new RegExp(r.pattern).test(value)) {
-        throw new Error(`${step.id}[${index}].${field} failed pattern: ${value}`);
+      if (schema.pattern && !new RegExp(schema.pattern).test(item)) {
+        throw new Error(`${step.id}[${index}] failed pattern: ${item}`);
       }
+
+      continue;
     }
+
+    if (schema.type === "object") {
+      if (item === null || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error(`${step.id}[${index}] expected object, got ${typeof item}`);
+      }
+
+      for (const field of schema.required || []) {
+        if (!(field in item)) {
+          throw new Error(`${step.id}[${index}] missing required field: ${field}`);
+        }
+      }
+
+      for (const [field, rule] of Object.entries(schema.properties || {})) {
+        if (!(field in item)) continue;
+
+        const value = (item as any)[field];
+        const r = rule as any;
+
+        if (r.type === "string" && typeof value !== "string") {
+          throw new Error(`${step.id}[${index}].${field} expected string`);
+        }
+
+        if (r.type === "number" && typeof value !== "number") {
+          throw new Error(`${step.id}[${index}].${field} expected number`);
+        }
+
+        if (r.type === "boolean" && typeof value !== "boolean") {
+          throw new Error(`${step.id}[${index}].${field} expected boolean`);
+        }
+
+        if (r.pattern) {
+          if (typeof value !== "string") {
+            throw new Error(`${step.id}[${index}].${field} pattern requires string`);
+          }
+
+          if (!new RegExp(r.pattern).test(value)) {
+            throw new Error(`${step.id}[${index}].${field} failed pattern: ${value}`);
+          }
+        }
+      }
+
+      continue;
+    }
+
+    throw new Error(`${step.id} has unsupported item_schema.type: ${String(schema.type)}`);
   }
 }
 
