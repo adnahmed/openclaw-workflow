@@ -46,10 +46,10 @@ export function resolveConfigPath(value, fallback, cwd = process.cwd()) {
 export function normalizePluginConfig(rawConfig: RawPluginConfig = {}, runtime: RuntimeConfig = {}) {
   const cwd = typeof runtime.cwd === 'string' ? runtime.cwd : process.cwd();
   const concurrency = Number.isInteger(rawConfig.concurrency)
-    ? rawConfig.concurrency
+    ? Math.max(1, rawConfig.concurrency)
     : DEFAULT_CONCURRENCY;
   const pollIntervalMs = Number.isInteger(rawConfig.pollIntervalMs)
-    ? rawConfig.pollIntervalMs
+    ? Math.max(rawConfig.pollIntervalMs, 250)
     : DEFAULT_POLL_INTERVAL_MS;
 
   const allowedSessionAdapters = new Set([
