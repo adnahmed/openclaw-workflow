@@ -9,6 +9,10 @@
  *   {run_id}   → The unique run identifier for this workflow execution
  *   {config.X} → Value of variable X from the workflow's config block
  *
+ * Escaping:
+ *   Use `\{variable}` to write the literal text of a variable without substituting it.
+ *   Example: `\{config.redis_prefix}` renders as `{config.redis_prefix}`.
+ *
  * Why UTC? Workflows often run on servers without a specific timezone configuration.
  * Using UTC ensures consistent, reproducible filenames and logs regardless of the
  * server's locale. If local time is needed, that's a future extension point.
@@ -68,6 +72,23 @@ export class TemplateSubstitutionError extends Error {
   }
 }
 
+const ANY_BRACED_TOKEN_RE = /(?<!\\)\{([\w.]+)\}/g;
+
+// Only these are engine tokens:
+// {date}, {datetime}, {run_id}, {config.X}, {config.X.Y}, {item}, {item.X}, {item.X.Y}
+const ENGINE_TOKEN_RE =
+  /(?<!\\)\{(date|datetime|run_id|config(?:\.[A-Za-z_]\w*)+|item(?:\.[A-Za-z_]\w*)*)\}/g;
+
+type UnknownTokenMode = "preserve" | "throw";
+
+type SubstituteOptions = {
+  unknown?: UnknownTokenMode;
+};
+
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 function isScalar(value: unknown): value is string | number | boolean {
   return (
     typeof value === "string" ||
@@ -76,73 +97,92 @@ function isScalar(value: unknown): value is string | number | boolean {
   );
 }
 
-export function substituteVars(template: unknown, ctx: any): unknown {
+function resolvePath(ctx: unknown, path: string): { found: true; value: unknown } | { found: false } {
+  let current: unknown = ctx;
+
+  for (const part of path.split(".")) {
+    if (
+      current !== null &&
+      typeof current === "object" &&
+      hasOwn(current, part)
+    ) {
+      current = (current as Record<string, unknown>)[part];
+    } else {
+      return { found: false };
+    }
+  }
+
+  return { found: true, value: current };
+}
+
+function isDeferredItemToken(path: string, ctx: unknown): boolean {
+  return (
+    (path === "item" || path.startsWith("item.")) &&
+    !(
+      ctx !== null &&
+      typeof ctx === "object" &&
+      hasOwn(ctx, "item")
+    )
+  );
+}
+
+export function substituteVars(
+  template: unknown,
+  ctx: Record<string, unknown>,
+  options: SubstituteOptions = {},
+): unknown {
   if (typeof template !== "string") return template;
 
-  return template.replace(/\{([\w.]+)\}/g, (match, path) => {
-    const parts = path.split(".");
-    let current: any = ctx;
+  const unknownMode = options.unknown ?? "preserve";
+  const tokenRe = unknownMode === "throw" ? ANY_BRACED_TOKEN_RE : ENGINE_TOKEN_RE;
 
-    for (const part of parts) {
-      if (current !== null && typeof current === "object" && part in current) {
-        current = current[part];
-      } else {
-        throw new TemplateSubstitutionError(
-          match,
-          undefined,
-          `Unknown token path: ${path}`,
-        );
-      }
-    }
+  const rendered = template.replace(tokenRe, (match, path) => {
+    const resolved = resolvePath(ctx, path);
 
-    if (!isScalar(current)) {
+    if (!resolved.found) {
+      // Allows top-level compilation to leave {item.X} alone until loop expansion.
+      if (isDeferredItemToken(path, ctx)) return match;
+
       throw new TemplateSubstitutionError(
         match,
-        current,
-        `Token "${match}" is not scalar. Did you mean "{${path}.alert_key}"?`,
+        undefined,
+        `Unknown token path: ${path}`,
       );
     }
 
-    return String(current);
+    if (!isScalar(resolved.value)) {
+      throw new TemplateSubstitutionError(
+        match,
+        resolved.value,
+        `Token "${match}" is not scalar. Use a scalar path such as "{${path}.alert_key}".`,
+      );
+    }
+
+    return String(resolved.value);
   });
+
+  return rendered.replace(/\\\{/g, "{").replace(/\\\}/g, "}");
 }
 
-/**
- * Recursively apply substituteVars to all string values in an object or array.
- * This is used to substitute variables throughout an entire step definition
- * (task prompt, output paths, etc.) in one pass.
- *
- * Non-string primitives (numbers, booleans) and null/undefined are returned as-is.
- * Arrays are mapped. Plain objects are shallow-cloned with each value processed.
- *
- * @param {*} value - The value to process (string, array, object, or primitive)
- * @param {SubstitutionContext} ctx - Substitution context
- * @returns {*} A new value with all string leaves substituted
- *
- * @example
- * const step = {
- *   task: "Run audit for {date}",
- *   outputs: ["data/{date}/handoff.json"]
- * };
- * const result = substituteDeep(step, ctx);
- * // result.task === "Run audit for 2026-03-09"
- * // result.outputs === ["data/2026-03-09/handoff.json"]
- */
-export function substituteDeep(value, ctx) {
-  if (typeof value === 'string') {
-    return substituteVars(value, ctx);
-  }
+export function substituteDeep(
+  value: unknown,
+  ctx: Record<string, unknown>,
+  options: SubstituteOptions = {},
+): unknown {
+  if (typeof value === "string") return substituteVars(value, ctx, options);
+
   if (Array.isArray(value)) {
-    return value.map(item => substituteDeep(item, ctx));
+    return value.map((item) => substituteDeep(item, ctx, options));
   }
-  if (value !== null && typeof value === 'object') {
-    const result = {};
+
+  if (value !== null && typeof value === "object") {
+    const result: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      result[k] = substituteDeep(v, ctx);
+      result[k] = substituteDeep(v, ctx, options);
     }
     return result;
   }
-  // Primitives (number, boolean, null, undefined) pass through unchanged
+
   return value;
 }
 

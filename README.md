@@ -194,9 +194,10 @@ The following `{variable}` tokens are substituted in `task` and `outputs` fields
  | `{datetime}`  | `2026-03-09T08:20:00.000Z`      | Current datetime as ISO 8601 (UTC) |
  | `{run_id}`    | `seo-pipeline-20260309T082000`  | The unique run identifier |
  | `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
- | `{config.X}`  | `my-custom-value`               | Value of variable `X` from the top-level `config` block |
- 
- Unknown `{variables}` are left as-is (not an error).
+  | `{config.X}`  | `my-custom-value`               | Value of variable `X` from the top-level `config` block |
+  | `\{variable}`  | `{date}`                       | Literal text (escaped). Prevents substitution. |
+  
+  Unknown `{variables}` are typically left as-is, except in `for_each` path templates where they cause an immediate error.
 
 **Example:**
 ```yaml

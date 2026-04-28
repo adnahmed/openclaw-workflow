@@ -186,9 +186,12 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
   // Build substitution context once for the entire run
   const varCtx = buildContext(runId, workflow.config);
 
-  // Apply variable substitution to all top-level steps.
-  // Loop steps are preserved as-is (their inner steps will be substituted during expansion).
-  const steps = workflow.steps.map(step => substituteDeep(step, varCtx));
+   // Apply variable substitution to all top-level steps.
+   // Loop steps are preserved as-is (their inner steps will be substituted during expansion).
+   const steps = workflow.steps.map(step =>
+     step.for_each ? { ...step } : substituteDeep(step, varCtx)
+   );
+
 
   // Initialize run state — either use a provided initial state (for resume) or create fresh.
 

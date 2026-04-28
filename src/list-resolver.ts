@@ -99,7 +99,7 @@ export async function resolveList(token, ctx, baseDir, parser = 'auto') {
   // e.g. data/linkedin/job-alerts/alerts-execution-manifest-{date}.json
   // This must be strict. If {date} is missing, fail loudly.
   if (!isWholeTokenRef) {
-    const substitutedPath = substituteVars(token, ctx);
+    const substitutedPath = substituteVars(token, ctx, { unknown: "throw" });
 
     if (typeof substitutedPath !== 'string') {
       throw new Error(`for_each path did not resolve to a string: ${token}`);
