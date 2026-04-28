@@ -154,11 +154,13 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 		const plan = await compileWorkflow(workflow, runId, config);
 		await fs.writeFile(join(config.runsDir, `${runId}.plan.json`), JSON.stringify(plan, null, 2));
 	} catch (err) {
-		return {
+		const state = createRunState(workflow.name, workflow.steps.map(s => s.id), runId);
+		return await updateRunState(state, {
 			status: 'failed',
 			phase: 'compile',
+			error: err.message,
 			spawned_sessions: 0,
-		};
+		}, config.runsDir);
 	}
 
 
