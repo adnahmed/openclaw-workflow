@@ -30,7 +30,6 @@
       "concurrency": {
         "type": "integer",
         "minimum": 1,
-        "maximum": 10,
         "description": "Maximum number of workflow steps that can run in parallel. Defaults to 3."
       },
       "notifyChannel": {
@@ -48,7 +47,10 @@
       },
       "cronDeliveryMode": {
         "type": "string",
-        "enum": ["none", "announce"],
+        "enum": [
+          "none",
+          "announce"
+        ],
         "description": "Delivery mode for internal workflow step cron jobs. Defaults to none."
       },
       "cronDeliveryChannel": {
