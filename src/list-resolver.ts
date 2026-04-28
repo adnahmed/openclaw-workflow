@@ -148,9 +148,10 @@ function parseValue(val, parser) {
   if (val === null || val === undefined) return [];
 
   switch (parser) {
-    case 'json':
+    case 'json': {
       const parsed = typeof val === 'string' ? JSON.parse(val) : val;
       return normalizeToList(parsed);
+    }
 
     case 'jsonl':
       if (typeof val !== 'string') return [];
@@ -160,9 +161,10 @@ function parseValue(val, parser) {
         .map(line => JSON.parse(line))
         .filter(Boolean);
 
-    case 'yaml':
+    case 'yaml': {
       const parsed = typeof val === 'string' ? yaml.load(val) : val;
       return normalizeToList(parsed);
+    }
 
     case 'csv':
       if (typeof val !== 'string') return [val];
