@@ -561,10 +561,14 @@ export async function executeWorkflow(
 					// Failure path — check for retry
 					const maxAttempts = (step.retry || 0) + 1;
 					const cancellationUnconfirmed =
-						typeof result.error === "string" &&
-						(result.error.includes("cancellation was not confirmed") ||
-							(state.steps[step.id]?.cancel_requested_at &&
-								!state.steps[step.id]?.cancel_confirmed_at));
+						(
+							typeof result.error === "string" &&
+							result.error.includes("cancellation was not confirmed")
+						) ||
+						Boolean(
+							state.steps[step.id]?.cancel_requested_at &&
+							!state.steps[step.id]?.cancel_confirmed_at
+						);
 
 					const shouldRetry =
 						result.status === "failed" &&
