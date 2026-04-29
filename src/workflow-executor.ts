@@ -858,13 +858,18 @@ export async function executeWorkflow(
 											id: "task",
 											name: step.name,
 											task: step.task,
+											model: step.model,
 											concurrency: step.concurrency,
 											timeout: step.timeout,
 											retry: step.retry,
 											retry_delay: step.retry_delay,
+											retry_on: step.retry_on,
 											optional: step.optional,
 											outputs: step.outputs,
 											depends_on: [],
+											required_skills: step.required_skills,
+											complete_when: step.complete_when,
+											on_block: step.on_block,
 										},
 									];
 								}
