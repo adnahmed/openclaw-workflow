@@ -536,30 +536,43 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
     while (iterationGuard++ < MAX_ITERATIONS) {
       // ── Loop Controller Status Update ────────────────────────────────────────
       // Check if any running loop-controllers have all their iterations finished.
-      for (const step of steps) {
-        if (step.for_each && state.steps[step.id]?.status === 'running') {
-           const childrenIds = Object.keys(state.steps).filter(id => id.startsWith(`${step.id}:`));
-           const childStates = childrenIds.map(id => state.steps[id]?.status);
-
-           if (childrenIds.length > 0 && childStates.every(s => ['ok', 'failed', 'skipped'].includes(s))) {
-             const anyFailed = childStates.includes('failed');
-             const startedAt = state.steps[step.id]?.started_at;
-             const completedAt = new Date().toISOString();
-             const durationMs = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
-
-             await mutateState(current => updateStepState(current, step.id, { 
-               status: anyFailed && !step.optional ? 'failed' : 'ok', 
-               completed_at: completedAt,
-               duration_ms: durationMs
-             }, runsDir));
-
-             if (anyFailed && !step.optional) {
-               await cascadeSkip(step.id);
-             }
-             await notify(`${anyFailed && !step.optional ? '❌' : '✅'} Loop "${step.id}" complete`);
-           }
-        }
-      }
+       for (const step of steps) {
+         if (step.for_each && state.steps[step.id]?.status === 'running') {
+            const childrenIds = Object.keys(state.steps).filter(id => id.startsWith(`${step.id}:`));
+            const childStates = childrenIds.map(id => state.steps[id]?.status);
+ 
+            const TERMINAL_STEP_STATUSES = ["ok", "failed", "blocked", "skipped"];
+ 
+            if (
+              childrenIds.length > 0 &&
+              childStates.every(s => TERMINAL_STEP_STATUSES.includes(s))
+            ) {
+              const anyFailed = childStates.includes('failed');
+              const anyBlocked = childStates.includes('blocked');
+              const startedAt = state.steps[step.id]?.started_at;
+              const completedAt = new Date().toISOString();
+              const durationMs = startedAt ? Date.now() - new Date(startedAt).getTime() : 0;
+ 
+              const parentStatus =
+                anyFailed && !step.optional
+                  ? 'failed'
+                  : anyBlocked && !step.optional
+                    ? 'blocked'
+                    : 'ok';
+ 
+              await mutateState(current => updateStepState(current, step.id, { 
+                status: parentStatus,
+                completed_at: completedAt,
+                duration_ms: durationMs
+              }, runsDir));
+ 
+              if (parentStatus === 'failed' || parentStatus === 'blocked') {
+                await cascadeSkip(step.id);
+              }
+              await notify(`${parentStatus === 'ok' ? '✅' : '❌'} Loop "${step.id}" complete`);
+            }
+         }
+       }
 
       // Re-read state from disk to pick up external cancellation signals
 
