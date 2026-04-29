@@ -637,6 +637,7 @@ class RuntimeSubagentAdapter implements SessionAdapter {
 			message: prompt,
 			deliver: false,
 			...modelFields,
+			timeoutMs: options.timeout ? options.timeout * 1000 : undefined,
 		};
 
 		const result = await this.subagent.run(args);
