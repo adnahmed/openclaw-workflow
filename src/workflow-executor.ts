@@ -416,8 +416,6 @@ export async function executeWorkflow(
 	 * @param {import('./workflow-loader.js').WorkflowStep} step
 	 */
 	async function launchStep(step) {
-		if (cancelled) return;
-
 		const trackingId = step.original_id || step.id;
 		runningCounts.set(trackingId, (runningCounts.get(trackingId) || 0) + 1);
 
