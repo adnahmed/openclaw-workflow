@@ -106,6 +106,7 @@ export default definePluginEntry({
 			cronAddTimeoutMs,
 			cronRunTimeoutMs,
 			cronPollTimeoutMs,
+			cancelGraceMs,
 		} = config;
 
 		function buildExecutorConfig(workflow, notify) {
@@ -123,6 +124,7 @@ export default definePluginEntry({
 				cronAddTimeoutMs,
 				cronRunTimeoutMs,
 				cronPollTimeoutMs,
+				cancelGraceMs,
 				workflowsDir,
 			};
 		}

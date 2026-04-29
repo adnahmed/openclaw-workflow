@@ -375,7 +375,17 @@ This is registered as an optional tool because it modifies persisted run state.
 {
   "run_id": "seo-pipeline-20260309T082000",
   "status": "cancelled",
-  "message": "Run \"seo-pipeline-20260309T082000\" marked as cancelled. 1 step(s) currently in-flight will complete: content-creator"
+  "running_steps": 1,
+  "abort_requested": 1,
+  "abort_failed": 0,
+  "results": [
+    {
+      "step_id": "content-creator",
+      "requested": true,
+      "confirmed": false,
+      "method": "gateway.chat.abort"
+    }
+  ]
 }
 ```
 

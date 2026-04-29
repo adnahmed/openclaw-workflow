@@ -211,6 +211,7 @@ export async function executeWorkflow(
 		cronAddTimeoutMs,
 		cronRunTimeoutMs,
 		cronPollTimeoutMs,
+		cancelGraceMs,
 		workflowsDir,
 	} = config;
 
@@ -471,6 +472,7 @@ export async function executeWorkflow(
 						cronAddTimeoutMs,
 						cronRunTimeoutMs,
 						cronPollTimeoutMs,
+						cancelGraceMs,
 						sessionAdapter,
 						validators: workflow.validators || {},
 						workflowDir: workflow.__dir || workflowsDir,
