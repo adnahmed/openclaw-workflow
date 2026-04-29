@@ -261,6 +261,32 @@ usable file input, use OpenClaw's upload flow above.
  */
 
 
+async function waitForTerminalAfterCancel(
+	adapter,
+	sessionId,
+	options,
+	cancelGraceMs,
+	pollIntervalMs,
+) {
+	const deadline = Date.now() + cancelGraceMs;
+	const interval = Math.min(Math.max(pollIntervalMs || 5000, 1000), 5000);
+
+	while (Date.now() < deadline) {
+		await sleep(interval);
+
+		try {
+			const status = await adapter.getStatus(sessionId, options);
+			if (status.status === "done" || status.status === "error") {
+				return status;
+			}
+		} catch {
+			// Keep waiting during grace.
+		}
+	}
+
+	return null;
+}
+
 /**
  * Run a single workflow step as an isolated subagent and wait for completion.
  *
@@ -377,13 +403,34 @@ export async function runStep(step, runId, api, options) {
 		}
 
 		if (finalStatus === null) {
-			const hasOutputs = step.outputs && step.outputs.length > 0;
-			if (hasOutputs && outputCheck.decision === "pass") {
-				finalStatus = "ok";
-			} else {
-				finalStatus = "failed";
-				errorMsg = `Step timed out after ${step.timeout}s`;
-			}
+			const cancelResult = await adapter.cancel?.(spawnResult.sessionId, {
+				...options,
+				sessionKey: spawnResult.sessionKey,
+				runId: spawnResult.sessionId,
+				reason: `workflow_step_timeout:${step.id}`,
+				timeoutMs,
+				cancelGraceMs: options.cancelGraceMs ?? 30000,
+			}).catch((err) => ({
+				requested: false,
+				confirmed: false,
+				error: err instanceof Error ? err.message : String(err),
+			}));
+
+			const stopped = await waitForTerminalAfterCancel(
+				adapter,
+				spawnResult.sessionId,
+				options,
+				options.cancelGraceMs ?? 30000,
+				pollIntervalMs,
+			);
+
+			finalStatus = "failed";
+			errorMsg =
+				stopped
+					? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
+					: `Step timed out after ${step.timeout}s; cancellation was not confirmed. Do not retry automatically. Cancel result: ${cancelResult?.error || "unknown"}`;
+
+			logs = stopped?.logs || logs;
 		} else if (finalStatus === "ok") {
 			switch (outputCheck.decision) {
 				case "pass":
@@ -467,11 +514,14 @@ function splitModelRef(modelRef) {
  */
 class RuntimeSubagentAdapter {
 	/**
-	 * @param {Object} subagent - api.runtime.subagent object
+	 * @param {Object} runtime - api.runtime object
+	 * @param {Object} api - full api object
 	 * @param {Object} [logger=console] - Plugin logger
 	 */
-	constructor(subagent, logger = console) {
-		this.subagent = subagent;
+	constructor(runtime, api, logger = console) {
+		this.runtime = runtime;
+		this.api = api;
+		this.subagent = runtime.subagent;
 		this.logger = logger;
 		this.sessionsByRunId = new Map();
 	}
@@ -573,6 +623,132 @@ class RuntimeSubagentAdapter {
 			};
 		}
 	}
+
+	async cancel(runId, options = {}) {
+		const record = this.sessionsByRunId.get(runId);
+		const sessionKey = options.sessionKey || record?.sessionKey;
+		const reason = options.reason || "workflow_step_cancelled";
+
+		if (!sessionKey) {
+			return {
+				requested: false,
+				confirmed: false,
+				error: `Cannot cancel run ${runId}: missing sessionKey`,
+			};
+		}
+
+		const attempts = [
+			{
+				method: "runtime.subagent.abortRun",
+				fn: () =>
+					this.runtime?.subagent?.abortRun?.({
+						runId,
+						sessionKey,
+						reason,
+					}),
+			},
+			{
+				method: "runtime.subagent.cancel",
+				fn: () =>
+					this.runtime?.subagent?.cancel?.({
+						runId,
+						sessionKey,
+						reason,
+					}),
+			},
+			{
+				method: "api.sessions.abort(object)",
+				fn: () =>
+					this.api?.sessions?.abort?.({
+						runId,
+						sessionKey,
+						reason,
+					}),
+			},
+			{
+				method: "api.sessions.abort(sessionKey)",
+				fn: () =>
+					this.api?.sessions?.abort?.(sessionKey, {
+						runId,
+						reason,
+					}),
+			},
+			{
+				method: "gateway.sessions.abort",
+				fn: () =>
+					this.runtime?.gateway?.request?.("sessions.abort", {
+						runId,
+						sessionKey,
+						reason,
+					}),
+			},
+			{
+				method: "gateway.chat.abort",
+				fn: () =>
+					this.runtime?.gateway?.request?.("chat.abort", {
+						sessionKey,
+						reason,
+					}),
+			},
+			{
+				method: "gateway.call.sessions.abort",
+				fn: () =>
+					this.runtime?.gateway?.call?.("sessions.abort", {
+						runId,
+						sessionKey,
+						reason,
+					}),
+			},
+			{
+				method: "gateway.call.chat.abort",
+				fn: () =>
+					this.runtime?.gateway?.call?.("chat.abort", {
+						sessionKey,
+						reason,
+					}),
+			},
+		];
+
+		let lastError = null;
+
+		for (const attempt of attempts) {
+			if (typeof attempt.fn !== "function") continue;
+
+			try {
+				const result = await attempt.fn();
+				if (result !== undefined || attempt.method.includes("abort")) {
+					this.logger?.warn?.("[workflow] requested subagent cancellation", {
+						runId,
+						sessionKey,
+						method: attempt.method,
+						reason,
+					});
+
+					return {
+						requested: true,
+						confirmed: false,
+						method: attempt.method,
+					};
+				}
+			} catch (err) {
+				lastError = err instanceof Error ? err.message : String(err);
+				this.logger?.warn?.("[workflow] subagent cancel attempt failed", {
+					runId,
+					sessionKey,
+					method: attempt.method,
+					error: lastError,
+				});
+			}
+		}
+
+		return {
+			requested: false,
+			confirmed: false,
+			error:
+				lastError ||
+				"No documented abort-capable runtime/gateway method was available. Do not retry this step automatically.",
+		};
+	}
 }
 
 /**
@@ -616,7 +792,7 @@ function selectAdapter(api, requestedAdapter = "auto") {
 		}
 
 		logger?.info?.("[workflow] using RuntimeSubagentAdapter");
-		return new RuntimeSubagentAdapter(api.runtime.subagent, logger);
+		return new RuntimeSubagentAdapter(api.runtime, api, logger);
 	}
 
 	if (requestedAdapter === "legacy-api") {
@@ -643,7 +819,7 @@ function selectAdapter(api, requestedAdapter = "auto") {
 
 	if (hasRuntimeSubagent) {
 		logger?.info?.("[workflow] using RuntimeSubagentAdapter");
-		return new RuntimeSubagentAdapter(api.runtime.subagent, logger);
+		return new RuntimeSubagentAdapter(api.runtime, api, logger);
 	}
 
 	if (hasLegacyApi) {
@@ -656,9 +832,22 @@ function selectAdapter(api, requestedAdapter = "auto") {
 }
 
 /**
+ * @typedef {Object} CancelResult
+ * @property {boolean} requested
+ * @property {boolean} [confirmed]
+ * @property {string} [method]
+ * @property {string} [error]
+ */
+
+/**
  * @interface SessionAdapter
  * Common interface for all session adapters.
+ * 
+ * @property {Function} spawn - spawn(prompt, options) → Promise<{ sessionId, sessionKey }>
+ * @property {Function} getStatus - getStatus(sessionId, options) → Promise<{ status: 'running'|'done'|'error', error?, logs? }>
+ * @property {Function} [cancel] - cancel(sessionId, options) → Promise<CancelResult>
  */
+
 
 /**
  * @class ApiAdapter
@@ -696,6 +885,31 @@ class ApiAdapter {
 			status: status.status === "done" ? "done" : status.status,
 			error: status.error,
 			logs: status.logs,
+		};
+	}
+
+	async cancel(sessionId, options = {}) {
+		const sessionKey = options.sessionKey;
+
+		if (typeof this.sessions.abort === "function") {
+			await this.sessions.abort({
+				sessionId,
+				runId: options.runId || sessionId,
+				sessionKey,
+				reason: options.reason || "workflow_step_cancelled",
+			});
+
+			return {
+				requested: true,
+				confirmed: false,
+				method: "api.sessions.abort",
+			};
+		}
+
+		return {
+			requested: false,
+			confirmed: false,
+			error: "api.sessions.abort unavailable",
 		};
 	}
 }
@@ -914,6 +1128,28 @@ export class CliAdapter {
 			return {
 				status: "error",
 				error: `Failed to poll cron run status: ${message}`,
+			};
+		}
+	}
+
+	async cancel(sessionId, options = {}) {
+		const jobId = sessionId;
+
+		try {
+			await this.executor(["cron", "remove", jobId], {
+				timeout: options.cronRunTimeoutMs || 60000,
+			});
+
+			return {
+				requested: true,
+				confirmed: false,
+				method: "cron.remove",
+			};
+		} catch (err) {
+			return {
+				requested: false,
+				confirmed: false,
+				error: err instanceof Error ? err.message : String(err),
 			};
 		}
 	}
