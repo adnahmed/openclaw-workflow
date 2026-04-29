@@ -45,8 +45,9 @@ import { randomBytes } from 'node:crypto';
  * @property {string|null}          started_at   - ISO timestamp when step started
  * @property {string|null}          completed_at - ISO timestamp when step completed
  * @property {number|null}          duration_ms  - Wall-clock duration in milliseconds
- * @property {string|null}          session_key  - OpenClaw session identifier for this step
- * @property {OutputCheckResult|null} output_check - Result of output file validation
+   * @property {string|null}          session_key  - OpenClaw session identifier for this step
+   * @property {string|null}          retry_not_before - ISO timestamp before which step should not retry
+   * @property {OutputCheckResult|null} output_check - Result of output file validation
   * @property {string|null}          error        - Error message if step failed
   * @property {string|null}          logs         - Debug logs/output for the step
   * @property {number}               attempts     - Number of execution attempts made so far
@@ -113,8 +114,9 @@ export function createRunState(workflowName, stepIds, runId) {
       started_at: null,
       completed_at: null,
       duration_ms: null,
-      session_key: null,
-      output_check: null,
+       session_key: null,
+       retry_not_before: null,
+       output_check: null,
       error: null,
       logs: null,
       attempts: 0,
