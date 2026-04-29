@@ -270,6 +270,7 @@ function normalizeAndValidate(raw, filePath) {
 					typeof step.retry_delay === "number" ? step.retry_delay : 30,
 				optional: step.optional === true,
 				always_run: step.always_run === true,
+				complete_when: step.complete_when || "session",
 				on_block: step.on_block || "block_run",
 			};
 		});

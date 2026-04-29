@@ -65,6 +65,7 @@ export type WorkflowStep = {
   retry_delay: number;
   optional: boolean;
   always_run?: boolean;
+  complete_when?: "outputs" | "session";
   on_block?: "block_run" | "fail_step" | "continue";
 };
 

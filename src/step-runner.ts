@@ -1278,62 +1278,102 @@ export function createStepRunner(adapter) {
 			const timeoutMs = step.timeout * 1000;
 			const deadline = Date.now() + timeoutMs;
 			let finalStatus = null;
+			let retryable = false;
 			let errorMsg = null;
+			let logs = null;
 			let outputCheck = { passed: false, missing_files: [], checked_files: [] };
 
 			while (Date.now() < deadline) {
 				await sleep(pollIntervalMs);
-
+ 
 				if (step.complete_when === "outputs" && step.outputs && step.outputs.length > 0) {
 					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 					const mapped = statusFromOutputDecision(outputCheck);
 					finalStatus = mapped.finalStatus;
+					retryable = mapped.retryable;
+					errorMsg = mapped.errorMsg;
 					if (finalStatus !== null) {
 						break;
 					}
 				}
-
+ 
 				const statusResult = await adapter.getStatus(
 					spawnResult.sessionId,
 					options,
 				);
 				if (statusResult.status === "done") {
+					logs = statusResult.logs;
 					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 					const mapped = statusFromOutputDecision(outputCheck);
 					finalStatus = mapped.finalStatus;
+					retryable = mapped.retryable;
+					errorMsg = mapped.errorMsg;
 					break;
 				}
 				if (statusResult.status === "error") {
 					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 					finalStatus = "failed";
 					errorMsg = statusResult.error || "Session error";
+					logs = statusResult.logs;
 					break;
 				}
 			}
+
 
 			if (finalStatus === "ok" || finalStatus === null) {
 				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 			}
 
+			if (finalStatus === "ok" || finalStatus === null) {
+				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+			}
+ 
 			if (finalStatus === null) {
-				const hasOutputs = step.outputs && step.outputs.length > 0;
-				if (hasOutputs && outputCheck.decision === "pass") {
-					finalStatus = "ok";
-				} else {
-					finalStatus = "failed";
-					errorMsg = `Step timed out after ${step.timeout}s`;
-				}
+				const cancelResult = await adapter.cancel?.(spawnResult.sessionId, {
+					...options,
+					sessionKey: spawnResult.sessionKey,
+					runId: spawnResult.sessionId,
+					reason: `workflow_step_timeout:${step.id}`,
+					timeoutMs,
+					cancelGraceMs: options.cancelGraceMs ?? 30000,
+				}).catch((err) => ({
+					requested: false,
+					confirmed: false,
+					error: err instanceof Error ? err.message : String(err),
+				}));
+ 
+				const stopped = await waitForTerminalAfterCancel(
+					adapter,
+					spawnResult.sessionId,
+					options,
+					options.cancelGraceMs ?? 30000,
+					pollIntervalMs,
+				);
+ 
+				finalStatus = "failed";
+				const cancellationConfirmed = Boolean(stopped);
+				const cancellationRequested = Boolean(cancelResult?.requested);
+				retryable = cancellationRequested && cancellationConfirmed;
+				errorMsg =
+					stopped
+						? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
+						: `Step timed out after ${step.timeout}s; cancellation was not confirmed. Do not retry automatically. Cancel result: ${cancelResult?.error || "unknown"}`;
+ 
+				logs = stopped?.logs || logs;
 			} else if (finalStatus === "ok") {
 				const mapped = statusFromOutputDecision(outputCheck);
 				finalStatus = mapped.finalStatus;
+				retryable = mapped.retryable;
 				errorMsg = mapped.errorMsg;
 			}
 
 			return {
 				status: finalStatus,
+				retryable,
 				session_key: sessionKey,
 				output_check: outputCheck,
 				error: errorMsg,
+				logs: logs,
 				duration_ms: Date.now() - startTime,
 			};
 		} catch (err) {
