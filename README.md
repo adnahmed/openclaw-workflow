@@ -199,6 +199,9 @@ The following `{variable}` tokens are substituted in `task` and `outputs` fields
 | `{utc_date}`  | `2026-03-09`                    | Current date as `YYYY-MM-DD` (UTC) |
 | `{utc_datetime}` | `2026-03-09T08:20:00.000Z`   | Current datetime as ISO 8601 (UTC) |
 | `{run_id}`    | `seo-pipeline-20260309T082000`  | The unique run identifier |
+| `{workflow_name}` | `SEO Daily Pipeline`         | The name of the workflow |
+| `{workflow_run_id}` | `seo-pipeline-20260309T082000` | The unique run identifier |
+| `{run_state_path}` | `/home/user/.openclaw/workflow-runs/seo-pipeline-20260309T082000.json` | Path to the run state JSON file |
 | `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
 | `{config.X}`  | `my-custom-value`               | Value of variable `X` from the top-level `config` block |
 | `\{variable}`  | `{date}`                       | Literal text (escaped). Prevents substitution. |

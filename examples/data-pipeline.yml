@@ -140,6 +140,7 @@ steps:
         - data/validation/report-{date}.json
         - data/transformed/transform-log-{date}.json
         - data/load/summary-{date}.json
+        - Run State: {run_state_path}
 
       Write a human-readable Markdown report to: reports/etl-report-{date}.md
 
@@ -150,6 +151,12 @@ steps:
       ### 🔄 Transform
       ### 💾 Load
       ### 📊 Summary
+      ### 🛠️ Execution Audit
+      Use the Run State file ({run_state_path}) to provide an accurate audit of the pipeline execution:
+      - Exact start and end times for each step
+      - Total runtime per step
+      - Any retries that occurred
+      - Final status of all steps (ok/failed/skipped)
 
       Include: total runtime, record counts at each stage, any anomalies to investigate.
     outputs:

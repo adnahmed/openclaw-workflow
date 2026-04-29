@@ -1,3 +1,5 @@
+import path from "node:path";
+
 /**
  * @module variable-substitution
  * @description Performs template variable substitution on workflow task prompts,
@@ -49,37 +51,47 @@
  * @param {string} [timezone='UTC'] - Workflow timezone (e.g. 'Asia/Karachi')
  * @returns {SubstitutionContext}
  */
-export function buildContext(runId, workflowConfig = {}, now = new Date(), timezone = 'UTC') {
-  const utcIsoString = now.toISOString();
-  const utcDate = utcIsoString.slice(0, 10);
+export function buildContext(
+	runId,
+	workflowConfig = {},
+	now = new Date(),
+	timezone = 'UTC',
+	runsDir = null,
+	workflowName = null,
+) {
+	const utcIsoString = now.toISOString();
+	const utcDate = utcIsoString.slice(0, 10);
 
-  const tzDate = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(now);
+	const tzDate = new Intl.DateTimeFormat('en-CA', {
+		timeZone: timezone,
+		year: 'numeric',
+		month: '2-digit',
+		day: '2-digit',
+	}).format(now);
 
-  const tzFormatter = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-  const tzDatetime = tzFormatter.format(now).replace(' ', 'T');
+	const tzFormatter = new Intl.DateTimeFormat('sv-SE', {
+		timeZone: timezone,
+		year: 'numeric',
+		month: '2-digit',
+		day: '2-digit',
+		hour: '2-digit',
+		minute: '2-digit',
+		second: '2-digit',
+		hour12: false,
+	});
+	const tzDatetime = tzFormatter.format(now).replace(' ', 'T');
 
-  return {
-    date: tzDate,
-    datetime: tzDatetime,
-    utc_date: utcDate,
-    utc_datetime: utcIsoString,
-    run_id: runId,
-    config: workflowConfig,
-  };
+	return {
+		date: tzDate,
+		datetime: tzDatetime,
+		utc_date: utcDate,
+		utc_datetime: utcIsoString,
+		run_id: runId,
+		config: workflowConfig,
+		run_state_path: runsDir ? path.join(runsDir, `${runId}.json`) : null,
+		workflow_name: workflowName,
+		workflow_run_id: runId,
+	};
 }
 
 export class TemplateSubstitutionError extends Error {

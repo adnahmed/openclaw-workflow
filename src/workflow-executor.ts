@@ -101,6 +101,8 @@ export async function compileWorkflow(workflow, runId, config) {
 		workflow.config,
 		new Date(),
 		workflow.config?.timezone,
+		config.runsDir,
+		workflow.name,
 	);
 	const plannedSteps = [];
 
@@ -225,6 +227,8 @@ export async function executeWorkflow(
 		workflow.config,
 		new Date(),
 		workflow.config?.timezone,
+		runsDir,
+		workflow.name,
 	);
 
 	// Apply variable substitution to all top-level steps.
@@ -1127,6 +1131,8 @@ export function dryRun(workflow, runId) {
 		workflow.config,
 		new Date(),
 		workflow.config?.timezone,
+		null,
+		workflow.name,
 	);
 	const steps = workflow.steps.map((step) =>
 		step.for_each ? { ...step } : substituteDeep(step, varCtx),
