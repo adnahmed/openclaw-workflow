@@ -987,7 +987,7 @@ export async function executeWorkflow(
 	});
 	const anyNonOptionalBlocked = steps.some((s) => {
 		const stepState = state.steps[s.id];
-		return !s.optional && stepState?.status === "blocked";
+		return !s.optional && s.on_block !== "continue" && stepState?.status === "blocked";
 	});
 
 	let finalStatus = "ok";
