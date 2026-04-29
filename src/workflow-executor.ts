@@ -315,7 +315,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
   async function failLoopExpansion(step, err) {
     const message = err instanceof Error ? err.message : String(err);
     const now = new Date().toISOString();
-
+ 
     await mutateState(async current => {
       let next = await updateStepState(
         current,
@@ -340,7 +340,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
         },
         runsDir,
       );
-
+ 
       if (!step.optional) {
         next = await updateRunState(
           next,
@@ -353,15 +353,12 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
           runsDir,
         );
       }
-
+ 
       return next;
     });
   }
-
-  }
  
   /**
-
    * Launch a single step as a background Promise.
    * Updates state to 'running', runs the step, then handles the result.
    *
