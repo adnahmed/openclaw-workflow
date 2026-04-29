@@ -486,9 +486,11 @@ export async function executeWorkflow(
 						cancelGraceMs,
 						sessionAdapter,
 						validators: workflow.validators || {},
-						workflowDir: workflow.__dir || workflowsDir,
+ 						workflowDir: workflow.__dir || workflowsDir,
+ 						workflow,
+ 
+ 						onSpawn: async (spawn) => {
 
-						onSpawn: async (spawn) => {
 							await mutateState((current) =>
 								updateStepState(
 									current,

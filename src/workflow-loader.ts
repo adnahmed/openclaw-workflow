@@ -269,10 +269,12 @@ function normalizeAndValidate(raw, filePath) {
 				retry_delay:
 					typeof step.retry_delay === "number" ? step.retry_delay : 30,
 				retry_on: Array.isArray(step.retry_on) ? step.retry_on : [],
-				optional: step.optional === true,
-				always_run: step.always_run === true,
-				complete_when: step.complete_when || "session",
-				on_block: step.on_block || "block_run",
+ 				optional: step.optional === true,
+ 				always_run: step.always_run === true,
+ 				on_block: step.on_block || "block_run",
+ 				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],
+ 				complete_when: step.complete_when || "session",
+
 			};
 		});
 	};
@@ -332,8 +334,10 @@ function normalizeAndValidate(raw, filePath) {
 		version: raw.version ? String(raw.version) : "1.0",
 		description: raw.description || "",
 		config: raw.config || {},
-		validators: raw.validators || {},
-		steps,
+ 		validators: raw.validators || {},
+ 		required_skills: Array.isArray(raw.required_skills) ? raw.required_skills : [],
+ 		steps,
+
 		concurrency:
 			typeof raw.concurrency === "number"
 				? Math.max(1, raw.concurrency)

@@ -151,6 +151,8 @@ workflow_status({ name: "hello" })
 | `concurrency` | number   | ❌       | `3`     | Max steps that run in parallel. |
 | `config`       | object    | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
 | `validators`    | object    | ❌       | `{}`     | Custom validation rules for output checks, supporting schemas and conditional outcomes (`pass_when`, `retry_when`, `block_when`, `fail_when`). |
+| `required_skills` | string[]  | ❌       | `[]`     | Skills required for the entire workflow. Steps without their own `required_skills` inherit these. |
+
 
 ### Step fields
 
@@ -174,6 +176,7 @@ workflow_status({ name: "hello" })
 | `optional`     | boolean   | ❌       | `false` | If `true`, step failure doesn't fail the pipeline or block dependent steps. |
 | `always_run`   | boolean   | ❌       | `false` | If `true`, step runs regardless of dependency failure. |
 | `on_block`     | string    | ❌       | `"block_run"` | Behavior when blocked: `"block_run"` (fails pipeline) or `"continue"`. |
+| `required_skills` | string[]  | ❌       | `[]`     | Skills required for this specific step. Overrides workflow-level `required_skills`. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 
 **Example Pattern: Conditional Execution**

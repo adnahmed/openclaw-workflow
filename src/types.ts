@@ -116,6 +116,7 @@ export type WorkflowDefinition = {
   description: string;
   config: Record<string, unknown>;
   validators?: Record<string, ValidatorSpec>;
+  required_skills?: string[];
   steps: WorkflowStep[];
   concurrency: number;
 };
@@ -142,9 +143,11 @@ export type WorkflowStep = {
   retry_on?: string[];
   optional: boolean;
   always_run?: boolean;
-  complete_when?: "outputs" | "session";
-  on_block?: "block_run" | "fail_step" | "continue";
-  original_id?: string;
+   complete_when?: "outputs" | "session";
+   on_block?: "block_run" | "fail_step" | "continue";
+   required_skills?: string[];
+   original_id?: string;
+
 };
 
 /**

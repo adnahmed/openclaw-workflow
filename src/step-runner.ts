@@ -373,11 +373,27 @@ export async function runStep(step, runId, api, options) {
 	const adapter = selectAdapter(api, options.sessionAdapter || "auto");
 	let sessionKey = null;
 
-	try {
-		const model = step.model || defaultModel || null;
-		const taskWithPreamble = EXEC_POLL_PREAMBLE + step.task;
+ 	try {
+ 		const model = step.model || defaultModel || null;
+ 
+ 		const workflow = options.workflow;
+ 		const requiredSkills = step.required_skills ?? workflow?.required_skills ?? [];
+ 		const availableSkills = api.runtime?.skills ?? [];
+ 
+ 		for (const skill of requiredSkills) {
+ 			if (!availableSkills.includes(skill)) {
+ 				throw new Error(`Required skill "${skill}" is not available in the current runtime.`);
+ 			}
+ 		}
+ 
+ 		const toolContract = requiredSkills.length
+ 			? `\nRequired skills for this step: ${requiredSkills.join(", ")}.\nYou must use these skills directly when performing related actions.\nDo not substitute host shell commands for these skills.\n`
+ 			: "";
+ 
+ 		const taskWithPreamble = EXEC_POLL_PREAMBLE + toolContract + step.task;
+ 
+ 		const spawnResult = await adapter.spawn(taskWithPreamble, {
 
-		const spawnResult = await adapter.spawn(taskWithPreamble, {
 			model,
 			timeout: step.timeout,
 			sessionTarget: "isolated",
