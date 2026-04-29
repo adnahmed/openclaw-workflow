@@ -41,7 +41,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
-import { OutputCheckResult, StepRunResult } from "./types.js";
+import { OutputCheckResult, StepRunResult, SpawnOptions, CancelResult, MockAdapterOptions } from "./types.js";
 
 const execAsync = promisify(exec);
 let cachedOpenClawPath = null;
@@ -54,7 +54,7 @@ let cachedOpenClawPath = null;
  * @param {Object} options - Execution options (timeout)
  * @returns {Promise<{ stdout: string, stderr: string }>}
  */
-async function runOpenClaw(args, options = {}) {
+async function runOpenClaw(args: string[], options: { timeout?: number } = {}) {
 	const { timeout = 120000 } = options;
 
 	if (!cachedOpenClawPath) {
@@ -287,7 +287,7 @@ async function waitForTerminalAfterCancel(
  * @param {Object} options - Cancellation options
  * @returns {Promise<CancelResult>}
  */
-export async function cancelStepSession(api, options) {
+export async function cancelStepSession(api, options): Promise<CancelResult> {
 	const {
 		sessionAdapter = "auto",
 		sessionId,
@@ -601,6 +601,12 @@ function splitModelRef(modelRef) {
  * launch and manage isolated subagent runs.
  */
 class RuntimeSubagentAdapter {
+	runtime: any;
+	api: any;
+	subagent: any;
+	logger: any;
+	sessionsByRunId: Map<string, { sessionKey: string }>;
+
 	/**
 	 * @param {Object} runtime - api.runtime object
 	 * @param {Object} api - full api object
@@ -619,7 +625,7 @@ class RuntimeSubagentAdapter {
 	 * @param {Object} options - Spawn options (model, timeout, label, etc.)
 	 * @returns {Promise<{ sessionId: string, sessionKey: string }>}
 	 */
-	async spawn(prompt, options = {}) {
+	async spawn(prompt: string, options: SpawnOptions = {}) {
 		const label = options.label || `workflow-${Date.now()}`;
 		const unique = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
@@ -657,7 +663,7 @@ class RuntimeSubagentAdapter {
 	 * @param {Object} [options] - Polling options
 	 * @returns {Promise<{ status: string, error?: string, logs?: string }>}
 	 */
-	async getStatus(runId, options = {}) {
+	async getStatus(runId: string, options: any = {}) {
 		try {
 			const timeoutMs = Math.min(
 				Math.max(options.pollIntervalMs || 1000, 250),
@@ -712,7 +718,7 @@ class RuntimeSubagentAdapter {
 		}
 	}
 
-	async cancel(runId, options = {}) {
+	async cancel(runId: string, options: any = {}) {
 		const record = this.sessionsByRunId.get(runId);
 		const sessionKey = options.sessionKey || record?.sessionKey;
 		const reason = options.reason || "workflow_step_cancelled";
@@ -725,7 +731,7 @@ class RuntimeSubagentAdapter {
 			};
 		}
 
-		const attempts = [
+		const attempts: { method: string; fn: () => Promise<any> }[] = [
 			{
 				method: "runtime.subagent.abortRun",
 				fn: () =>
@@ -948,6 +954,8 @@ function selectAdapter(api, requestedAdapter = "auto") {
  *   getStatus(sessionId)   → Promise<{ status: 'running'|'done'|'error', error? }>
  */
 class ApiAdapter {
+	sessions: any;
+
 	/**
 	 * @param {Object} sessions - api.sessions object from OpenClaw
 	 */
@@ -960,7 +968,7 @@ class ApiAdapter {
 	 * @param {Object} options - Spawn options (model, timeout, label, etc.)
 	 * @returns {Promise<{ sessionId: string, sessionKey: string }>}
 	 */
-	async spawn(prompt, options) {
+	async spawn(prompt: string, options: any) {
 		return await this.sessions.spawn(prompt, options);
 	}
 
@@ -968,7 +976,7 @@ class ApiAdapter {
 	 * @param {string} sessionId - Session ID returned by spawn()
 	 * @returns {Promise<{ status: string, error?: string }>}
 	 */
-	async getStatus(sessionId, options) {
+	async getStatus(sessionId: string, options: any) {
 		const status = await this.sessions.getStatus(sessionId);
 		return {
 			status: status.status === "done" ? "done" : status.status,
@@ -977,7 +985,7 @@ class ApiAdapter {
 		};
 	}
 
-	async cancel(sessionId, options = {}) {
+	async cancel(sessionId: string, options: any = {}) {
 		const sessionKey = options.sessionKey;
 
 		if (typeof this.sessions.abort === "function") {
@@ -1072,6 +1080,9 @@ function parseCronRunsOutput(raw) {
 }
 
 export class CliAdapter {
+	executor: any;
+	_jobs: Map<string, { status: string }> | null = null;
+
 	/**
 	 * @param {Function} [executor] - Optional function to execute OpenClaw commands.
 	 * Defaults to the module-level `runOpenClaw`.
@@ -1085,7 +1096,7 @@ export class CliAdapter {
 	 * @param {Object} options - Options (model, timeout, label)
 	 * @returns {Promise<{ sessionId: string, sessionKey: string }>}
 	 */
-	async spawn(prompt, options) {
+	async spawn(prompt: string, options: any) {
 		this._jobs = this._jobs || new Map();
 		const {
 			cliTimeoutMs = 120000,
@@ -1155,7 +1166,7 @@ export class CliAdapter {
 	 * @param {Object} [options] - Options including cronPollTimeoutMs
 	 * @returns {Promise<{ status: string, error?: string }>}
 	 */
-	async getStatus(sessionId, options = {}) {
+	async getStatus(sessionId: string, options: any = {}) {
 		const { cronPollTimeoutMs = 60000 } = options;
 		const jobId = sessionId;
 		try {
@@ -1221,7 +1232,7 @@ export class CliAdapter {
 		}
 	}
 
-	async cancel(sessionId, options = {}) {
+	async cancel(sessionId: string, options: any = {}) {
 		const jobId = sessionId;
 
 		try {
@@ -1254,13 +1265,19 @@ export class CliAdapter {
  * // Steps using this adapter will complete in 100ms
  */
 export class MockAdapter {
+	resolveIn: number;
+	shouldFail: boolean;
+	failMessage: string;
+	_sessions: Map<string, any>;
+	_counter: number;
+
 	/**
 	 * @param {Object} options
 	 * @param {number}  [options.resolveIn=100]    - Simulated duration in ms
 	 * @param {boolean} [options.shouldFail=false] - Whether the session should fail
 	 * @param {string}  [options.failMessage]      - Error message if shouldFail is true
 	 */
-	constructor(options = {}) {
+	constructor(options: MockAdapterOptions = {}) {
 		this.resolveIn = options.resolveIn ?? 100;
 		this.shouldFail = options.shouldFail ?? false;
 		this.failMessage = options.failMessage || "Mock step failure";
@@ -1268,12 +1285,12 @@ export class MockAdapter {
 		this._counter = 0;
 	}
 
-	async spawn(prompt, options) {
+	async spawn(prompt: string, options: any) {
 		const sessionId = `mock-session-${++this._counter}`;
 		const sessionKey = `agent:mock:subagent:${sessionId}`;
 
 		// Schedule completion after resolveIn ms
-		const result = { status: this.shouldFail ? "error" : "done" };
+		const result: { status: string; error?: string } = { status: this.shouldFail ? "error" : "done" };
 		if (this.shouldFail) result.error = this.failMessage;
 
 		setTimeout(() => {
@@ -1284,7 +1301,7 @@ export class MockAdapter {
 		return { sessionId, sessionKey };
 	}
 
-	async getStatus(sessionId) {
+	async getStatus(sessionId: string) {
 		return this._sessions.get(sessionId) || { status: "running" };
 	}
 }
@@ -1426,6 +1443,7 @@ export function createStepRunner(adapter) {
 					.catch((err) => ({
 						requested: false,
 						confirmed: false,
+						method: null,
 						error: err instanceof Error ? err.message : String(err),
 					}));
 

@@ -48,6 +48,7 @@ import {
 	resolvePathToList,
 	validateLoopItems,
 } from "./list-resolver.js";
+import { runStep } from "./step-runner.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import {
 	assertSafeOutputPath,
@@ -61,6 +62,7 @@ import {
 	updateRunState,
 	updateStepState,
 } from "./workflow-state.js";
+import { RunState, StepState, WorkflowStep } from "./types.js";
 
 async function logSkipDebug(msg: string) {
 	try {
@@ -116,7 +118,7 @@ export async function compileWorkflow(workflow, runId, config) {
 			continue;
 		}
 
-		const expanded = substituteDeep(step, varCtx);
+		const expanded = substituteDeep(step, varCtx) as WorkflowStep;
 
 		for (const output of expanded.outputs || []) {
 			assertSafeOutputPath(outputPathOf(output));
@@ -253,7 +255,7 @@ export async function executeWorkflow(
 	const inFlight = new Map();
 
 	// Step definitions keyed by ID for O(1) lookup
-	const stepMap = new Map(steps.map((s) => [s.id, s]));
+	const stepMap = new Map<string, WorkflowStep>(steps.map((s) => [s.id, s]));
 	/** @type {Map<string, number>} */
 	const runningCounts = new Map();
 	let stateWriteQueue = Promise.resolve();
@@ -757,10 +759,11 @@ export async function executeWorkflow(
 		}
 
 		// Check if all steps have reached terminal status
-		const allTerminal = steps.every((s) => {
-			const status = state.steps[s.id]?.status;
-			return ["ok", "failed", "blocked", "skipped"].includes(status);
-		});
+	const allTerminal = steps.every((s) => {
+		const status = (state as RunState).steps[s.id]?.status;
+		return ["ok", "failed", "blocked", "skipped"].includes(status);
+	});
+
 
 		if (allTerminal) break;
 
@@ -769,12 +772,13 @@ export async function executeWorkflow(
 
 		if (slotsAvailable > 0) {
 			// Find all pending steps that could be launched
-			for (const step of steps) {
-				if (inFlight.size >= concurrency) break;
-				if (state.steps[step.id]?.status !== "pending") continue;
-				if (inFlight.has(step.id)) continue; // Already tracked
+	for (const step of steps) {
+		if (inFlight.size >= concurrency) break;
+		if ((state as RunState).steps[step.id]?.status !== "pending") continue;
+		if (inFlight.has(step.id)) continue; // Already tracked
 
-				const retryNotBefore = state.steps[step.id]?.retry_not_before;
+
+				const retryNotBefore = (state as RunState).steps[step.id]?.retry_not_before;
 				if (retryNotBefore && Date.now() < new Date(retryNotBefore).getTime())
 					continue;
 
@@ -852,7 +856,7 @@ export async function executeWorkflow(
 									const itemCtx = { ...varCtx, item };
 
 									for (const innerDef of innerStepsDef) {
-										const substitutedInner = substituteDeep(innerDef, itemCtx);
+										const substitutedInner = substituteDeep(innerDef, itemCtx) as WorkflowStep;
 
 										const originalInnerId = substitutedInner.id;
 										substitutedInner.id = prefix + originalInnerId;
@@ -985,7 +989,7 @@ export async function executeWorkflow(
 
 	// ── Determine final run status ─────────────────────────────────────────────
 	// Only non-optional step failures or blocks cause the pipeline to fail/block.
-	const finalStepStatuses = Object.values(state.steps).map((s) => s.status);
+	const finalStepStatuses = Object.values((state as RunState).steps).map((s) => (s as StepState).status);
 	const anyNonOptionalFailed = steps.some((s) => {
 		const stepState = state.steps[s.id];
 		return !s.optional && stepState?.status === "failed";
@@ -1074,9 +1078,10 @@ export async function resumeWorkflow(
 	);
 
 	// Copy over 'ok' steps from previous run (preserve their results)
-	for (const [stepId, stepState] of Object.entries(previousState.steps)) {
+	for (const [stepId, stepStateRaw] of Object.entries((previousState as RunState).steps)) {
+		const stepState = stepStateRaw as StepState;
 		if (stepState.status === "ok") {
-			state.steps[stepId] = { ...stepState };
+			(state as RunState).steps[stepId] = { ...stepState };
 		}
 		// All other statuses (failed, skipped, running) remain as 'pending' (reset to retry)
 	}

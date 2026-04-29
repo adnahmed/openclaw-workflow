@@ -7,6 +7,7 @@ import {
 	WorkflowRunParameters,
 	WorkflowStatusParameters,
 } from "./tool-schemas.js";
+import { RunState, StepState } from "./types.js";
 import {
 	dryRun,
 	executeWorkflow,
@@ -232,8 +233,8 @@ export default definePluginEntry({
 							),
 						);
 
-						const skippedSteps = Object.entries(lastRun.steps)
-							.filter(([, step]) => step.status === "ok")
+						const skippedSteps = Object.entries((lastRun as RunState).steps)
+							.filter(([, step]) => (step as StepState).status === "ok")
 							.map(([id]) => id);
 
 						return textResult({
@@ -317,23 +318,25 @@ export default definePluginEntry({
 					}
 
 					const stepSummary = {};
-					for (const [stepId, stepState] of Object.entries(state.steps)) {
+					for (const [stepId, stepState] of Object.entries((state as RunState).steps)) {
+						const s = stepState as StepState;
 						stepSummary[stepId] = {
-							status: stepState.status,
-							attempts: stepState.attempts,
-							duration_s: stepState.duration_ms
-								? Math.round(stepState.duration_ms / 1000)
+							status: s.status,
+							attempts: s.attempts,
+							duration_s: s.duration_ms
+								? Math.round(s.duration_ms / 1000)
 								: null,
-							error: stepState.error,
-							logs: stepState.logs,
-							started_at: stepState.started_at,
-							completed_at: stepState.completed_at,
+							error: s.error,
+							logs: s.logs,
+							started_at: s.started_at,
+							completed_at: s.completed_at,
 						};
 					}
 
-					const elapsedMs = state.started_at
-						? (state.completed_at ? new Date(state.completed_at) : new Date()) -
-							new Date(state.started_at)
+					const s = state as RunState;
+					const elapsedMs = s.started_at
+						? (s.completed_at ? new Date(s.completed_at).getTime() : Date.now()) -
+							new Date(s.started_at).getTime()
 						: null;
 					const steps = Object.values(state.steps);
 
@@ -344,10 +347,10 @@ export default definePluginEntry({
 						started_at: state.started_at,
 						completed_at: state.completed_at,
 						elapsed_s: elapsedMs ? Math.round(elapsedMs / 1000) : null,
-						steps_ok: steps.filter((step) => step.status === "ok").length,
-						steps_failed: steps.filter((step) => step.status === "failed")
+						steps_ok: steps.filter((step) => (step as StepState).status === "ok").length,
+						steps_failed: steps.filter((step) => (step as StepState).status === "failed")
 							.length,
-						steps_blocked: steps.filter((step) => step.status === "blocked")
+						steps_blocked: steps.filter((step) => (step as StepState).status === "blocked")
 							.length,
 						steps_total: steps.length,
 						steps: stepSummary,
@@ -412,8 +415,8 @@ export default definePluginEntry({
 					let state = await readRunState(run_id, runsDir);
 
 					const terminal = ["ok", "failed", "cancelled"].includes(state.status);
-					const runningSteps = Object.entries(state.steps).filter(
-						([, step]) => step.status === "running",
+					const runningSteps = Object.entries((state as RunState).steps).filter(
+						([, step]) => (step as StepState).status === "running",
 					);
 
 					if (terminal && runningSteps.length === 0) {
@@ -438,7 +441,8 @@ export default definePluginEntry({
 
 					const results = [];
 
-					for (const [stepId, step] of runningSteps) {
+					for (const [stepId, stepRaw] of runningSteps) {
+						const step = stepRaw as StepState;
 						const sessionKey = step.session_key;
 						const sessionId = step.session_id || step.subagent_run_id || null;
 

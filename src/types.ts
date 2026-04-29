@@ -3,9 +3,77 @@
  * @description Shared type definitions for the OpenClaw workflow engine.
  */
 
+export type RunStatus = 'pending' | 'running' | 'ok' | 'failed' | 'blocked' | 'cancelled';
+export type StepStatus = 'pending' | 'running' | 'ok' | 'failed' | 'blocked' | 'skipped';
+
+/**
+ * Current execution state of a single workflow step.
+ */
+export type StepState = {
+  status: StepStatus;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  session_key: string | null;
+  session_id: string | null;
+  subagent_run_id: string | null;
+  session_adapter: string | null;
+  cancel_requested_at: string | null;
+  cancel_confirmed_at: string | null;
+  cancel_method: string | null;
+  cancel_error: string | null;
+  cancellation_reason: string | null;
+  retry_not_before: string | null;
+  output_check: OutputCheckResult | null;
+  error: string | null;
+  logs: string | null;
+  attempts: number;
+};
+
+/**
+ * Overall state of a workflow run.
+ */
+export type RunState = {
+  run_id: string;
+  workflow: string;
+  status: RunStatus;
+  started_at: string;
+  completed_at: string | null;
+  cancel_requested_at: string | null;
+  cancelled_at: string | null;
+  steps: Record<string, StepState>;
+};
+
+export type CancelResult = {
+  requested: boolean;
+  confirmed?: boolean;
+  method?: string;
+  error?: string;
+};
+
+export type MockAdapterOptions = {
+  resolveIn?: number;
+  shouldFail?: boolean;
+  failMessage?: string;
+};
+
+export type SpawnOptions = {
+  model?: string;
+  timeout?: number;
+  sessionTarget?: string;
+  label?: string;
+  cronDeliveryMode?: string;
+  cronDeliveryChannel?: string;
+  cronDeliveryTo?: string;
+  cliTimeoutMs?: number;
+  cronAddTimeoutMs?: number;
+  cronRunTimeoutMs?: number;
+  cronPollTimeoutMs?: number;
+  sessionKey?: string;
+};
+
 /**
  * Specification for a step output.
- * Can be a simple path string or a detailed object for validation.
  */
 export type OutputSpec =
   | string
@@ -14,6 +82,7 @@ export type OutputSpec =
       validate?: string;
       optional?: boolean;
     };
+
 
 /**
  * Specification for how to validate a step's output.
@@ -67,6 +136,7 @@ export type WorkflowStep = {
   always_run?: boolean;
   complete_when?: "outputs" | "session";
   on_block?: "block_run" | "fail_step" | "continue";
+  original_id?: string;
 };
 
 /**
