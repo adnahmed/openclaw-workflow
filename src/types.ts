@@ -51,6 +51,12 @@ export type CancelResult = {
   error?: string;
 };
 
+export interface SessionAdapter {
+  spawn(prompt: string, options: SpawnOptions): Promise<{ sessionId: string; sessionKey: string }>;
+  getStatus(sessionId: string, options?: any): Promise<{ status: string; error?: string; logs?: string }>;
+  cancel?(sessionId: string, options?: any): Promise<CancelResult>;
+}
+
 export type MockAdapterOptions = {
   resolveIn?: number;
   shouldFail?: boolean;

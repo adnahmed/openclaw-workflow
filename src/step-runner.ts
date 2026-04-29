@@ -41,7 +41,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
-import { OutputCheckResult, StepRunResult, SpawnOptions, CancelResult, MockAdapterOptions } from "./types.js";
+import { OutputCheckResult, StepRunResult, SpawnOptions, CancelResult, MockAdapterOptions, SessionAdapter } from "./types.js";
 
 const execAsync = promisify(exec);
 let cachedOpenClawPath = null;
@@ -304,7 +304,6 @@ export async function cancelStepSession(api, options): Promise<CancelResult> {
 		return {
 			requested: false,
 			confirmed: false,
-			method: null,
 			error: `Adapter ${sessionAdapter} does not support cancel`,
 		};
 	}
@@ -502,20 +501,18 @@ export async function runStep(step, runId, api, options) {
 		}
 
 		if (finalStatus === null) {
-			const cancelResult = await adapter
-				.cancel?.(spawnResult.sessionId, {
-					...options,
-					sessionKey: spawnResult.sessionKey,
-					runId: spawnResult.sessionId,
-					reason: `workflow_step_timeout:${step.id}`,
-					timeoutMs,
-					cancelGraceMs: options.cancelGraceMs ?? 30000,
-				})
-				.catch((err) => ({
-					requested: false,
-					confirmed: false,
-					error: err instanceof Error ? err.message : String(err),
-				}));
+			const cancelResult: CancelResult | null = await (adapter.cancel?.(spawnResult.sessionId, {
+				...options,
+				sessionKey: spawnResult.sessionKey,
+				runId: spawnResult.sessionId,
+				reason: `workflow_step_timeout:${step.id}`,
+				timeoutMs,
+				cancelGraceMs: options.cancelGraceMs ?? 30000,
+			}) ?? Promise.resolve(null)).catch((err): CancelResult => ({
+				requested: false,
+				confirmed: false,
+				error: err instanceof Error ? err.message : String(err),
+			} as CancelResult));
 
 			const stopped = await waitForTerminalAfterCancel(
 				adapter,
@@ -600,7 +597,7 @@ function splitModelRef(modelRef) {
  * @description Uses the modern OpenClaw Runtime SDK (api.runtime.subagent) to
  * launch and manage isolated subagent runs.
  */
-class RuntimeSubagentAdapter {
+class RuntimeSubagentAdapter implements SessionAdapter {
 	runtime: any;
 	api: any;
 	subagent: any;
@@ -859,7 +856,7 @@ class RuntimeSubagentAdapter {
  * @param {string} [requestedAdapter="auto"] - The adapter to use
  * @returns {SessionAdapter}
  */
-function selectAdapter(api, requestedAdapter = "auto") {
+function selectAdapter(api, requestedAdapter = "auto"): SessionAdapter {
 	const logger = api?.logger;
 
 	const hasRuntimeSubagent =
@@ -953,7 +950,7 @@ function selectAdapter(api, requestedAdapter = "auto") {
  *   spawn(prompt, options) → Promise<{ sessionId, sessionKey }>
  *   getStatus(sessionId)   → Promise<{ status: 'running'|'done'|'error', error? }>
  */
-class ApiAdapter {
+class ApiAdapter implements SessionAdapter {
 	sessions: any;
 
 	/**
@@ -1079,7 +1076,7 @@ function parseCronRunsOutput(raw) {
 	return entries;
 }
 
-export class CliAdapter {
+export class CliAdapter implements SessionAdapter {
 	executor: any;
 	_jobs: Map<string, { status: string }> | null = null;
 
@@ -1264,7 +1261,7 @@ export class CliAdapter {
  * const adapter = new MockAdapter({ resolveIn: 100, shouldFail: false });
  * // Steps using this adapter will complete in 100ms
  */
-export class MockAdapter {
+export class MockAdapter implements SessionAdapter {
 	resolveIn: number;
 	shouldFail: boolean;
 	failMessage: string;
@@ -1430,22 +1427,20 @@ export function createStepRunner(adapter) {
 				);
 			}
 
-			if (finalStatus === null) {
-				const cancelResult = await adapter
-					.cancel?.(spawnResult.sessionId, {
-						...options,
-						sessionKey: spawnResult.sessionKey,
-						runId: spawnResult.sessionId,
-						reason: `workflow_step_timeout:${step.id}`,
-						timeoutMs,
-						cancelGraceMs: options.cancelGraceMs ?? 30000,
-					})
-					.catch((err) => ({
-						requested: false,
-						confirmed: false,
-						method: null,
-						error: err instanceof Error ? err.message : String(err),
-					}));
+		if (finalStatus === null) {
+			const cancelResult: CancelResult | null = await (adapter.cancel?.(spawnResult.sessionId, {
+				...options,
+				sessionKey: spawnResult.sessionKey,
+				runId: spawnResult.sessionId,
+				reason: `workflow_step_timeout:${step.id}`,
+				timeoutMs,
+				cancelGraceMs: options.cancelGraceMs ?? 30000,
+			}) ?? Promise.resolve(null)).catch((err): CancelResult => ({
+				requested: false,
+				confirmed: false,
+				error: err instanceof Error ? err.message : String(err),
+			} as CancelResult));
+
 
 				const stopped = await waitForTerminalAfterCancel(
 					adapter,
