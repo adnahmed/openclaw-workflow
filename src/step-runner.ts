@@ -379,7 +379,7 @@ export async function runStep(step, runId, api, options) {
 		}
 
 		if (finalStatus === "ok" || finalStatus === null) {
-			outputCheck = await checkOutputs(step.outputs, baseDir, validators);
+			outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 		}
 
 		if (finalStatus === null) {

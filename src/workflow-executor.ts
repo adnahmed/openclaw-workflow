@@ -806,9 +806,9 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
      return !s.optional && stepState?.status === 'blocked';
    });
 
-   let finalStatus = 'ok';
-   if (anyNonOptionalFailed) finalStatus = 'failed';
-   else if (anyNonOptionalBlocked) finalStatus = 'blocked';
+    let finalStatus = 'ok';
+    if (anyNonOptionalBlocked) finalStatus = 'blocked';
+    else if (anyNonOptionalFailed) finalStatus = 'failed';
  
    state = await updateRunState(state, {
      status: finalStatus,

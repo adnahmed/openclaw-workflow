@@ -15,11 +15,19 @@ const ajv = new (Ajv as any)();
  * @param {string} [workflowDir] - Optional workflow directory for reference
  * @returns {Promise<OutputValidationResult>}
  */
-function normalizeUnknownPolicy(policy) {
-  if (policy === "block") return "blocked";
-  if (policy === "blocked") return "blocked";
-  if (policy === "pass") return "pass";
-  return "fail";
+function resolveUnknownPolicy(policy) {
+  if (policy === undefined || policy === null) {
+    return "fail";
+  }
+
+  if (policy === "fail" || policy === "blocked" || policy === "pass") {
+    return policy;
+  }
+
+  throw new Error(
+    `Invalid unknown_policy "${String(policy)}". ` +
+    `Expected one of: fail, blocked, pass.`
+  );
 }
 
 async function loadSchema(schema, workflowDir) {
@@ -137,7 +145,7 @@ export async function validateOutput(
 
      // 4. Final Decision based on unknown_policy
      if (result.decision === 'unknown') {
-       result.decision = normalizeUnknownPolicy(validator.unknown_policy);
+       result.decision = resolveUnknownPolicy(validator.unknown_policy);
      }
   } catch (e) {
     result.decision = 'fail';

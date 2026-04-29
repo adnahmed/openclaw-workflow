@@ -162,6 +162,35 @@ function parseWorkflowFile(content, filePath) {
  * @returns {WorkflowDefinition} Normalized workflow definition
  * @throws {Error} With descriptive message on any validation failure
  */
+function validateValidators(rawValidators = {}) {
+	const validUnknownPolicies = new Set(["fail", "blocked", "pass"]);
+	const validTypes = new Set(["json", "text"]);
+
+	for (const [id, validatorRaw] of Object.entries(rawValidators)) {
+		const validator = validatorRaw as any;
+		if (!validator || typeof validator !== "object") {
+			throw new Error(`Validator "${id}" must be an object`);
+		}
+
+		if (!validTypes.has(validator.type)) {
+			throw new Error(
+				`Validator "${id}" has invalid type "${validator.type}". ` +
+					`Expected "json" or "text".`,
+			);
+		}
+
+		if (
+			validator.unknown_policy !== undefined &&
+			!validUnknownPolicies.has(validator.unknown_policy)
+		) {
+			throw new Error(
+				`Validator "${id}" has invalid unknown_policy ` +
+					`"${validator.unknown_policy}". Expected fail, blocked, or pass.`,
+			);
+		}
+	}
+}
+
 function normalizeAndValidate(raw, filePath) {
 	// ── Top-level required fields ──────────────────────────────────────────────
 	if (!raw.name || typeof raw.name !== "string") {
@@ -248,6 +277,8 @@ function normalizeAndValidate(raw, filePath) {
 
 	const steps = validateSteps(raw.steps);
 	const seenIds = new Set(steps.map((s) => s.id));
+
+	validateValidators(raw.validators || {});
 
 	// ── Validate dependency references ─────────────────────────────────────────
 
