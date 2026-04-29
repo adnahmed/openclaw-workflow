@@ -42,7 +42,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
-import { StepRunResult, OutputCheckResult } from "./types.js";
+import { OutputCheckResult, StepRunResult } from "./types.js";
 
 const execAsync = promisify(exec);
 let cachedOpenClawPath = null;
@@ -229,49 +229,6 @@ case you MUST call process(action="poll", sessionId="<name>", timeout=60000) to 
 retrieve the full output before proceeding. Never interpret a backgrounded exec as \
 a failure. Only report failure if the final exit code is non-zero or the output \
 explicitly indicates an error.
-
-Browser File Upload Protocol:
-The file to upload is already present in OpenClaw's uploads directory.
-Never interact with the native OS file picker. Do not click inside it, type a
-filename into it, or wait for a human to choose a file.
-
-Use OpenClaw's upload command as the upload mechanism.
-
-For JS upload buttons, hidden file inputs, or dynamically-created file inputs:
-1. Take a fresh browser snapshot.
-2. Find the ref for the visible upload button, upload area, dropzone, or control
-   that would normally open the file chooser.
-3. Run:
-   openclaw browser upload "<UPLOADS_DIR>\\<FILE>" --ref <UPLOAD_TRIGGER_REF>
-4. Do NOT click the upload button normally before running upload.
-5. Do NOT try to operate the native OS file picker if it appears.
-6. If the ref is stale or upload fails, take a fresh snapshot and retry with the
-   new upload trigger ref.
-
-For already-visible file inputs:
-1. Take a fresh browser snapshot.
-2. Find the ref for the actual file input.
-3. Run:
-   openclaw browser upload "<UPLOADS_DIR>\\<FILE>" --input-ref <INPUT_REF>
-
-Path rules:
-- On Windows-native OpenClaw, <UPLOADS_DIR> is usually:
-  %TEMP%\\openclaw\\uploads
-- On WSL/Docker/Linux OpenClaw, <UPLOADS_DIR> is usually:
-  /tmp/openclaw/uploads
-- Use the path visible to the OpenClaw Gateway/browser-control process.
-- Do not mix Windows host paths with WSL/Docker/Linux paths.
-
-Important distinction:
-- Use --ref for a visible upload button/dropzone/control that opens the chooser.
-- Use --input-ref only when the real file input itself is visible in the snapshot.
-- Prefer --ref for hidden or dynamically-created file inputs.
-- Do not use CSS --element targeting in existing-session/user-profile uploads.
-
-Browser-use rule:
-Use browser-use upload_file only when a real file input is available. Do not click an
-upload button and then wait on the native OS picker. If browser-use cannot access a
-usable file input, use OpenClaw's upload flow above.
 `;
 
 /**
@@ -297,7 +254,6 @@ usable file input, use OpenClaw's upload flow above.
 /**
  * @typedef {import('./types.js').StepRunResult} StepRunResult
  */
-
 
 async function waitForTerminalAfterCancel(
 	adapter,
@@ -449,11 +405,13 @@ export async function runStep(step, runId, api, options) {
 					spawnedAt: new Date().toISOString(),
 				});
 			} catch (err) {
-				const cancelErr = await adapter.cancel?.(spawnResult.sessionId, {
-					sessionKey: spawnResult.sessionKey,
-					runId: spawnResult.sessionId,
-					reason: `workflow_spawn_metadata_persist_failed:${step.id}`,
-				}).catch(() => ({ requested: false }));
+				const cancelErr = await adapter
+					.cancel?.(spawnResult.sessionId, {
+						sessionKey: spawnResult.sessionKey,
+						runId: spawnResult.sessionId,
+						reason: `workflow_spawn_metadata_persist_failed:${step.id}`,
+					})
+					.catch(() => ({ requested: false }));
 
 				return {
 					status: "failed",
@@ -480,8 +438,17 @@ export async function runStep(step, runId, api, options) {
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
 
-			if (step.complete_when === "outputs" && step.outputs && step.outputs.length > 0) {
-				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+			if (
+				step.complete_when === "outputs" &&
+				step.outputs &&
+				step.outputs.length > 0
+			) {
+				outputCheck = await checkOutputs(
+					step.outputs,
+					baseDir,
+					validators,
+					workflowDir,
+				);
 				const mapped = statusFromOutputDecision(outputCheck);
 				finalStatus = mapped.finalStatus;
 				retryable = mapped.retryable;
@@ -491,11 +458,19 @@ export async function runStep(step, runId, api, options) {
 				}
 			}
 
-			const statusResult = await adapter.getStatus(spawnResult.sessionId, options);
+			const statusResult = await adapter.getStatus(
+				spawnResult.sessionId,
+				options,
+			);
 
 			if (statusResult.status === "done") {
 				logs = statusResult.logs;
-				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+				outputCheck = await checkOutputs(
+					step.outputs,
+					baseDir,
+					validators,
+					workflowDir,
+				);
 
 				const mapped = statusFromOutputDecision(outputCheck);
 				finalStatus = mapped.finalStatus;
@@ -505,7 +480,12 @@ export async function runStep(step, runId, api, options) {
 				break;
 			}
 			if (statusResult.status === "error") {
-				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+				outputCheck = await checkOutputs(
+					step.outputs,
+					baseDir,
+					validators,
+					workflowDir,
+				);
 				finalStatus = "failed";
 				errorMsg = statusResult.error || "Step session exited with error";
 				logs = statusResult.logs;
@@ -514,22 +494,29 @@ export async function runStep(step, runId, api, options) {
 		}
 
 		if (finalStatus === "ok" || finalStatus === null) {
-			outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+			outputCheck = await checkOutputs(
+				step.outputs,
+				baseDir,
+				validators,
+				workflowDir,
+			);
 		}
 
 		if (finalStatus === null) {
-			const cancelResult = await adapter.cancel?.(spawnResult.sessionId, {
-				...options,
-				sessionKey: spawnResult.sessionKey,
-				runId: spawnResult.sessionId,
-				reason: `workflow_step_timeout:${step.id}`,
-				timeoutMs,
-				cancelGraceMs: options.cancelGraceMs ?? 30000,
-			}).catch((err) => ({
-				requested: false,
-				confirmed: false,
-				error: err instanceof Error ? err.message : String(err),
-			}));
+			const cancelResult = await adapter
+				.cancel?.(spawnResult.sessionId, {
+					...options,
+					sessionKey: spawnResult.sessionKey,
+					runId: spawnResult.sessionId,
+					reason: `workflow_step_timeout:${step.id}`,
+					timeoutMs,
+					cancelGraceMs: options.cancelGraceMs ?? 30000,
+				})
+				.catch((err) => ({
+					requested: false,
+					confirmed: false,
+					error: err instanceof Error ? err.message : String(err),
+				}));
 
 			const stopped = await waitForTerminalAfterCancel(
 				adapter,
@@ -543,10 +530,9 @@ export async function runStep(step, runId, api, options) {
 			const cancellationConfirmed = Boolean(stopped);
 			const cancellationRequested = Boolean(cancelResult?.requested);
 			retryable = cancellationRequested && cancellationConfirmed;
-			errorMsg =
-				stopped
-					? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
-					: `Step timed out after ${step.timeout}s; cancellation was not confirmed. Do not retry automatically. Cancel result: ${cancelResult?.error || "unknown"}`;
+			errorMsg = stopped
+				? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
+				: `Step timed out after ${step.timeout}s; cancellation was not confirmed. Do not retry automatically. Cancel result: ${cancelResult?.error || "unknown"}`;
 
 			logs = stopped?.logs || logs;
 		} else if (finalStatus === "ok") {
@@ -580,7 +566,6 @@ export async function runStep(step, runId, api, options) {
 	}
 }
 
-
 /**
  * Sanitizes a string for use in a session key.
  * @param {any} value
@@ -591,7 +576,6 @@ function safeSessionKeyPart(value) {
 		.replace(/[^a-zA-Z0-9:_-]/g, "_")
 		.slice(0, 120);
 }
-
 
 /**
  * Splits a model reference (e.g., "openai/gpt-4") into provider and model.
@@ -614,7 +598,7 @@ function splitModelRef(modelRef) {
 
 /**
  * @class RuntimeSubagentAdapter
- * @description Uses the modern OpenClaw Runtime SDK (api.runtime.subagent) to 
+ * @description Uses the modern OpenClaw Runtime SDK (api.runtime.subagent) to
  * launch and manage isolated subagent runs.
  */
 class RuntimeSubagentAdapter {
@@ -932,7 +916,9 @@ function selectAdapter(api, requestedAdapter = "auto") {
 		return new ApiAdapter(api.sessions);
 	}
 
-	logger?.warn?.("[workflow] using CliAdapter fallback; steps will run through cron");
+	logger?.warn?.(
+		"[workflow] using CliAdapter fallback; steps will run through cron",
+	);
 	return new CliAdapter();
 }
 
@@ -947,12 +933,11 @@ function selectAdapter(api, requestedAdapter = "auto") {
 /**
  * @interface SessionAdapter
  * Common interface for all session adapters.
- * 
+ *
  * @property {Function} spawn - spawn(prompt, options) → Promise<{ sessionId, sessionKey }>
  * @property {Function} getStatus - getStatus(sessionId, options) → Promise<{ status: 'running'|'done'|'error', error?, logs? }>
  * @property {Function} [cancel] - cancel(sessionId, options) → Promise<CancelResult>
  */
-
 
 /**
  * @class ApiAdapter
@@ -1358,9 +1343,18 @@ export function createStepRunner(adapter) {
 
 			while (Date.now() < deadline) {
 				await sleep(pollIntervalMs);
- 
-				if (step.complete_when === "outputs" && step.outputs && step.outputs.length > 0) {
-					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+
+				if (
+					step.complete_when === "outputs" &&
+					step.outputs &&
+					step.outputs.length > 0
+				) {
+					outputCheck = await checkOutputs(
+						step.outputs,
+						baseDir,
+						validators,
+						workflowDir,
+					);
 					const mapped = statusFromOutputDecision(outputCheck);
 					finalStatus = mapped.finalStatus;
 					retryable = mapped.retryable;
@@ -1369,14 +1363,19 @@ export function createStepRunner(adapter) {
 						break;
 					}
 				}
- 
+
 				const statusResult = await adapter.getStatus(
 					spawnResult.sessionId,
 					options,
 				);
 				if (statusResult.status === "done") {
 					logs = statusResult.logs;
-					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+					outputCheck = await checkOutputs(
+						step.outputs,
+						baseDir,
+						validators,
+						workflowDir,
+					);
 					const mapped = statusFromOutputDecision(outputCheck);
 					finalStatus = mapped.finalStatus;
 					retryable = mapped.retryable;
@@ -1384,7 +1383,12 @@ export function createStepRunner(adapter) {
 					break;
 				}
 				if (statusResult.status === "error") {
-					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+					outputCheck = await checkOutputs(
+						step.outputs,
+						baseDir,
+						validators,
+						workflowDir,
+					);
 					finalStatus = "failed";
 					errorMsg = statusResult.error || "Session error";
 					logs = statusResult.logs;
@@ -1392,29 +1396,40 @@ export function createStepRunner(adapter) {
 				}
 			}
 
-
 			if (finalStatus === "ok" || finalStatus === null) {
-				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+				outputCheck = await checkOutputs(
+					step.outputs,
+					baseDir,
+					validators,
+					workflowDir,
+				);
 			}
 
 			if (finalStatus === "ok" || finalStatus === null) {
-				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+				outputCheck = await checkOutputs(
+					step.outputs,
+					baseDir,
+					validators,
+					workflowDir,
+				);
 			}
- 
+
 			if (finalStatus === null) {
-				const cancelResult = await adapter.cancel?.(spawnResult.sessionId, {
-					...options,
-					sessionKey: spawnResult.sessionKey,
-					runId: spawnResult.sessionId,
-					reason: `workflow_step_timeout:${step.id}`,
-					timeoutMs,
-					cancelGraceMs: options.cancelGraceMs ?? 30000,
-				}).catch((err) => ({
-					requested: false,
-					confirmed: false,
-					error: err instanceof Error ? err.message : String(err),
-				}));
- 
+				const cancelResult = await adapter
+					.cancel?.(spawnResult.sessionId, {
+						...options,
+						sessionKey: spawnResult.sessionKey,
+						runId: spawnResult.sessionId,
+						reason: `workflow_step_timeout:${step.id}`,
+						timeoutMs,
+						cancelGraceMs: options.cancelGraceMs ?? 30000,
+					})
+					.catch((err) => ({
+						requested: false,
+						confirmed: false,
+						error: err instanceof Error ? err.message : String(err),
+					}));
+
 				const stopped = await waitForTerminalAfterCancel(
 					adapter,
 					spawnResult.sessionId,
@@ -1422,16 +1437,15 @@ export function createStepRunner(adapter) {
 					options.cancelGraceMs ?? 30000,
 					pollIntervalMs,
 				);
- 
+
 				finalStatus = "failed";
 				const cancellationConfirmed = Boolean(stopped);
 				const cancellationRequested = Boolean(cancelResult?.requested);
 				retryable = cancellationRequested && cancellationConfirmed;
-				errorMsg =
-					stopped
-						? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
-						: `Step timed out after ${step.timeout}s; cancellation was not confirmed. Do not retry automatically. Cancel result: ${cancelResult?.error || "unknown"}`;
- 
+				errorMsg = stopped
+					? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
+					: `Step timed out after ${step.timeout}s; cancellation was not confirmed. Do not retry automatically. Cancel result: ${cancelResult?.error || "unknown"}`;
+
 				logs = stopped?.logs || logs;
 			} else if (finalStatus === "ok") {
 				const mapped = statusFromOutputDecision(outputCheck);
