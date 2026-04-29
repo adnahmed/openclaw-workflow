@@ -376,25 +376,20 @@ export async function runStep(step, runId, api, options) {
  	try {
  		const model = step.model || defaultModel || null;
  
- 		const workflow = options.workflow;
- 		const combinedSkills = [
- 			...(workflow?.required_skills ?? []),
- 			...(step.required_skills ?? []),
- 		];
- 		const requiredSkills = [...new Set(combinedSkills)];
- 		const availableSkills = api.runtime?.skills ?? [];
- 
- 		for (const skill of requiredSkills) {
- 			if (!availableSkills.includes(skill)) {
- 				throw new Error(`Required skill "${skill}" is not available in the current runtime.`);
- 			}
- 		}
- 
- 		const toolContract = requiredSkills.length
- 			? `\nRequired skills for this step: ${requiredSkills.join(", ")}.\nYou must use these skills directly when performing related actions.\nDo not substitute host shell commands for these skills.\n`
- 			: "";
- 
- 		const taskWithPreamble = EXEC_POLL_PREAMBLE + toolContract + step.task;
+		const workflow = options.workflow;
+		const combinedSkills = [
+			...(workflow?.required_skills ?? []),
+			...(step.required_skills ?? []),
+		];
+		const uniqueRequiredSkills = [...new Set(combinedSkills)];
+
+		assertSkillsNotConfigBlocked(api.config, uniqueRequiredSkills);
+
+		const skillContract = uniqueRequiredSkills.length
+			? `\nRequired skills for this step: ${uniqueRequiredSkills.join(", ")}.\n\nUse these skills directly when relevant.\nDo not substitute host shell commands for these skills.\nIf a required skill is unavailable, write the declared blocked/retryable output artifact explaining which skill was unavailable.\n`
+			: "";
+
+		const taskWithPreamble = EXEC_POLL_PREAMBLE + skillContract + step.task;
  
  		const spawnResult = await adapter.spawn(taskWithPreamble, {
 
@@ -467,11 +462,13 @@ export async function runStep(step, runId, api, options) {
 					break;
 				}
 
-				const onlyMissingFiles =
+				const transientOutputFailure =
 					outputCheck.validations?.length &&
-					outputCheck.validations.every(v => v.failure_kind === "missing_file");
+					outputCheck.validations.every(v =>
+						v.failure_kind === "missing_file" || v.failure_kind === "parse"
+					);
 
-				if (onlyMissingFiles && Date.now() < deadline) {
+				if (transientOutputFailure && Date.now() < deadline) {
 					continue;
 				}
 
@@ -505,11 +502,13 @@ export async function runStep(step, runId, api, options) {
 					break;
 				}
 
-				const onlyMissingFiles =
+				const transientOutputFailure =
 					outputCheck.validations?.length &&
-					outputCheck.validations.every(v => v.failure_kind === "missing_file");
+					outputCheck.validations.every(v =>
+						v.failure_kind === "missing_file" || v.failure_kind === "parse"
+					);
 
-				if (onlyMissingFiles && Date.now() < deadline) {
+				if (transientOutputFailure && Date.now() < deadline) {
 					continue;
 				}
 
@@ -612,6 +611,34 @@ function safeSessionKeyPart(value) {
 	return String(value || "")
 		.replace(/[^a-zA-Z0-9:_-]/g, "_")
 		.slice(0, 120);
+}
+
+function configuredSkillVisibility(cfg: any, agentId = "main"): string[] | null {
+	const agent = cfg?.agents?.list?.find((a: any) => a.id === agentId);
+
+	if (Array.isArray(agent?.skills)) {
+		return agent.skills; // final set
+	}
+
+	if (Array.isArray(cfg?.agents?.defaults?.skills)) {
+		return cfg.agents.defaults.skills; // inherited baseline
+	}
+
+	return null; // unrestricted by config
+}
+
+function assertSkillsNotConfigBlocked(cfg: any, required: string[], agentId = "main") {
+	const visible = configuredSkillVisibility(cfg, agentId);
+
+	if (visible === null) return; // unrestricted by config
+
+	for (const skill of required) {
+		if (!visible.includes(skill)) {
+			throw new Error(
+				`Required skill "${skill}" is blocked by configured agent skill allowlist.`,
+			);
+		}
+	}
 }
 
 /**
@@ -1410,11 +1437,13 @@ export function createStepRunner(adapter) {
 						break;
 					}
 
-					const onlyMissingFiles =
+					const transientOutputFailure =
 						outputCheck.validations?.length &&
-						outputCheck.validations.every(v => v.failure_kind === "missing_file");
+						outputCheck.validations.every(v =>
+							v.failure_kind === "missing_file" || v.failure_kind === "parse"
+						);
 
-					if (onlyMissingFiles && Date.now() < deadline) {
+					if (transientOutputFailure && Date.now() < deadline) {
 						continue;
 					}
 
@@ -1447,11 +1476,13 @@ export function createStepRunner(adapter) {
 						break;
 					}
 
-					const onlyMissingFiles =
+					const transientOutputFailure =
 						outputCheck.validations?.length &&
-						outputCheck.validations.every(v => v.failure_kind === "missing_file");
+						outputCheck.validations.every(v =>
+							v.failure_kind === "missing_file" || v.failure_kind === "parse"
+						);
 
-					if (onlyMissingFiles && Date.now() < deadline) {
+					if (transientOutputFailure && Date.now() < deadline) {
 						continue;
 					}
 
