@@ -870,6 +870,7 @@ export async function executeWorkflow(
 
 								for (const child of expandedChildren) {
 									steps.push(child);
+									stepMap.set(child.id, child);
 									await mutateState((current) =>
 										updateStepState(
 											current,
