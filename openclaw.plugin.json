@@ -86,10 +86,19 @@
         "type": "integer",
         "minimum": 1000,
         "description": "Grace period to wait after requesting worker cancellation."
+      },
+      "autoResumeOnStartup": {
+        "type": "boolean",
+        "description": "When true, Gateway startup scans persisted workflow runs and automatically resumes runs that were still marked running."
       }
     }
   },
   "uiHints": {
+    "autoResumeOnStartup": {
+      "label": "Auto-resume on Gateway startup",
+      "help": "Resume interrupted workflow runs after Gateway restart.",
+      "advanced": true
+    },
     "workflowsDir": {
       "label": "Workflows directory",
       "help": "Folder containing .yml, .yaml, and .json workflow definitions.",

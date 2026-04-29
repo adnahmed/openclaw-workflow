@@ -21,9 +21,11 @@ type RawPluginConfig = {
   cliTimeoutMs?: number;
   cronAddTimeoutMs?: number;
   cronRunTimeoutMs?: number;
-   cronPollTimeoutMs?: number;
-   cancelGraceMs?: number;
- };
+    cronPollTimeoutMs?: number;
+    cancelGraceMs?: number;
+    autoResumeOnStartup?: boolean;
+  };
+
 
 
 type RuntimeConfig = {
@@ -86,5 +88,6 @@ export function normalizePluginConfig(rawConfig: RawPluginConfig = {}, runtime: 
     cronRunTimeoutMs: rawConfig.cronRunTimeoutMs ?? 60000,
     cronPollTimeoutMs: rawConfig.cronPollTimeoutMs ?? 60000,
     cancelGraceMs: rawConfig.cancelGraceMs ?? 10000,
+    autoResumeOnStartup: rawConfig.autoResumeOnStartup === true,
   };
 }

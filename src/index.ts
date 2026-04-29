@@ -18,6 +18,7 @@ import {
 	createRunState,
 	findLatestRun,
 	generateRunId,
+	listRuns,
 	readRunState,
 	updateRunState,
 	updateStepState,
@@ -182,6 +183,103 @@ export default definePluginEntry({
 			});
 		}
 
+		async function loadWorkflowForRun(run: RunState) {
+			if (run.workflow_key) {
+				try {
+					return await loadWorkflow(run.workflow_key, workflowsDir);
+				} catch {
+					// Fall through to display name search if key fails
+				}
+			}
+
+			try {
+				return await loadWorkflow(run.workflow, workflowsDir);
+			} catch {
+				// Fallback: scan workflow files and match by display name.
+			}
+
+			const available = await listWorkflows(workflowsDir);
+
+			for (const item of available) {
+				const candidate = await loadWorkflow(item.name, workflowsDir);
+				if (candidate.name === run.workflow) {
+					return candidate;
+				}
+			}
+
+			throw new Error(
+				`Could not find workflow definition for interrupted run ${run.run_id} (${run.workflow})`,
+			);
+		}
+
+		async function autoResumeInterruptedRuns() {
+			const runs = await listRuns(runsDir);
+			const interrupted = runs.filter((run) => run.status === "running");
+
+			if (interrupted.length === 0) {
+				logger.info("[workflow] auto-resume: no interrupted runs found");
+				return;
+			}
+
+			logger.warn(`[workflow] auto-resume: found ${interrupted.length} interrupted run(s)`);
+
+			for (const previousRun of interrupted) {
+				try {
+					const workflow = await loadWorkflowForRun(previousRun);
+					const newRunId = generateRunId(workflow.name);
+
+					await updateRunState(
+						previousRun,
+						{
+							status: "failed",
+							completed_at: new Date().toISOString(),
+							error: `Gateway restart detected; auto-resumed as ${newRunId}`,
+							resumed_as: newRunId,
+						},
+						runsDir,
+					);
+
+					const notify = buildNotifier();
+					const execConfig = buildExecutorConfig(workflow, notify);
+
+					runInBackground(
+						newRunId,
+						resumeWorkflow(
+							previousRun,
+							workflow,
+							newRunId,
+							api,
+							{ ...execConfig, sessionAdapter },
+							runStep,
+							previousRun.workflow_key,
+						),
+					);
+
+					logger.info(
+						`[workflow] auto-resume: ${previousRun.run_id} -> ${newRunId}`,
+					);
+				} catch (err) {
+					logger.error(
+						`[workflow] auto-resume failed for ${previousRun.run_id}: ${
+							err instanceof Error ? err.message : String(err)
+						}`,
+					);
+				}
+			}
+		}
+
+		if (config.autoResumeOnStartup && api.registrationMode === "full") {
+			api.registerService?.({
+				id: "openclaw-workflow-auto-resume",
+				async start() {
+					runInBackground(
+						"auto-resume",
+						autoResumeInterruptedRuns(),
+					);
+				},
+			});
+		}
+
 		api.registerTool({
 			name: "workflow_run",
 			description:
@@ -230,6 +328,7 @@ export default definePluginEntry({
 									sessionAdapter,
 								},
 								runStep,
+								lastRun.workflow_key,
 							),
 						);
 
@@ -248,6 +347,7 @@ export default definePluginEntry({
 
 					const initialState = createRunState(
 						workflow.name,
+						name,
 						workflow.steps.map((s) => s.id),
 						runId,
 					);
@@ -273,6 +373,7 @@ export default definePluginEntry({
 							},
 							runStep,
 							runningState,
+							name,
 						),
 					);
 

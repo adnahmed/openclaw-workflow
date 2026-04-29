@@ -106,14 +106,15 @@ export function generateRunId(workflowName) {
  * and transitions to 'running' when the first step is launched.
  *
  * @param {string}   workflowName - Name of the workflow being run
+ * @param {string}   workflowKey   - File stem of the workflow definition
  * @param {string[]} stepIds      - Ordered list of step IDs from the workflow definition
  * @param {string}   runId        - Pre-generated run ID
  * @returns {RunState}
  *
  * @example
- * const state = createRunState('seo-pipeline', ['tech-auditor', 'content-creator', 'standup'], 'seo-pipeline-20260309T082000');
+ * const state = createRunState('seo-pipeline', 'seo-pipeline', ['tech-auditor', 'content-creator', 'standup'], 'seo-pipeline-20260309T082000');
  */
-export function createRunState(workflowName, stepIds, runId) {
+export function createRunState(workflowName, workflowKey, stepIds, runId) {
   /** @type {Object.<string, StepState>} */
   const steps = {};
   for (const id of stepIds) {
@@ -142,6 +143,7 @@ export function createRunState(workflowName, stepIds, runId) {
   return {
     run_id: runId,
     workflow: workflowName,
+    workflow_key: workflowKey,
     status: 'pending',
     started_at: new Date().toISOString(),
     completed_at: null,

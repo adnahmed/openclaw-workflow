@@ -169,6 +169,7 @@ export async function executeWorkflow(
 	config,
 	stepRunner = runStep,
 	initialState = null,
+	workflowKey = null,
 ) {
 	try {
 		await fs.mkdir(config.runsDir, { recursive: true });
@@ -182,6 +183,7 @@ export async function executeWorkflow(
 			initialState ??
 			createRunState(
 				workflow.name,
+				workflowKey || workflow.name,
 				workflow.steps.map((s) => s.id),
 				runId,
 			);
@@ -238,6 +240,7 @@ export async function executeWorkflow(
 		? { ...initialState, run_id: runId }
 		: createRunState(
 				workflow.name,
+				workflowKey || workflow.name,
 				steps.map((s) => s.id),
 				runId,
 			);
@@ -318,7 +321,9 @@ export async function executeWorkflow(
 			const depOptional = depDef?.optional === true;
 
 			if (depState.status === "ok") continue;
-			if (depState.status === "skipped") continue;
+			if (depState.status === "skipped") {
+				return { ready: false, blocked: true };
+			}
 			if (depState.status === "failed" && depOptional) continue;
 			if (depState.status === "blocked" && depOptional) continue;
 
@@ -1065,6 +1070,7 @@ export async function resumeWorkflow(
 	api,
 	config,
 	stepRunner,
+	workflowKey = null,
 ) {
 	const { runsDir } = config;
 
@@ -1073,6 +1079,7 @@ export async function resumeWorkflow(
 	// skipped by the executor's scheduler loop (which only launches 'pending' steps).
 	const state = createRunState(
 		workflow.name,
+		workflowKey || workflow.name,
 		workflow.steps.map((s) => s.id),
 		newRunId,
 	);
@@ -1090,7 +1097,7 @@ export async function resumeWorkflow(
 	await saveRunState(state, runsDir);
 
 	// Pass initialState so executeWorkflow doesn't overwrite our pre-seeded ok steps
-	return executeWorkflow(workflow, newRunId, api, config, stepRunner, state);
+	return executeWorkflow(workflow, newRunId, api, config, stepRunner, state, workflowKey);
 }
 
 /**

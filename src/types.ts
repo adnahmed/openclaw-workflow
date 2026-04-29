@@ -36,6 +36,7 @@ export type StepState = {
 export type RunState = {
   run_id: string;
   workflow: string;
+  workflow_key: string;
   status: RunStatus;
   started_at: string;
   completed_at: string | null;
