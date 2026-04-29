@@ -983,7 +983,13 @@ export class MockAdapter {
  */
 export function createStepRunner(adapter) {
 	return async function runStepWithAdapter(step, runId, _api, options) {
-		const { pollIntervalMs = 5000, baseDir = process.cwd(), cancelled } = options;
+		const {
+			pollIntervalMs = 5000,
+			baseDir = process.cwd(),
+			cancelled,
+			validators = {},
+			workflowDir = "",
+		} = options;
 		if (cancelled) {
 			return {
 				status: "failed",
@@ -1017,7 +1023,7 @@ export function createStepRunner(adapter) {
 				await sleep(pollIntervalMs);
 
 				if (step.outputs && step.outputs.length > 0) {
-					outputCheck = await checkOutputs(step.outputs, baseDir);
+					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 					if (outputCheck.decision === "pass") {
 						finalStatus = "ok";
 						break;
@@ -1040,7 +1046,7 @@ export function createStepRunner(adapter) {
 			}
 
 			if (finalStatus === "ok" || finalStatus === null) {
-				outputCheck = await checkOutputs(step.outputs, baseDir);
+				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 			}
 
 			if (finalStatus === null) {
