@@ -150,7 +150,7 @@ workflow_status({ name: "hello" })
 | `steps`       | array    | ✅       | —       | Ordered list of step definitions. |
 | `concurrency` | number   | ❌       | `3`     | Max steps that run in parallel. |
 | `config`       | object    | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
-| `validators`    | object    | ❌       | `{}`     | Custom validation rules for output checks. |
+| `validators`    | object    | ❌       | `{}`     | Custom validation rules for output checks, supporting schemas and conditional outcomes (`pass_when`, `retry_when`, `block_when`, `fail_when`). |
 
 ### Step fields
 
@@ -160,7 +160,7 @@ workflow_status({ name: "hello" })
 | `name`         | string    | ❌       | Same as `id` | Human display name for notifications. |
 | `task`         | string    | ✅*      | —       | The agent prompt / task description. Supports [variable substitution](#variable-substitution). (*Not required if `for_each` is used) |
 | `depends_on`   | string[]  | ❌       | `[]`    | IDs of steps that must complete (`ok`) before this step runs. |
-| `outputs`      | string[]  | ❌       | `[]`    | File paths that must exist after the step completes. If any are missing, the step is marked `failed`. Supports [variable substitution](#variable-substitution). |
+| `outputs`      | array     | ❌       | `[]`    | Output validation rules. Supports simple file existence checks or detailed objects with custom validators and schemas. Supports [variable substitution](#variable-substitution). |
 | `for_each`     | string    | ❌       | —       | Variable containing a list to iterate over (e.g., `"{songs}"`). |
 | `parser`       | string    | ❌       | `"auto"` | Parser to use for the loop list (`"json"`, `"csv"`, `"newline"`, `"auto"`). |
 | `item_schema`    | object    | ❌       | —       | Optional schema to validate each item in the loop list (type, required fields, patterns). |
@@ -361,7 +361,7 @@ List all available workflows and their last run status.
 
 ### `workflow_cancel`
 
-Cancel a running workflow. In-flight steps finish; no new steps start.
+Cancel a running workflow. marks the run cancelled, prevents new steps from launching, and attempts to abort active worker sessions using the adapter cancellation path. Abort confirmation depends on the active OpenClaw runtime surface.
 
 This is registered as an optional tool because it modifies persisted run state.
 

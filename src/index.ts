@@ -1,10 +1,6 @@
-// @ts-nocheck
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizePluginConfig } from "./config.js";
-import {
-	runStep,
-	cancelStepSession,
-} from "./step-runner.js";
+import { cancelStepSession, runStep } from "./step-runner.js";
 import {
 	WorkflowCancelParameters,
 	WorkflowListParameters,
@@ -18,9 +14,9 @@ import {
 } from "./workflow-executor.js";
 import { listWorkflows, loadWorkflow } from "./workflow-loader.js";
 import {
+	createRunState,
 	findLatestRun,
 	generateRunId,
-	createRunState,
 	readRunState,
 	updateRunState,
 	updateStepState,
@@ -169,7 +165,9 @@ export default definePluginEntry({
 			} catch (stateErr) {
 				logger.error(
 					`[workflow:${runId}] failed to persist background failure: ${
-						stateErr instanceof Error ? `${stateErr.message}\n${stateErr.stack}` : String(stateErr)
+						stateErr instanceof Error
+							? `${stateErr.message}\n${stateErr.stack}`
+							: String(stateErr)
 					}`,
 				);
 			}
@@ -254,7 +252,7 @@ export default definePluginEntry({
 					const runningState = await updateRunState(
 						initialState,
 						{
-							status: 'running',
+							status: "running",
 							completed_at: null,
 						},
 						runsDir,
@@ -262,10 +260,17 @@ export default definePluginEntry({
 
 					runInBackground(
 						runId,
-						executeWorkflow(workflow, runId, api, {
-							...execConfig,
-							sessionAdapter,
-						}, runStep, runningState),
+						executeWorkflow(
+							workflow,
+							runId,
+							api,
+							{
+								...execConfig,
+								sessionAdapter,
+							},
+							runStep,
+							runningState,
+						),
 					);
 
 					const stepSummary = {};
@@ -405,8 +410,9 @@ export default definePluginEntry({
 					let state = await readRunState(run_id, runsDir);
 
 					const terminal = ["ok", "failed", "cancelled"].includes(state.status);
-					const runningSteps = Object.entries(state.steps)
-						.filter(([, step]) => step.status === "running");
+					const runningSteps = Object.entries(state.steps).filter(
+						([, step]) => step.status === "running",
+					);
 
 					if (terminal && runningSteps.length === 0) {
 						return textResult({
@@ -432,10 +438,7 @@ export default definePluginEntry({
 
 					for (const [stepId, step] of runningSteps) {
 						const sessionKey = step.session_key;
-						const sessionId =
-							step.session_id ||
-							step.subagent_run_id ||
-							null;
+						const sessionId = step.session_id || step.subagent_run_id || null;
 
 						state = await updateStepState(
 							state,
@@ -517,15 +520,15 @@ export default definePluginEntry({
 						run_id,
 						status: "cancelled",
 						running_steps: runningSteps.length,
-						abort_requested: results.filter(r => r.requested).length,
-						abort_failed: results.filter(r => !r.requested).length,
+						abort_requested: results.filter((r) => r.requested).length,
+						abort_failed: results.filter((r) => !r.requested).length,
 						results,
 						message:
 							runningSteps.length === 0
 								? `Run "${run_id}" marked as cancelled. No workers were active.`
 								: `Run "${run_id}" marked as cancelled. Abort requested for ${
-									results.filter(r => r.requested).length
-								}/${runningSteps.length} active worker(s).`,
+										results.filter((r) => r.requested).length
+									}/${runningSteps.length} active worker(s).`,
 					});
 				} catch (err) {
 					if (err?.code === "ENOENT") {
@@ -538,4 +541,3 @@ export default definePluginEntry({
 		});
 	},
 });
-

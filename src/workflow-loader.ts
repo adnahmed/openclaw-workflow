@@ -299,6 +299,32 @@ function normalizeAndValidate(raw, filePath) {
 	const depMap = new Map(steps.map((s) => [s.id, s.depends_on]));
 	detectCycles(depMap, raw.name);
 
+	// ── Validate orchestration-critical outputs ──────────────────────────────────
+	
+	const criticalOutputs = new Set();
+	for (const step of steps) {
+		if (step.for_each) criticalOutputs.add(step.for_each);
+		if (step.skip_if_empty) criticalOutputs.add(step.skip_if_empty);
+	}
+
+	for (const criticalPath of criticalOutputs) {
+		for (const step of steps) {
+			for (const output of step.outputs) {
+				const path = typeof output === "string" ? output : output.path;
+				// Simple match: check if critical path is exactly the output path 
+				// or if the output path is a pattern that matches (ignoring placeholders)
+				if (path === criticalPath) {
+					if (typeof output === "object" && output.optional) {
+						throw new Error(
+							`Orchestration-critical output "${criticalPath}" in step "${step.id}" cannot be optional ` +
+								`because it is used for flow control (for_each or skip_if_empty).`,
+						);
+					}
+				}
+			}
+		}
+	}
+
 	// ── Normalize top-level fields ─────────────────────────────────────────────
 	const normalizedWorkflow = {
 		name: raw.name.trim(),

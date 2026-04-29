@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * @module step-runner
  * @description Manages the lifecycle of a single workflow step: spawning the
