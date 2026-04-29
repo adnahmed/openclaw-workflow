@@ -149,7 +149,8 @@ workflow_status({ name: "hello" })
 | `description` | string   | ❌       | `""`    | Human description shown in `workflow_list`. |
 | `steps`       | array    | ✅       | —       | Ordered list of step definitions. |
 | `concurrency` | number   | ❌       | `3`     | Max steps that run in parallel. |
-| `config`       | object   | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
+| `config`       | object    | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
+| `validators`    | object    | ❌       | `{}`     | Custom validation rules for output checks. |
 
 ### Step fields
 
@@ -170,6 +171,8 @@ workflow_status({ name: "hello" })
 | `retry`        | number    | ❌       | `0`     | Number of retry attempts after first failure. `retry: 2` = up to 3 total attempts. |
 | `retry_delay`  | number    | ❌       | `30`    | Seconds to wait between retry attempts. |
 | `optional`     | boolean   | ❌       | `false` | If `true`, step failure doesn't fail the pipeline or block dependent steps. |
+| `always_run`   | boolean   | ❌       | `false` | If `true`, step runs regardless of dependency failure. |
+| `on_block`     | string    | ❌       | `"block_run"` | Behavior when blocked: `"block_run"` (fails pipeline) or `"continue"`. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 
 **Example Pattern: Conditional Execution**
@@ -408,9 +411,9 @@ Each workflow run writes state to `{runsDir}/{run_id}.json`:
 }
 ```
 
-**Run status values:** `pending` | `running` | `ok` | `failed` | `cancelled`
+**Run status values:** `pending` | `running` | `ok` | `failed` | `blocked` | `cancelled`
 
-**Step status values:** `pending` | `running` | `ok` | `failed` | `skipped`
+**Step status values:** `pending` | `running` | `ok` | `failed` | `blocked` | `skipped`
 
 - `skipped`: Step was never run because a non-optional dependency failed
 - `failed`: Step ran but failed (either session error or output gate failed)
@@ -621,12 +624,18 @@ interface PluginApi {
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Plugin entry: registers 4 tools |
+| `src/config.ts` | Plugin configuration normalization |
 | `src/workflow-loader.ts` | YAML/JSON parsing, validation, cycle detection |
 | `src/workflow-executor.ts` | Core execution engine: scheduling, deps, retry, resume, dry run |
 | `src/workflow-state.ts` | Atomic state file R/W, run listing |
 | `src/step-runner.ts` | Session lifecycle: spawn, poll, output check. Includes MockAdapter |
 | `src/output-checker.ts` | File existence validation for output gates |
+| `src/output-validator.ts` | Advanced output content validation |
 | `src/variable-substitution.ts` | `{date}`, `{datetime}`, `{utc_date}`, `{utc_datetime}`, `{run_id}` substitution |
+| `src/list-resolver.ts` | Resolves `for_each` sources (JSON, CSV, Newline) |
+| `src/template-schema-validator.ts` | Validates variable templates in workflow definitions |
+| `src/tool-schemas.ts` | Tool parameter definitions for OpenClaw SDK |
+| `src/types.ts` | Shared TypeScript interfaces and types |
 | `openclaw.plugin.json` | Plugin manifest + config schema |
 | `package.json` | Package metadata |
 | `tests/*.test.js` | Full test suite (Node built-in test runner) |
