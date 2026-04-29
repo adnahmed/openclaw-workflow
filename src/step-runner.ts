@@ -171,6 +171,40 @@ async function runOpenClaw(args, options = {}) {
 	});
 }
 
+function statusFromOutputDecision(outputCheck) {
+	switch (outputCheck.decision) {
+		case "pass":
+			return {
+				finalStatus: "ok",
+				retryable: false,
+				errorMsg: null,
+			};
+
+		case "retry":
+			return {
+				finalStatus: "failed",
+				retryable: true,
+				errorMsg: "Output validator requested retry",
+			};
+
+		case "blocked":
+			return {
+				finalStatus: "blocked",
+				retryable: false,
+				errorMsg: "Output validator blocked step",
+			};
+
+		case "fail":
+		case "unknown":
+		default:
+			return {
+				finalStatus: "failed",
+				retryable: false,
+				errorMsg: `Output gate failed (${outputCheck.decision}) — missing files: ${outputCheck.missing_files.join(", ")}`,
+			};
+	}
+}
+
 /**
  * Preamble injected at the start of every step task prompt.
  *
@@ -375,8 +409,11 @@ export async function runStep(step, runId, api, options) {
 
 			if (step.complete_when === "outputs" && step.outputs && step.outputs.length > 0) {
 				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
-				if (outputCheck.decision === "pass") {
-					finalStatus = "ok";
+				const mapped = statusFromOutputDecision(outputCheck);
+				finalStatus = mapped.finalStatus;
+				retryable = mapped.retryable;
+				errorMsg = mapped.errorMsg;
+				if (finalStatus !== null) {
 					break;
 				}
 			}
@@ -386,7 +423,12 @@ export async function runStep(step, runId, api, options) {
 			if (statusResult.status === "done") {
 				logs = statusResult.logs;
 				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
-				finalStatus = outputCheck.decision === "pass" ? "ok" : "failed";
+
+				const mapped = statusFromOutputDecision(outputCheck);
+				finalStatus = mapped.finalStatus;
+				retryable = mapped.retryable;
+				errorMsg = mapped.errorMsg;
+
 				break;
 			}
 			if (statusResult.status === "error") {
@@ -432,26 +474,13 @@ export async function runStep(step, runId, api, options) {
 
 			logs = stopped?.logs || logs;
 		} else if (finalStatus === "ok") {
-			switch (outputCheck.decision) {
-				case "pass":
-					finalStatus = "ok";
-					break;
-				case "retry":
-					finalStatus = "failed";
-					retryable = true;
-					errorMsg = "Output validator requested retry";
-					break;
-				case "blocked":
-					finalStatus = "blocked";
-					errorMsg = "Output validator blocked step";
-					break;
-				case "fail":
-				case "unknown":
-				default:
-					finalStatus = "failed";
-					errorMsg = `Output gate failed (${outputCheck.decision}) — missing files: ${outputCheck.missing_files.join(", ")}`;
-					break;
-			}
+			// The final status is already determined by statusFromOutputDecision in the polling loop.
+			// We keep this block for compatibility or if finalStatus was set to "ok" elsewhere,
+			// but the logic is now centralized.
+			const mapped = statusFromOutputDecision(outputCheck);
+			finalStatus = mapped.finalStatus;
+			retryable = mapped.retryable;
+			errorMsg = mapped.errorMsg;
 		}
 
 		return {
@@ -1254,8 +1283,9 @@ export function createStepRunner(adapter) {
 
 				if (step.complete_when === "outputs" && step.outputs && step.outputs.length > 0) {
 					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
-					if (outputCheck.decision === "pass") {
-						finalStatus = "ok";
+					const mapped = statusFromOutputDecision(outputCheck);
+					finalStatus = mapped.finalStatus;
+					if (finalStatus !== null) {
 						break;
 					}
 				}
@@ -1266,7 +1296,8 @@ export function createStepRunner(adapter) {
 				);
 				if (statusResult.status === "done") {
 					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
-					finalStatus = outputCheck.decision === "pass" ? "ok" : "failed";
+					const mapped = statusFromOutputDecision(outputCheck);
+					finalStatus = mapped.finalStatus;
 					break;
 				}
 				if (statusResult.status === "error") {
@@ -1290,23 +1321,9 @@ export function createStepRunner(adapter) {
 					errorMsg = `Step timed out after ${step.timeout}s`;
 				}
 			} else if (finalStatus === "ok") {
-				switch (outputCheck.decision) {
-					case "pass":
-						finalStatus = "ok";
-						break;
-					case "retry":
-						finalStatus = "failed";
-						errorMsg = "Output validator requested retry";
-						break;
-					case "blocked":
-						finalStatus = "blocked";
-						errorMsg = "Output validator blocked step";
-						break;
-					default:
-						finalStatus = "failed";
-						errorMsg = `Output gate failed — missing: ${outputCheck.missing_files.join(", ")}`;
-						break;
-				}
+				const mapped = statusFromOutputDecision(outputCheck);
+				finalStatus = mapped.finalStatus;
+				errorMsg = mapped.errorMsg;
 			}
 
 			return {
