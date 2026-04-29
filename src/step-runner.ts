@@ -347,7 +347,7 @@ export async function runStep(step, runId, api, options) {
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
 
-			if (step.outputs && step.outputs.length > 0) {
+			if (step.complete_when === "outputs" && step.outputs && step.outputs.length > 0) {
 				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 				if (outputCheck.decision === "pass") {
 					finalStatus = "ok";
@@ -1022,7 +1022,7 @@ export function createStepRunner(adapter) {
 			while (Date.now() < deadline) {
 				await sleep(pollIntervalMs);
 
-				if (step.outputs && step.outputs.length > 0) {
+				if (step.complete_when === "outputs" && step.outputs && step.outputs.length > 0) {
 					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 					if (outputCheck.decision === "pass") {
 						finalStatus = "ok";
@@ -1039,6 +1039,13 @@ export function createStepRunner(adapter) {
 					break;
 				}
 				if (statusResult.status === "error") {
+					if (step.outputs && step.outputs.length > 0) {
+						outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+						if (outputCheck.decision === "pass") {
+							finalStatus = "ok";
+							break;
+						}
+					}
 					finalStatus = "failed";
 					errorMsg = statusResult.error || "Session error";
 					break;
