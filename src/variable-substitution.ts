@@ -193,6 +193,10 @@ const BAD_PATH_FRAGMENTS = [
   "NaN",
 ];
 
+export function outputPathOf(output: any) {
+  return typeof output === "string" ? output : output.path;
+}
+
 export function assertSafeOutputPath(outputPath: string) {
   for (const bad of BAD_PATH_FRAGMENTS) {
     if (outputPath.includes(bad)) {

@@ -299,6 +299,7 @@ export async function runStep(step, runId, api, options) {
 		cronRunTimeoutMs,
 		cronPollTimeoutMs,
 		validators = {},
+		workflowDir = "",
 	} = options;
 
 	if (cancelled) {
@@ -338,6 +339,7 @@ export async function runStep(step, runId, api, options) {
 		const timeoutMs = step.timeout * 1000;
 		const deadline = Date.now() + timeoutMs;
 		let finalStatus = null;
+		let retryable = false;
 		let errorMsg = null;
 		let logs = null;
 		let outputCheck = { passed: false, missing_files: [], checked_files: [] };
@@ -346,7 +348,7 @@ export async function runStep(step, runId, api, options) {
 			await sleep(pollIntervalMs);
 
 			if (step.outputs && step.outputs.length > 0) {
-				outputCheck = await checkOutputs(step.outputs, baseDir, validators);
+				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 				if (outputCheck.decision === "pass") {
 					finalStatus = "ok";
 					break;
@@ -362,7 +364,7 @@ export async function runStep(step, runId, api, options) {
 			}
 			if (statusResult.status === "error") {
 				if (step.outputs && step.outputs.length > 0) {
-					outputCheck = await checkOutputs(step.outputs, baseDir, validators);
+					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 					if (outputCheck.decision === "pass") {
 						finalStatus = "ok";
 						logs = statusResult.logs;
@@ -395,6 +397,7 @@ export async function runStep(step, runId, api, options) {
 					break;
 				case "retry":
 					finalStatus = "failed";
+					retryable = true;
 					errorMsg = "Output validator requested retry";
 					break;
 				case "blocked":
@@ -412,6 +415,7 @@ export async function runStep(step, runId, api, options) {
 
 		return {
 			status: finalStatus,
+			retryable,
 			session_key: sessionKey,
 			output_check: outputCheck,
 			error: errorMsg,

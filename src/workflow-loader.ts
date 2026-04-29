@@ -28,7 +28,7 @@
  */
 
 import { mkdir, readdir, readFile } from "node:fs/promises";
-import { basename, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import yaml from "js-yaml";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import { WorkflowDefinition, WorkflowStep } from "./types.js";
@@ -279,6 +279,7 @@ function normalizeAndValidate(raw, filePath) {
 			typeof raw.concurrency === "number"
 				? Math.max(1, raw.concurrency)
 				: 3,
+		__dir: dirname(filePath),
 	};
 
 	validateWorkflowTemplates(normalizedWorkflow);

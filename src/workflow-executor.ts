@@ -48,7 +48,7 @@ import { validateWorkflowTemplates } from './template-schema-validator.js';
 import {
   createRunState, updateRunState, updateStepState, saveRunState,
 } from './workflow-state.js';
-import { buildContext, substituteDeep, assertSafeOutputPath } from './variable-substitution.js';
+import { buildContext, substituteDeep, assertSafeOutputPath, outputPathOf } from './variable-substitution.js';
 import { resolveList, resolvePathToList, validateLoopItems } from './list-resolver.js';
 import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -102,7 +102,7 @@ export async function compileWorkflow(workflow, runId, config) {
     const expanded = substituteDeep(step, varCtx);
 
     for (const output of expanded.outputs || []) {
-      assertSafeOutputPath(output);
+      assertSafeOutputPath(outputPathOf(output));
     }
 
     plannedSteps.push({
@@ -175,6 +175,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 		cronAddTimeoutMs,
 		cronRunTimeoutMs,
 		cronPollTimeoutMs,
+		workflowsDir,
 	} = config;
 
 
@@ -232,8 +233,12 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
     return nextState;
   }
 
-  /**
-   * Determine if a step's dependencies are all satisfied.
+    function isTerminalStatus(status) {
+      return ["ok", "failed", "blocked", "skipped"].includes(status);
+    }
+ 
+    /**
+     * Determine if a step's dependencies are all satisfied.
    * A dependency is satisfied if:
    *   - It is 'ok', OR
    *   - It is 'skipped' (downstream of a failure), OR
@@ -244,26 +249,40 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
    *   ready: true if all deps are satisfied (step can run)
    *   blocked: true if a non-optional dependency failed (step should be skipped)
    */
-   function evalDependencies(step) {
-     for (const depId of step.depends_on) {
-       const depState = state.steps[depId];
-       if (!depState) continue; // Shouldn't happen after validation, but be safe
-
-       const depDef = stepMap.get(depId);
-       const isOptional = depDef?.optional === true;
-
-       if (depState.status === 'ok') continue;
-       if (depState.status === 'skipped') continue;
-       if (depState.status === 'failed' && isOptional) continue;
-       if (depState.status === 'blocked' && isOptional) continue;
-       if ((depState.status === 'failed' || depState.status === 'blocked') && !isOptional) {
-         return { ready: false, blocked: true };
-       }
-       // 'pending' or 'running' — not ready yet
-       return { ready: false, blocked: false };
-     }
-     return { ready: true, blocked: false };
-   }
+    function evalDependencies(step) {
+      if (step.always_run) {
+        const allDepsTerminal = step.depends_on.every(depId => {
+          const depState = state.steps[depId];
+          return depState && isTerminalStatus(depState.status);
+        });
+ 
+        return {
+          ready: allDepsTerminal,
+          blocked: false,
+        };
+      }
+ 
+      for (const depId of step.depends_on) {
+        const depState = state.steps[depId];
+        if (!depState) continue;
+ 
+        const depDef = stepMap.get(depId);
+        const depOptional = depDef?.optional === true;
+ 
+        if (depState.status === "ok") continue;
+        if (depState.status === "skipped") continue;
+        if (depState.status === "failed" && depOptional) continue;
+        if (depState.status === "blocked" && depOptional) continue;
+ 
+        if (depState.status === "failed" || depState.status === "blocked") {
+          return { ready: false, blocked: true };
+        }
+ 
+        return { ready: false, blocked: false };
+      }
+ 
+      return { ready: true, blocked: false };
+    }
 
 
   /**
@@ -391,11 +410,11 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
     const promise = (async () => {
       try {
         // Path safety gate: ensure substituted output paths are safe before execution
-        if (step.outputs) {
-          for (const outPath of step.outputs) {
-            assertSafeOutputPath(outPath);
-          }
-        }
+         if (step.outputs) {
+           for (const outPath of step.outputs) {
+             assertSafeOutputPath(outputPathOf(outPath));
+           }
+         }
 
         let result;
 		try {
@@ -411,7 +430,8 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 				cronRunTimeoutMs,
 				cronPollTimeoutMs,
 				sessionAdapter,
-				validators: workflow.validators,
+				validators: workflow.validators || {},
+				workflowDir: workflow.__dir || workflowsDir,
 			});
 		} catch (err) {
 
@@ -444,27 +464,30 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
            
            const durationSec = Math.round(durationMs / 1000);
            await notify(`✅ ${step.name} complete (${durationSec}s)`);
-         } else if (result.status === 'blocked') {
-           // Blocked path — non-retryable terminal state
-           await mutateState(current => updateStepState(current, step.id, {
-             status: 'blocked',
-             completed_at: completedAt,
-             duration_ms: durationMs,
-             session_key: result.session_key,
-             output_check: result.output_check,
-             error: result.error,
-             logs: result.logs,
-             attempts,
-           }, runsDir));
-
-           await notify(`🛑 ${step.name} blocked: ${result.error}`);
-           if (!step.optional && step.on_block !== 'continue') {
-             await cascadeSkip(step.id);
-           }
-         } else {
+          } else if (result.status === 'blocked') {
+            // Blocked path — non-retryable terminal state
+            await mutateState(current => updateStepState(current, step.id, {
+              status: 'blocked',
+              completed_at: completedAt,
+              duration_ms: durationMs,
+              session_key: result.session_key,
+              output_check: result.output_check,
+              error: result.error,
+              logs: result.logs,
+              attempts,
+            }, runsDir));
+ 
+            await notify(`⛔ ${step.name} blocked: ${result.error || "validator blocked step"}`);
+            if (!step.optional && step.on_block !== 'continue') {
+              await cascadeSkip(step.id);
+            }
+          } else {
            // Failure path — check for retry
             const maxAttempts = (step.retry || 0) + 1;
-           const shouldRetry = (result.status === 'failed' && result.retryable === true) || attempts < maxAttempts;
+            const shouldRetry =
+              result.status === 'failed' &&
+              result.retryable === true &&
+              attempts < maxAttempts;
  
            if (shouldRetry) {
              // Notify retry, schedule re-launch after retry_delay
@@ -576,10 +599,10 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
     }
 
     // Check if all steps have reached terminal status
-    const allTerminal = steps.every(s => {
-      const status = state.steps[s.id]?.status;
-      return ['ok', 'failed', 'skipped'].includes(status);
-    });
+     const allTerminal = steps.every(s => {
+       const status = state.steps[s.id]?.status;
+       return ['ok', 'failed', 'blocked', 'skipped'].includes(status);
+     });
 
     if (allTerminal) break;
 
@@ -599,22 +622,10 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
             if (currentRunning >= step.concurrency) continue;
           }
  
-          const { ready, blocked } = evalDependencies(step);
- 
-          if (step.always_run) {
-            // always_run steps are ready when all deps are terminal, even if they failed/blocked
-            const allDepsTerminal = step.depends_on.every(depId => {
-              const status = state.steps[depId]?.status;
-              return ['ok', 'failed', 'blocked', 'skipped'].includes(status);
-            });
-            if (!allDepsTerminal) continue;
-            // Force ready = true, blocked = false for always_run if deps are terminal
-            var ready_final = true;
-            var blocked_final = false;
-          } else {
-            var ready_final = ready;
-            var blocked_final = blocked;
-          }
+           const { ready, blocked } = evalDependencies(step);
+  
+           const ready_final = ready;
+           const blocked_final = blocked;
  
           if (blocked_final) {
             // Dep failed and not optional — skip this step

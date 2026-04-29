@@ -15,6 +15,26 @@ const ajv = new (Ajv as any)();
  * @param {string} [workflowDir] - Optional workflow directory for reference
  * @returns {Promise<OutputValidationResult>}
  */
+function normalizeUnknownPolicy(policy) {
+  if (policy === "block") return "blocked";
+  if (policy === "blocked") return "blocked";
+  if (policy === "pass") return "pass";
+  return "fail";
+}
+
+async function loadSchema(schema, workflowDir) {
+  if (!schema) return null;
+  if (typeof schema === "object") return schema;
+  const trimmed = schema.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return JSON.parse(trimmed);
+  }
+  const schemaPath = isAbsolute(trimmed)
+    ? trimmed
+    : resolve(workflowDir || process.cwd(), trimmed);
+  return JSON.parse(await readFile(schemaPath, "utf8"));
+}
+
 export async function validateOutput(
   spec,
   baseDir,
@@ -64,13 +84,11 @@ export async function validateOutput(
         const text = content.toString();
         doc = JSON.parse(text);
         
-        // 2. JSON Schema Validation
-        if (validator.schema) {
-          const schema = typeof validator.schema === 'string' 
-            ? JSON.parse(validator.schema) 
-            : validator.schema;
-          
-          const validateSchema = ajv.compile(schema);
+         // 2. JSON Schema Validation
+         if (validator.schema) {
+           const schema = await loadSchema(validator.schema, workflowDir);
+           
+           const validateSchema = ajv.compile(schema);
           const valid = validateSchema(doc);
           if (!valid) {
             result.decision = 'fail';
@@ -117,10 +135,10 @@ export async function validateOutput(
       }
     }
 
-    // 4. Final Decision based on unknown_policy
-    if (result.decision === 'unknown') {
-      result.decision = (validator.unknown_policy || 'fail') as ValidationDecision;
-    }
+     // 4. Final Decision based on unknown_policy
+     if (result.decision === 'unknown') {
+       result.decision = normalizeUnknownPolicy(validator.unknown_policy);
+     }
   } catch (e) {
     result.decision = 'fail';
     result.errors.push(`Unexpected error during validation: ${e instanceof Error ? e.message : String(e)}`);

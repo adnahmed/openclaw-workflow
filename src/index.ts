@@ -123,6 +123,7 @@ export default definePluginEntry({
 				cronAddTimeoutMs,
 				cronRunTimeoutMs,
 				cronPollTimeoutMs,
+				workflowsDir,
 			};
 		}
 

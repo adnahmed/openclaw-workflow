@@ -28,7 +28,7 @@ export type ValidatorSpec = {
   block_when?: string;
   fail_when?: string;
 
-  unknown_policy?: "fail" | "block" | "pass";
+   unknown_policy?: "fail" | "blocked" | "pass";
 };
 
 /**
