@@ -456,24 +456,29 @@ export async function runStep(step, runId, api, options) {
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
 
-			if (
-				step.complete_when === "outputs" &&
-				step.outputs &&
-				step.outputs.length > 0
-			) {
-				outputCheck = await checkOutputs(
-					step.outputs,
-					baseDir,
-					validators,
-					workflowDir,
-				);
+			if (step.complete_when === "outputs" && step.outputs?.length) {
+				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 				const mapped = statusFromOutputDecision(outputCheck);
+
+				if (mapped.finalStatus === "ok" || mapped.finalStatus === "blocked") {
+					finalStatus = mapped.finalStatus;
+					retryable = mapped.retryable;
+					errorMsg = mapped.errorMsg;
+					break;
+				}
+
+				const onlyMissingFiles =
+					outputCheck.validations?.length &&
+					outputCheck.validations.every(v => v.failure_kind === "missing_file");
+
+				if (onlyMissingFiles && Date.now() < deadline) {
+					continue;
+				}
+
 				finalStatus = mapped.finalStatus;
 				retryable = mapped.retryable;
 				errorMsg = mapped.errorMsg;
-				if (finalStatus !== null) {
-					break;
-				}
+				break;
 			}
 
 			const statusResult = await adapter.getStatus(
@@ -1394,24 +1399,29 @@ export function createStepRunner(adapter) {
 			while (Date.now() < deadline) {
 				await sleep(pollIntervalMs);
 
-				if (
-					step.complete_when === "outputs" &&
-					step.outputs &&
-					step.outputs.length > 0
-				) {
-					outputCheck = await checkOutputs(
-						step.outputs,
-						baseDir,
-						validators,
-						workflowDir,
-					);
+				if (step.complete_when === "outputs" && step.outputs?.length) {
+					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 					const mapped = statusFromOutputDecision(outputCheck);
+
+					if (mapped.finalStatus === "ok" || mapped.finalStatus === "blocked") {
+						finalStatus = mapped.finalStatus;
+						retryable = mapped.retryable;
+						errorMsg = mapped.errorMsg;
+						break;
+					}
+
+					const onlyMissingFiles =
+						outputCheck.validations?.length &&
+						outputCheck.validations.every(v => v.failure_kind === "missing_file");
+
+					if (onlyMissingFiles && Date.now() < deadline) {
+						continue;
+					}
+
 					finalStatus = mapped.finalStatus;
 					retryable = mapped.retryable;
 					errorMsg = mapped.errorMsg;
-					if (finalStatus !== null) {
-						break;
-					}
+					break;
 				}
 
 				const statusResult = await adapter.getStatus(
