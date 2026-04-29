@@ -51,7 +51,7 @@ test('generateRunId two calls are different (different timestamps)', async () =>
 // ── createRunState ─────────────────────────────────────────────────────────
 
 test('createRunState creates pending state for all steps', () => {
-  const state = createRunState('seo-pipeline', ['step-a', 'step-b', 'step-c'], 'test-run-id');
+  const state = createRunState('seo-pipeline', 'seo-pipeline', ['step-a', 'step-b', 'step-c'], 'test-run-id');
   assert.equal(state.run_id, 'test-run-id');
   assert.equal(state.workflow, 'seo-pipeline');
   assert.equal(state.status, 'pending');
@@ -73,7 +73,7 @@ test('createRunState creates pending state for all steps', () => {
 });
 
 test('createRunState started_at is a valid ISO date', () => {
-  const state = createRunState('wf', ['step-1'], 'run-1');
+  const state = createRunState('wf', 'wf', ['step-1'], 'run-1');
   const parsed = new Date(state.started_at);
   assert.ok(!isNaN(parsed.getTime()), 'started_at should be a valid date');
 });
@@ -82,7 +82,7 @@ test('createRunState started_at is a valid ISO date', () => {
 
 test('saves and reads back run state correctly', async () => {
   await withTempDir('wf-state-test', async (dir) => {
-    const state = createRunState('test-wf', ['step-1', 'step-2'], 'test-run-42');
+    const state = createRunState('test-wf', 'test-wf', ['step-1', 'step-2'], 'test-run-42');
     await saveRunState(state, dir);
     const loaded = await readRunState('test-run-42', dir);
     assert.deepEqual(loaded, state);
@@ -101,7 +101,7 @@ test('readRunState throws ENOENT for non-existent run', async () => {
 test('saveRunState creates directory if it does not exist', async () => {
   await withTempDir('wf-state-test', async (dir) => {
     const nestedDir = join(dir, 'a', 'b', 'c');
-    const state = createRunState('wf', ['step-1'], 'nested-run');
+    const state = createRunState('wf', 'wf', ['step-1'], 'nested-run');
     // Should not throw even though dir doesn't exist
     await saveRunState(state, nestedDir);
     const loaded = await readRunState('nested-run', nestedDir);
@@ -113,7 +113,7 @@ test('saveRunState creates directory if it does not exist', async () => {
 
 test('updateRunState returns new state and saves to disk', async () => {
   await withTempDir('wf-state-test', async (dir) => {
-    let state = createRunState('wf', ['step-1'], 'run-update-test');
+    let state = createRunState('wf', 'wf', ['step-1'], 'run-update-test');
     state = await updateRunState(state, { status: 'running' }, dir);
 
     assert.equal(state.status, 'running');
@@ -126,7 +126,7 @@ test('updateRunState returns new state and saves to disk', async () => {
 
 test('updateRunState does not mutate original state object', async () => {
   await withTempDir('wf-state-test', async (dir) => {
-    const original = createRunState('wf', ['step-1'], 'immutable-test');
+    const original = createRunState('wf', 'wf', ['step-1'], 'immutable-test');
     const updated = await updateRunState(original, { status: 'running' }, dir);
 
     assert.equal(original.status, 'pending', 'Original should be unchanged');
@@ -138,7 +138,7 @@ test('updateRunState does not mutate original state object', async () => {
 
 test('updateStepState updates a single step and saves', async () => {
   await withTempDir('wf-state-test', async (dir) => {
-    let state = createRunState('wf', ['step-a', 'step-b'], 'step-update-test');
+    let state = createRunState('wf', 'wf', ['step-a', 'step-b'], 'step-update-test');
     state = await updateStepState(state, 'step-a', {
       status: 'running',
       started_at: '2026-03-09T08:00:00.000Z',
@@ -157,7 +157,7 @@ test('updateStepState updates a single step and saves', async () => {
 
 test('updateStepState merges — does not replace entire step', async () => {
   await withTempDir('wf-state-test', async (dir) => {
-    let state = createRunState('wf', ['step-1'], 'merge-test');
+    let state = createRunState('wf', 'wf', ['step-1'], 'merge-test');
     // First update — set started_at
     state = await updateStepState(state, 'step-1', {
       status: 'running',
@@ -191,11 +191,11 @@ test('listRuns returns empty array when directory is empty', async () => {
 test('listRuns returns all runs sorted newest first', async () => {
   await withTempDir('wf-state-test', async (dir) => {
     // Create runs with different started_at
-    const s1 = createRunState('wf', ['step-1'], 'run-1');
+    const s1 = createRunState('wf', 'wf', ['step-1'], 'run-1');
     s1.started_at = '2026-03-09T08:00:00.000Z';
-    const s2 = createRunState('wf', ['step-1'], 'run-2');
+    const s2 = createRunState('wf', 'wf', ['step-1'], 'run-2');
     s2.started_at = '2026-03-09T10:00:00.000Z';
-    const s3 = createRunState('wf', ['step-1'], 'run-3');
+    const s3 = createRunState('wf', 'wf', ['step-1'], 'run-3');
     s3.started_at = '2026-03-09T09:00:00.000Z';
 
     await saveRunState(s1, dir);
@@ -212,8 +212,8 @@ test('listRuns returns all runs sorted newest first', async () => {
 
 test('listRuns filters by workflow name', async () => {
   await withTempDir('wf-state-test', async (dir) => {
-    const s1 = createRunState('seo-pipeline', ['step-1'], 'seo-run-1');
-    const s2 = createRunState('deploy-pipeline', ['step-1'], 'deploy-run-1');
+    const s1 = createRunState('seo-pipeline', 'seo-pipeline', ['step-1'], 'seo-run-1');
+    const s2 = createRunState('deploy-pipeline', 'deploy-pipeline', ['step-1'], 'deploy-run-1');
     await saveRunState(s1, dir);
     await saveRunState(s2, dir);
 
@@ -238,13 +238,24 @@ test('listRuns skips non-JSON files gracefully', async () => {
   });
 });
 
+test('listRuns filters by workflow key', async () => {
+  await withTempDir('wf-state-test', async (dir) => {
+    const s1 = createRunState('LinkedIn Job Alerts', 'linkedin', ['step-1'], 'linkedin-run-1');
+    await saveRunState(s1, dir);
+
+    const runs = await listRuns(dir, 'linkedin');
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].run_id, 'linkedin-run-1');
+  });
+});
+
 // ── findLatestRun ──────────────────────────────────────────────────────────
 
 test('findLatestRun returns most recent run for workflow', async () => {
   await withTempDir('wf-state-test', async (dir) => {
-    const s1 = createRunState('my-wf', ['step-1'], 'my-wf-run-1');
+    const s1 = createRunState('my-wf', 'my-wf', ['step-1'], 'my-wf-run-1');
     s1.started_at = '2026-03-09T08:00:00.000Z';
-    const s2 = createRunState('my-wf', ['step-1'], 'my-wf-run-2');
+    const s2 = createRunState('my-wf', 'my-wf', ['step-1'], 'my-wf-run-2');
     s2.started_at = '2026-03-09T12:00:00.000Z';
 
     await saveRunState(s1, dir);

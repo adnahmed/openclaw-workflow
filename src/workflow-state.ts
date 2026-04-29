@@ -281,7 +281,7 @@ export async function listRuns(runsDir, filterWorkflow = null) {
       try {
         const raw = await readFile(join(runsDir, entry), 'utf8');
         const state = JSON.parse(raw);
-        if (filterWorkflow && state.workflow !== filterWorkflow) continue;
+        if (filterWorkflow && state.workflow !== filterWorkflow && state.workflow_key !== filterWorkflow) continue;
         runs.push(state);
       } catch {
         // Corrupted or non-run file — skip silently
