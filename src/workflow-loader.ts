@@ -233,6 +233,7 @@ function normalizeAndValidate(raw, filePath) {
 			}
 
 			// Recursively validate inner steps for loop steps
+			let normalizedInnerSteps = Array.isArray(step.steps) ? step.steps : [];
 			if (step.for_each) {
 				const hasTask =
 					typeof step.task === "string" && step.task.trim().length > 0;
@@ -243,7 +244,7 @@ function normalizeAndValidate(raw, filePath) {
 					);
 				}
 				if (hasSteps) {
-					validateSteps(step.steps, step.id, true);
+					normalizedInnerSteps = validateSteps(step.steps, step.id, true);
 				}
 			}
 
@@ -258,7 +259,7 @@ function normalizeAndValidate(raw, filePath) {
 				skip_if_empty: step.skip_if_empty || null,
 				parser: step.parser || "auto",
 				item_schema: step.item_schema || null,
-				steps: Array.isArray(step.steps) ? step.steps : [],
+				steps: normalizedInnerSteps,
 				model: step.model || null,
 				concurrency:
 					typeof step.concurrency === "number"
