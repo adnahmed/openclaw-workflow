@@ -394,68 +394,75 @@ export default definePluginEntry({
 
 		api.registerTool({
 			name: "workflow_cancel",
-			description:
-				"Cancel a running workflow. Running steps may finish, but no new steps will be launched.",
+			description: "Cancel a running workflow and abort active workers.",
 			parameters: WorkflowCancelParameters,
 			optional: true,
+
 			async execute(first, second) {
 				const { run_id } = readParams(first, second);
+
 				try {
 					let state = await readRunState(run_id, runsDir);
 
-					if (["ok", "failed", "cancelled"].includes(state.status)) {
-						const runningSteps = Object.entries(state.steps)
-							.filter(([, step]) => step.status === "running");
+					const terminal = ["ok", "failed", "cancelled"].includes(state.status);
+					const runningSteps = Object.entries(state.steps)
+						.filter(([, step]) => step.status === "running");
 
-						if (runningSteps.length === 0) {
-							return textResult({
-								run_id,
-								message: `Run "${run_id}" is already in terminal state "${state.status}" - nothing to cancel.`,
-							});
-						}
+					if (terminal && runningSteps.length === 0) {
+						return textResult({
+							run_id,
+							message: `Run "${run_id}" is already in terminal state "${state.status}" - nothing to cancel.`,
+						});
 					}
 
-					const cancelRequestedAt = new Date().toISOString();
+					const now = new Date().toISOString();
 
 					state = await updateRunState(
 						state,
 						{
 							status: "cancelled",
-							cancel_requested_at: cancelRequestedAt,
-							cancelled_at: cancelRequestedAt,
-							completed_at: cancelRequestedAt,
+							cancel_requested_at: now,
+							cancelled_at: now,
+							completed_at: now,
 						},
 						runsDir,
 					);
 
-					const runningSteps = Object.entries(state.steps)
-						.filter(([, step]) => step.status === "running");
-
 					const results = [];
 
-					for (const [stepId, stepState] of runningSteps) {
-						const sessionKey = stepState.session_key;
+					for (const [stepId, step] of runningSteps) {
+						const sessionKey = step.session_key;
 						const sessionId =
-							stepState.session_id ||
-							stepState.subagent_run_id ||
+							step.session_id ||
+							step.subagent_run_id ||
 							null;
 
+						state = await updateStepState(
+							state,
+							stepId,
+							{
+								cancel_requested_at: now,
+								cancellation_reason: `workflow_cancel:${run_id}`,
+							},
+							runsDir,
+						);
+
 						if (!sessionKey) {
-							results.push({
+							const result = {
 								step_id: stepId,
 								requested: false,
 								confirmed: false,
 								method: null,
 								error: "missing session_key; cannot abort active worker",
-							});
+							};
+
+							results.push(result);
 
 							state = await updateStepState(
 								state,
 								stepId,
 								{
-									cancel_requested_at: cancelRequestedAt,
-									cancellation_reason: `workflow_cancel:${run_id}`,
-									cancel_error: "missing session_key; cannot abort active worker",
+									cancel_error: result.error,
 								},
 								runsDir,
 							);
@@ -463,27 +470,18 @@ export default definePluginEntry({
 							continue;
 						}
 
-						state = await updateStepState(
-							state,
-							stepId,
-							{
-								cancel_requested_at: cancelRequestedAt,
-								cancellation_reason: `workflow_cancel:${run_id}`,
-							},
-							runsDir,
-						);
-
 						let cancelResult;
 
 						try {
 							cancelResult = await cancelStepSession(api, {
-								sessionAdapter,
+								sessionAdapter: step.session_adapter || sessionAdapter,
 								sessionId,
 								sessionKey,
 								runId: sessionId || run_id,
 								reason: `workflow_cancel:${run_id}`,
 								cronRunTimeoutMs,
 								cancelGraceMs: config.cancelGraceMs ?? 30000,
+								logger,
 							});
 						} catch (err) {
 							cancelResult = {
@@ -515,26 +513,29 @@ export default definePluginEntry({
 						);
 					}
 
-					const abortRequested = results.filter(r => r.requested).length;
-					const abortFailed = results.filter(r => !r.requested).length;
-
 					return textResult({
 						run_id,
 						status: "cancelled",
 						running_steps: runningSteps.length,
-						abort_requested: abortRequested,
-						abort_failed: abortFailed,
+						abort_requested: results.filter(r => r.requested).length,
+						abort_failed: results.filter(r => !r.requested).length,
 						results,
 						message:
 							runningSteps.length === 0
 								? `Run "${run_id}" marked as cancelled. No workers were active.`
-								: `Run "${run_id}" marked as cancelled. Abort requested for ${abortRequested}/${runningSteps.length} active worker(s).`,
+								: `Run "${run_id}" marked as cancelled. Abort requested for ${
+									results.filter(r => r.requested).length
+								}/${runningSteps.length} active worker(s).`,
 					});
 				} catch (err) {
-					if (err?.code === "ENOENT") return errorResult(`Run not found: ${run_id}`);
+					if (err?.code === "ENOENT") {
+						return errorResult(`Run not found: ${run_id}`);
+					}
+
 					return errorResult(err instanceof Error ? err.message : String(err));
 				}
 			},
 		});
 	},
 });
+
