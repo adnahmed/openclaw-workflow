@@ -431,7 +431,7 @@ export async function runStep(step, runId, api, options) {
 		let retryable = false;
 		let errorMsg = null;
 		let logs = null;
-		let outputCheck = { passed: false, missing_files: [], checked_files: [] };
+		let outputCheck = { passed: false, decision: "unknown", missing_files: [], checked_files: [], validations: [] };
 
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
@@ -463,6 +463,7 @@ export async function runStep(step, runId, api, options) {
 
 			if (statusResult.status === "done") {
 				logs = statusResult.logs;
+
 				outputCheck = await checkOutputs(
 					step.outputs,
 					baseDir,
@@ -471,10 +472,25 @@ export async function runStep(step, runId, api, options) {
 				);
 
 				const mapped = statusFromOutputDecision(outputCheck);
+
+				if (mapped.finalStatus === "ok" || mapped.finalStatus === "blocked") {
+					finalStatus = mapped.finalStatus;
+					retryable = mapped.retryable;
+					errorMsg = mapped.errorMsg;
+					break;
+				}
+
+				const onlyMissingFiles =
+					outputCheck.validations?.length &&
+					outputCheck.validations.every(v => v.failure_kind === "missing_file");
+
+				if (onlyMissingFiles && Date.now() < deadline) {
+					continue;
+				}
+
 				finalStatus = mapped.finalStatus;
 				retryable = mapped.retryable;
 				errorMsg = mapped.errorMsg;
-
 				break;
 			}
 			if (statusResult.status === "error") {
@@ -1353,7 +1369,7 @@ export function createStepRunner(adapter) {
 			let retryable = false;
 			let errorMsg = null;
 			let logs = null;
-			let outputCheck = { passed: false, missing_files: [], checked_files: [] };
+		let outputCheck = { passed: false, decision: "unknown", missing_files: [], checked_files: [], validations: [] };
 
 			while (Date.now() < deadline) {
 				await sleep(pollIntervalMs);
@@ -1384,13 +1400,31 @@ export function createStepRunner(adapter) {
 				);
 				if (statusResult.status === "done") {
 					logs = statusResult.logs;
+
 					outputCheck = await checkOutputs(
 						step.outputs,
 						baseDir,
 						validators,
 						workflowDir,
 					);
+
 					const mapped = statusFromOutputDecision(outputCheck);
+
+					if (mapped.finalStatus === "ok" || mapped.finalStatus === "blocked") {
+						finalStatus = mapped.finalStatus;
+						retryable = mapped.retryable;
+						errorMsg = mapped.errorMsg;
+						break;
+					}
+
+					const onlyMissingFiles =
+						outputCheck.validations?.length &&
+						outputCheck.validations.every(v => v.failure_kind === "missing_file");
+
+					if (onlyMissingFiles && Date.now() < deadline) {
+						continue;
+					}
+
 					finalStatus = mapped.finalStatus;
 					retryable = mapped.retryable;
 					errorMsg = mapped.errorMsg;
