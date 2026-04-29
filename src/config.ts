@@ -21,8 +21,9 @@ type RawPluginConfig = {
   cliTimeoutMs?: number;
   cronAddTimeoutMs?: number;
   cronRunTimeoutMs?: number;
-  cronPollTimeoutMs?: number;
-};
+   cronPollTimeoutMs?: number;
+   cancelGraceMs?: number;
+ };
 
 
 type RuntimeConfig = {
@@ -84,5 +85,6 @@ export function normalizePluginConfig(rawConfig: RawPluginConfig = {}, runtime: 
     cronAddTimeoutMs: rawConfig.cronAddTimeoutMs ?? 120000,
     cronRunTimeoutMs: rawConfig.cronRunTimeoutMs ?? 60000,
     cronPollTimeoutMs: rawConfig.cronPollTimeoutMs ?? 60000,
+    cancelGraceMs: rawConfig.cancelGraceMs ?? 10000,
   };
 }

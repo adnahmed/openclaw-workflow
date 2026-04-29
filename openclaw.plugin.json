@@ -60,6 +60,32 @@
       "cronDeliveryTo": {
         "type": "string",
         "description": "Optional explicit delivery target for cron jobs."
+      },
+      "sessionAdapter": {
+        "type": "string",
+        "enum": ["auto", "runtime-subagent", "legacy-api", "cli"],
+        "description": "Session adapter to use. For headless browser/application workflows, use runtime-subagent."
+      },
+      "cliTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000
+      },
+      "cronAddTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000
+      },
+      "cronRunTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000
+      },
+      "cronPollTimeoutMs": {
+        "type": "integer",
+        "minimum": 1000
+      },
+      "cancelGraceMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "description": "Grace period to wait after requesting worker cancellation."
       }
     }
   },
