@@ -377,7 +377,11 @@ export async function runStep(step, runId, api, options) {
  		const model = step.model || defaultModel || null;
  
  		const workflow = options.workflow;
- 		const requiredSkills = step.required_skills ?? workflow?.required_skills ?? [];
+ 		const combinedSkills = [
+ 			...(workflow?.required_skills ?? []),
+ 			...(step.required_skills ?? []),
+ 		];
+ 		const requiredSkills = [...new Set(combinedSkills)];
  		const availableSkills = api.runtime?.skills ?? [];
  
  		for (const skill of requiredSkills) {
