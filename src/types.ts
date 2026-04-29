@@ -139,6 +139,7 @@ export type WorkflowStep = {
   timeout: number;
   retry: number;
   retry_delay: number;
+  retry_on?: string[];
   optional: boolean;
   always_run?: boolean;
   complete_when?: "outputs" | "session";

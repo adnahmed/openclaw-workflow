@@ -581,11 +581,19 @@ export async function executeWorkflow(
 								!state.steps[step.id]?.cancel_confirmed_at,
 						);
 
+					const failureKinds =
+						result.output_check?.validations?.map(v => v.failure_kind).filter(Boolean) ?? [];
+					const isTimeout = typeof result.error === "string" && result.error.includes("timed out");
+					const retryableByPolicy =
+						result.retryable === true ||
+						failureKinds.some(kind => step.retry_on?.includes(kind)) ||
+						(step.retry_on?.includes("timeout") && isTimeout);
+
 					const shouldRetry =
 						result.status === "failed" &&
 						attempts < maxAttempts &&
 						!cancellationUnconfirmed &&
-						result.retryable === true;
+						retryableByPolicy;
 
 					if (shouldRetry) {
 						// Notify retry, schedule re-launch after retry_delay

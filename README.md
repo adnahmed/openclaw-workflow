@@ -170,6 +170,7 @@ workflow_status({ name: "hello" })
  | `timeout`      | number    | ❌       | `300`   | Maximum execution time in **seconds**. Step is marked failed on timeout. |
 | `retry`        | number    | ❌       | `0`     | Number of retry attempts after first failure. `retry: 2` = up to 3 total attempts. |
 | `retry_delay`  | number    | ❌       | `30`    | Seconds to wait between retry attempts. |
+| `retry_on`     | string[]  | ❌       | `[]`    | Specific failure kinds to retry on (e.g., `["missing_file", "timeout"]`). If empty, only retries when `retryable` is true. |
 | `optional`     | boolean   | ❌       | `false` | If `true`, step failure doesn't fail the pipeline or block dependent steps. |
 | `always_run`   | boolean   | ❌       | `false` | If `true`, step runs regardless of dependency failure. |
 | `on_block`     | string    | ❌       | `"block_run"` | Behavior when blocked: `"block_run"` (fails pipeline) or `"continue"`. |

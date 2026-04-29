@@ -268,6 +268,7 @@ function normalizeAndValidate(raw, filePath) {
 				retry: typeof step.retry === "number" ? Math.max(0, step.retry) : 0,
 				retry_delay:
 					typeof step.retry_delay === "number" ? step.retry_delay : 30,
+				retry_on: Array.isArray(step.retry_on) ? step.retry_on : [],
 				optional: step.optional === true,
 				always_run: step.always_run === true,
 				complete_when: step.complete_when || "session",
