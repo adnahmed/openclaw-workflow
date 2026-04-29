@@ -461,14 +461,16 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
           } else {
             // Failure path — check for retry
              const maxAttempts = (step.retry || 0) + 1;
-             const shouldRetry =
-               result.status === 'failed' &&
-               attempts < maxAttempts &&
-               (
-                 result.output_check?.decision !== 'fail' ||
-                 result.output_check?.validations?.some(v => v.failure_kind === 'missing_file') ||
-                 result.retryable === true
-               );
+              const cancellationUnconfirmed =
+                typeof result.error === "string" &&
+                result.error.includes("cancellation was not confirmed");
+
+              const shouldRetry =
+                result.status === 'failed' &&
+                attempts < maxAttempts &&
+                !cancellationUnconfirmed &&
+                result.retryable === true;
+
  
             if (shouldRetry) {
               // Notify retry, schedule re-launch after retry_delay

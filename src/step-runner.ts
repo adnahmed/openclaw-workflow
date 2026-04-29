@@ -467,6 +467,9 @@ export async function runStep(step, runId, api, options) {
 			);
 
 			finalStatus = "failed";
+			const cancellationConfirmed = Boolean(stopped);
+			const cancellationRequested = Boolean(cancelResult?.requested);
+			retryable = cancellationRequested && cancellationConfirmed;
 			errorMsg =
 				stopped
 					? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
