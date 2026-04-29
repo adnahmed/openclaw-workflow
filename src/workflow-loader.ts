@@ -31,34 +31,14 @@ import { mkdir, readdir, readFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import yaml from "js-yaml";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
+import { WorkflowDefinition, WorkflowStep } from "./types.js";
 
 /**
- * @typedef {Object} WorkflowStep
- * @property {string}   id           - Unique step identifier (slug, no spaces)
- * @property {string}   name         - Human-readable display name
- * @property {string}   task         - The agent prompt / task description for this step
- * @property {string[]} depends_on   - IDs of steps that must complete before this step runs
- * @property {string[]} outputs      - File paths (possibly with {variables}) that must exist after step
- * @property {string}   [for_each]    - Variable containing a list to iterate over
- * @property {string}   [skip_if_empty] - File path to check; if empty/missing, skip this step
- * @property {WorkflowStep[]} [steps] - Steps to execute for each item in the list
- * @property {string}   [parser]      - Parser to use for the loop list ('json', 'csv', 'newline', 'auto')
- * @property {string}   [model]      - LLM model override for this step's session
- * @property {number}   [concurrency]   - Max parallel instances of this step (default: global)
- * @property {number}   timeout      - Maximum execution time in seconds (default: 300)
- * @property {number}   retry        - Number of retry attempts on failure (default: 0)
- * @property {number}   retry_delay  - Seconds to wait between retries (default: 30)
- * @property {boolean}  optional     - If true, step failure doesn't fail the pipeline (default: false)
+ * @typedef {import('./types.js').WorkflowStep} WorkflowStep
  */
 
 /**
- * @typedef {Object} WorkflowDefinition
- * @property {string}         name        - Workflow display name
- * @property {string}         version     - Workflow schema version (default: "1.0")
- * @property {string}         description - Human description of what this workflow does
- * @property {Object}         [config]    - User-defined configuration variables
- * @property {WorkflowStep[]} steps       - Ordered list of steps
- * @property {number}         concurrency - Max parallel steps (default: 3)
+ * @typedef {import('./types.js').WorkflowDefinition} WorkflowDefinition
  */
 
 /**
@@ -260,6 +240,8 @@ function normalizeAndValidate(raw, filePath) {
 				retry_delay:
 					typeof step.retry_delay === "number" ? step.retry_delay : 30,
 				optional: step.optional === true,
+				always_run: step.always_run === true,
+				on_block: step.on_block || "block_run",
 			};
 		});
 	};
@@ -291,6 +273,7 @@ function normalizeAndValidate(raw, filePath) {
 		version: raw.version ? String(raw.version) : "1.0",
 		description: raw.description || "",
 		config: raw.config || {},
+		validators: raw.validators || {},
 		steps,
 		concurrency:
 			typeof raw.concurrency === "number"

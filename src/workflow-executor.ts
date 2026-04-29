@@ -244,25 +244,27 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
    *   ready: true if all deps are satisfied (step can run)
    *   blocked: true if a non-optional dependency failed (step should be skipped)
    */
-  function evalDependencies(step) {
-    for (const depId of step.depends_on) {
-      const depState = state.steps[depId];
-      if (!depState) continue; // Shouldn't happen after validation, but be safe
+   function evalDependencies(step) {
+     for (const depId of step.depends_on) {
+       const depState = state.steps[depId];
+       if (!depState) continue; // Shouldn't happen after validation, but be safe
 
-      const depDef = stepMap.get(depId);
-      const isOptional = depDef?.optional === true;
+       const depDef = stepMap.get(depId);
+       const isOptional = depDef?.optional === true;
 
-      if (depState.status === 'ok') continue;
-      if (depState.status === 'skipped') continue;
-      if (depState.status === 'failed' && isOptional) continue;
-      if (depState.status === 'failed' && !isOptional) {
-        return { ready: false, blocked: true };
-      }
-      // 'pending' or 'running' — not ready yet
-      return { ready: false, blocked: false };
-    }
-    return { ready: true, blocked: false };
-  }
+       if (depState.status === 'ok') continue;
+       if (depState.status === 'skipped') continue;
+       if (depState.status === 'failed' && isOptional) continue;
+       if (depState.status === 'blocked' && isOptional) continue;
+       if ((depState.status === 'failed' || depState.status === 'blocked') && !isOptional) {
+         return { ready: false, blocked: true };
+       }
+       // 'pending' or 'running' — not ready yet
+       return { ready: false, blocked: false };
+     }
+     return { ready: true, blocked: false };
+   }
+
 
   /**
    * Mark a step and all steps transitively depending on it as 'skipped'.
@@ -409,6 +411,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 				cronRunTimeoutMs,
 				cronPollTimeoutMs,
 				sessionAdapter,
+				validators: workflow.validators,
 			});
 		} catch (err) {
 
@@ -427,71 +430,88 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
           (startedAt ? Date.now() - new Date(startedAt).getTime() : 0);
 
          if (result.status === 'ok') {
-          // Success path
-          await mutateState(current => updateStepState(current, step.id, {
-            status: 'ok',
-            completed_at: completedAt,
-            duration_ms: durationMs,
-            session_key: result.session_key,
-            output_check: result.output_check,
-            error: null,
-            logs: result.logs,
-            attempts,
-          }, runsDir));
-          
-          const durationSec = Math.round(durationMs / 1000);
-          await notify(`✅ ${step.name} complete (${durationSec}s)`);
+           // Success path
+           await mutateState(current => updateStepState(current, step.id, {
+             status: 'ok',
+             completed_at: completedAt,
+             duration_ms: durationMs,
+             session_key: result.session_key,
+             output_check: result.output_check,
+             error: null,
+             logs: result.logs,
+             attempts,
+           }, runsDir));
+           
+           const durationSec = Math.round(durationMs / 1000);
+           await notify(`✅ ${step.name} complete (${durationSec}s)`);
+         } else if (result.status === 'blocked') {
+           // Blocked path — non-retryable terminal state
+           await mutateState(current => updateStepState(current, step.id, {
+             status: 'blocked',
+             completed_at: completedAt,
+             duration_ms: durationMs,
+             session_key: result.session_key,
+             output_check: result.output_check,
+             error: result.error,
+             logs: result.logs,
+             attempts,
+           }, runsDir));
 
-        } else {
-          // Failure path — check for retry
-           const maxAttempts = (step.retry || 0) + 1;
-          const shouldRetry = attempts < maxAttempts;
-
-          if (shouldRetry) {
-            // Notify retry, schedule re-launch after retry_delay
-            const nextAttempt = attempts + 1;
-            await notify(`❌ ${step.name} failed — retrying (attempt ${nextAttempt}/${maxAttempts})`);
-
-            // Mark as pending again so the scheduler will re-launch
+           await notify(`🛑 ${step.name} blocked: ${result.error}`);
+           if (!step.optional && step.on_block !== 'continue') {
+             await cascadeSkip(step.id);
+           }
+         } else {
+           // Failure path — check for retry
+            const maxAttempts = (step.retry || 0) + 1;
+           const shouldRetry = (result.status === 'failed' && result.retryable === true) || attempts < maxAttempts;
+ 
+           if (shouldRetry) {
+             // Notify retry, schedule re-launch after retry_delay
+             const nextAttempt = attempts + 1;
+             await notify(`❌ ${step.name} failed — retrying (attempt ${nextAttempt}/${maxAttempts})`);
+ 
+             // Mark as pending again so the scheduler will re-launch
+              await mutateState(current => updateStepState(current, step.id, {
+               status: 'pending',
+               error: result.error,
+               logs: result.logs,
+               attempts, // keep the attempt count so we know we've retried
+             }, runsDir));
+ 
+             await waitForRetry(step.id, step.retry_delay);
+             if (cancelled) return;
+ 
+           } else {
+             // All retries exhausted — mark as failed
              await mutateState(current => updateStepState(current, step.id, {
-              status: 'pending',
-              error: result.error,
-              logs: result.logs,
-              attempts, // keep the attempt count so we know we've retried
-            }, runsDir));
+               status: 'failed',
+               completed_at: completedAt,
+               duration_ms: durationMs,
+               session_key: result.session_key,
+               output_check: result.output_check,
+               error: result.error,
+               logs: result.logs,
+               attempts,
+             }, runsDir));
+ 
+             const wasRetried = step.retry > 0;
+             if (wasRetried) {
+               await notify(`❌ ${step.name} failed after ${attempts} attempt(s): ${result.error}`);
+             } else {
+               await notify(`❌ ${step.name} failed: ${result.error}`);
+             }
+ 
+             // If not optional, cascade skip to dependent steps
+             if (!step.optional) {
+               await cascadeSkip(step.id);
+             } else {
+               // Optional failure — log it but don't cascade
+               await notify(`⚠️  ${step.name} failed (optional — continuing pipeline)`);
+             }
+           }
+         }
 
-            await waitForRetry(step.id, step.retry_delay);
-            if (cancelled) return;
-
-          } else {
-            // All retries exhausted — mark as failed
-            await mutateState(current => updateStepState(current, step.id, {
-              status: 'failed',
-              completed_at: completedAt,
-              duration_ms: durationMs,
-              session_key: result.session_key,
-              output_check: result.output_check,
-              error: result.error,
-              logs: result.logs,
-              attempts,
-            }, runsDir));
-
-            const wasRetried = step.retry > 0;
-            if (wasRetried) {
-              await notify(`❌ ${step.name} failed after ${attempts} attempt(s): ${result.error}`);
-            } else {
-              await notify(`❌ ${step.name} failed: ${result.error}`);
-            }
-
-            // If not optional, cascade skip to dependent steps
-            if (!step.optional) {
-              await cascadeSkip(step.id);
-            } else {
-              // Optional failure — log it but don't cascade
-              await notify(`⚠️  ${step.name} failed (optional — continuing pipeline)`);
-            }
-          }
-        }
        } finally {
          // Remove from in-flight map when done (whether ok, failed, or retrying)
          inFlight.delete(step.id);
@@ -573,21 +593,37 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
          if (state.steps[step.id]?.status !== 'pending') continue;
          if (inFlight.has(step.id)) continue; // Already tracked
 
-         if (step.concurrency) {
-           const trackingId = step.original_id || step.id;
-           const currentRunning = runningCounts.get(trackingId) || 0;
-           if (currentRunning >= step.concurrency) continue;
-         }
+          if (step.concurrency) {
+            const trackingId = step.original_id || step.id;
+            const currentRunning = runningCounts.get(trackingId) || 0;
+            if (currentRunning >= step.concurrency) continue;
+          }
+ 
+          const { ready, blocked } = evalDependencies(step);
+ 
+          if (step.always_run) {
+            // always_run steps are ready when all deps are terminal, even if they failed/blocked
+            const allDepsTerminal = step.depends_on.every(depId => {
+              const status = state.steps[depId]?.status;
+              return ['ok', 'failed', 'blocked', 'skipped'].includes(status);
+            });
+            if (!allDepsTerminal) continue;
+            // Force ready = true, blocked = false for always_run if deps are terminal
+            var ready_final = true;
+            var blocked_final = false;
+          } else {
+            var ready_final = ready;
+            var blocked_final = blocked;
+          }
+ 
+          if (blocked_final) {
+            // Dep failed and not optional — skip this step
+            await mutateState(current => updateStepState(current, step.id, { status: 'skipped' }, runsDir));
+            continue;
+          }
+ 
+          if (ready_final) {
 
-         const { ready, blocked } = evalDependencies(step);
-
-        if (blocked) {
-          // Dep failed and not optional — skip this step
-          await mutateState(current => updateStepState(current, step.id, { status: 'skipped' }, runsDir));
-          continue;
-        }
-
-    if (ready) {
       if (step.for_each) {
         await mutateState(current =>
           updateStepState(
@@ -747,34 +783,43 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
   // Wait for any remaining in-flight promises to settle
   await Promise.allSettled([...inFlight.values()]);
 
-  // ── Determine final run status ─────────────────────────────────────────────
-  // Only non-optional step failures cause the pipeline to fail.
-  // Optional step failures are expected and don't block dependents or
-  // count against the overall pipeline result.
-  const finalStepStatuses = Object.values(state.steps).map(s => s.status);
-  const anyNonOptionalFailed = steps.some(s => {
-    const stepState = state.steps[s.id];
-    return !s.optional && stepState?.status === 'failed';
-  });
-  const finalStatus = anyNonOptionalFailed ? 'failed' : 'ok';
+   // ── Determine final run status ─────────────────────────────────────────────
+   // Only non-optional step failures or blocks cause the pipeline to fail/block.
+   const finalStepStatuses = Object.values(state.steps).map(s => s.status);
+   const anyNonOptionalFailed = steps.some(s => {
+     const stepState = state.steps[s.id];
+     return !s.optional && stepState?.status === 'failed';
+   });
+   const anyNonOptionalBlocked = steps.some(s => {
+     const stepState = state.steps[s.id];
+     return !s.optional && stepState?.status === 'blocked';
+   });
 
-  state = await updateRunState(state, {
-    status: finalStatus,
-    completed_at: new Date().toISOString(),
-  }, runsDir);
+   let finalStatus = 'ok';
+   if (anyNonOptionalFailed) finalStatus = 'failed';
+   else if (anyNonOptionalBlocked) finalStatus = 'blocked';
+ 
+   state = await updateRunState(state, {
+     status: finalStatus,
+     completed_at: new Date().toISOString(),
+   }, runsDir);
+ 
+   // ── Final notification ─────────────────────────────────────────────────────
+   const okCount = finalStepStatuses.filter(s => s === 'ok').length;
+   const totalCount = steps.length;
+ 
+   if (finalStatus === 'ok') {
+     await notify(`🏁 Pipeline "${workflow.name}" complete — ${okCount}/${totalCount} steps passed`);
+   } else if (finalStatus === 'blocked') {
+     const blockedCount = finalStepStatuses.filter(s => s === 'blocked').length;
+     await notify(`🛑 Pipeline "${workflow.name}" blocked — ${blockedCount} step(s) blocked, ${okCount}/${totalCount} passed`);
+   } else {
+     const failedCount = finalStepStatuses.filter(s => s === 'failed').length;
+     await notify(
+       `💥 Pipeline "${workflow.name}" failed — ${failedCount} step(s) failed, ${okCount}/${totalCount} passed`
+     );
+   }
 
-  // ── Final notification ─────────────────────────────────────────────────────
-  const okCount = finalStepStatuses.filter(s => s === 'ok').length;
-  const totalCount = steps.length;
-
-  if (finalStatus === 'ok') {
-    await notify(`🏁 Pipeline "${workflow.name}" complete — ${okCount}/${totalCount} steps passed`);
-  } else {
-    const failedCount = finalStepStatuses.filter(s => s === 'failed').length;
-    await notify(
-      `💥 Pipeline "${workflow.name}" failed — ${failedCount} step(s) failed, ${okCount}/${totalCount} passed`
-    );
-  }
 
   return state;
 }

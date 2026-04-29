@@ -42,6 +42,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
+import { StepRunResult, OutputCheckResult } from "./types.js";
 
 const execAsync = promisify(exec);
 let cachedOpenClawPath = null;
@@ -252,18 +253,13 @@ usable file input, use OpenClaw's upload flow above.
  * @property {number}   [cronAddTimeoutMs] - Timeout for cron add (ms)
  * @property {number}   [cronRunTimeoutMs] - Timeout for cron run (ms)
  * @property {number}   [cronPollTimeoutMs] - Timeout for cron poll (ms)
+ * @property {Record<string, any>} [validators] - Workflow-level validators
  */
 
 /**
- * @typedef {Object} StepRunResult
- * @property {'ok'|'failed'}   status       - Outcome of this attempt
-  * @property {string|null}     session_key  - Session identifier (for logs/debugging)
-  * @property {OutputCheckResult} output_check - Output file validation result
-  * @property {string|null}     error        - Error message if failed
-  * @property {string|null}     logs         - Debug logs/output from the session
-  * @property {number}          duration_ms  - Wall-clock time for this attempt
-
+ * @typedef {import('./types.js').StepRunResult} StepRunResult
  */
+
 
 /**
  * Run a single workflow step as an isolated subagent and wait for completion.
@@ -302,6 +298,7 @@ export async function runStep(step, runId, api, options) {
 		cronAddTimeoutMs,
 		cronRunTimeoutMs,
 		cronPollTimeoutMs,
+		validators = {},
 	} = options;
 
 	if (cancelled) {
@@ -316,20 +313,13 @@ export async function runStep(step, runId, api, options) {
 	}
 
 	const startTime = Date.now();
-
-	// Select adapter based on what OpenClaw exposes
 	const adapter = selectAdapter(api, options.sessionAdapter || "auto");
-
 	let sessionKey = null;
-	try {
-		// Build the model preference: step-level overrides plugin default
-		const model = step.model || defaultModel || null;
 
-		// Wrap the task with exec-poll instructions so the agent handles backgrounded
-		// bash commands correctly (commands taking >10s are backgrounded by the exec tool).
+	try {
+		const model = step.model || defaultModel || null;
 		const taskWithPreamble = EXEC_POLL_PREAMBLE + step.task;
 
-		// Spawn the session
 		const spawnResult = await adapter.spawn(taskWithPreamble, {
 			model,
 			timeout: step.timeout,
@@ -345,10 +335,8 @@ export async function runStep(step, runId, api, options) {
 		});
 		sessionKey = spawnResult.sessionKey;
 
-		// Poll until completion or timeout
 		const timeoutMs = step.timeout * 1000;
 		const deadline = Date.now() + timeoutMs;
-
 		let finalStatus = null;
 		let errorMsg = null;
 		let logs = null;
@@ -357,10 +345,9 @@ export async function runStep(step, runId, api, options) {
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
 
-			// Early exit if outputs are already present (fast-path signal)
 			if (step.outputs && step.outputs.length > 0) {
-				outputCheck = await checkOutputs(step.outputs, baseDir);
-				if (outputCheck.passed) {
+				outputCheck = await checkOutputs(step.outputs, baseDir, validators);
+				if (outputCheck.decision === "pass") {
 					finalStatus = "ok";
 					break;
 				}
@@ -375,43 +362,52 @@ export async function runStep(step, runId, api, options) {
 			}
 			if (statusResult.status === "error") {
 				if (step.outputs && step.outputs.length > 0) {
-					outputCheck = await checkOutputs(step.outputs, baseDir);
-					if (outputCheck.passed) {
+					outputCheck = await checkOutputs(step.outputs, baseDir, validators);
+					if (outputCheck.decision === "pass") {
 						finalStatus = "ok";
 						logs = statusResult.logs;
 						break;
 					}
 				}
-
 				finalStatus = "failed";
 				errorMsg = statusResult.error || "Step session exited with error";
 				logs = statusResult.logs;
 				break;
 			}
-
-			// status === 'running' — keep polling
 		}
 
-		// Final verification: if the session claimed completion (or we broke early),
-		// ensure the output gate is actually satisfied.
 		if (finalStatus === "ok" || finalStatus === null) {
-			outputCheck = await checkOutputs(step.outputs, baseDir);
+			outputCheck = await checkOutputs(step.outputs, baseDir, validators);
 		}
 
 		if (finalStatus === null) {
-			// Deadline exceeded without completing.
-			// Rescue: if outputs are defined and all present, mark as ok.
 			const hasOutputs = step.outputs && step.outputs.length > 0;
-			if (hasOutputs && outputCheck.passed) {
+			if (hasOutputs && outputCheck.decision === "pass") {
 				finalStatus = "ok";
 			} else {
 				finalStatus = "failed";
 				errorMsg = `Step timed out after ${step.timeout}s`;
 			}
-		} else if (finalStatus === "ok" && !outputCheck.passed) {
-			// If session said OK but output gate failed, treat as failure
-			finalStatus = "failed";
-			errorMsg = `Output gate failed — missing files: ${outputCheck.missing_files.join(", ")}`;
+		} else if (finalStatus === "ok") {
+			switch (outputCheck.decision) {
+				case "pass":
+					finalStatus = "ok";
+					break;
+				case "retry":
+					finalStatus = "failed";
+					errorMsg = "Output validator requested retry";
+					break;
+				case "blocked":
+					finalStatus = "blocked";
+					errorMsg = "Output validator blocked step";
+					break;
+				case "fail":
+				case "unknown":
+				default:
+					finalStatus = "failed";
+					errorMsg = `Output gate failed (${outputCheck.decision}) — missing files: ${outputCheck.missing_files.join(", ")}`;
+					break;
+			}
 		}
 
 		return {
@@ -423,7 +419,6 @@ export async function runStep(step, runId, api, options) {
 			duration_ms: Date.now() - startTime,
 		};
 	} catch (err) {
-		// Spawn itself failed (session system unavailable, etc.)
 		return {
 			status: "failed",
 			session_key: sessionKey,
@@ -435,6 +430,7 @@ export async function runStep(step, runId, api, options) {
 	}
 }
 
+
 /**
  * Sanitizes a string for use in a session key.
  * @param {any} value
@@ -445,6 +441,7 @@ function safeSessionKeyPart(value) {
 		.replace(/[^a-zA-Z0-9:_-]/g, "_")
 		.slice(0, 120);
 }
+
 
 /**
  * Splits a model reference (e.g., "openai/gpt-4") into provider and model.
@@ -1015,10 +1012,9 @@ export function createStepRunner(adapter) {
 			while (Date.now() < deadline) {
 				await sleep(pollIntervalMs);
 
-				// Early exit if outputs are already present
 				if (step.outputs && step.outputs.length > 0) {
 					outputCheck = await checkOutputs(step.outputs, baseDir);
-					if (outputCheck.passed) {
+					if (outputCheck.decision === "pass") {
 						finalStatus = "ok";
 						break;
 					}
@@ -1045,15 +1041,30 @@ export function createStepRunner(adapter) {
 
 			if (finalStatus === null) {
 				const hasOutputs = step.outputs && step.outputs.length > 0;
-				if (hasOutputs && outputCheck.passed) {
+				if (hasOutputs && outputCheck.decision === "pass") {
 					finalStatus = "ok";
 				} else {
 					finalStatus = "failed";
 					errorMsg = `Step timed out after ${step.timeout}s`;
 				}
-			} else if (finalStatus === "ok" && !outputCheck.passed) {
-				finalStatus = "failed";
-				errorMsg = `Output gate failed — missing: ${outputCheck.missing_files.join(", ")}`;
+			} else if (finalStatus === "ok") {
+				switch (outputCheck.decision) {
+					case "pass":
+						finalStatus = "ok";
+						break;
+					case "retry":
+						finalStatus = "failed";
+						errorMsg = "Output validator requested retry";
+						break;
+					case "blocked":
+						finalStatus = "blocked";
+						errorMsg = "Output validator blocked step";
+						break;
+					default:
+						finalStatus = "failed";
+						errorMsg = `Output gate failed — missing: ${outputCheck.missing_files.join(", ")}`;
+						break;
+				}
 			}
 
 			return {

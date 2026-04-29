@@ -41,10 +41,12 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "dependencies": {
-    "@sinclair/typebox": "^0.34.38",
-    "js-yaml": "^4.1.0"
-  },
+    "dependencies": {
+      "@bufbuild/cel": "^0.4.0",
+      "ajv": "^8.17.1",
+      "@sinclair/typebox": "^0.34.38",
+      "js-yaml": "^4.1.0"
+    },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.15.3",

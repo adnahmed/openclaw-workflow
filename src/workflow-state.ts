@@ -35,8 +35,8 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 /**
- * @typedef {'pending'|'running'|'ok'|'failed'|'cancelled'} RunStatus
- * @typedef {'pending'|'running'|'ok'|'failed'|'skipped'} StepStatus
+ * @typedef {'pending'|'running'|'ok'|'failed'|'blocked'|'cancelled'} RunStatus
+ * @typedef {'pending'|'running'|'ok'|'failed'|'blocked'|'skipped'} StepStatus
  */
 
 /**

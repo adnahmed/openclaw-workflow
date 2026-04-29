@@ -29,63 +29,71 @@
  * // result.missing_files === []
  */
 
-import { access } from 'node:fs/promises';
 import { resolve, isAbsolute } from 'node:path';
+import { 
+  OutputSpec, 
+  OutputCheckResult, 
+  OutputValidationResult, 
+  ValidationDecision, 
+  ValidatorSpec 
+} from './types.js';
+import { validateOutput } from './output-validator.js';
 
 /**
- * @typedef {Object} OutputCheckResult
- * @property {boolean}  passed        - True if all expected outputs exist
- * @property {string[]} missing_files - List of paths that were not found
- * @property {string[]} checked_files - Full resolved paths that were checked
- */
-
-/**
- * Check that all expected output files exist on disk.
- * Paths that are already absolute are checked as-is. Relative paths are
- * resolved against `baseDir`. This allows workflows to use short relative
- * paths (e.g. `data/output.json`) without embedding absolute paths.
- *
- * @param {string[]} expectedPaths - List of file paths to check (may be relative)
- * @param {string}   baseDir       - Base directory for resolving relative paths
+ * Check that all expected output files exist and satisfy their validation rules.
+ * 
+ * @param {OutputSpec[]} expectedOutputs - List of output specifications
+ * @param {string} baseDir - Base directory for resolving relative paths
+ * @param {Record<string, ValidatorSpec>} validators - Map of validator IDs to specs
+ * @param {string} [workflowDir] - Optional workflow directory
  * @returns {Promise<OutputCheckResult>}
- *
- * @example
- * // All exist:
- * await checkOutputs(['out/report.json'], '/workspace')
- * // → { passed: true, missing_files: [], checked_files: ['/workspace/out/report.json'] }
- *
- * // Some missing:
- * await checkOutputs(['out/missing.json'], '/workspace')
- * // → { passed: false, missing_files: ['/workspace/out/missing.json'], checked_files: [...] }
  */
-export async function checkOutputs(expectedPaths, baseDir) {
-  // If no outputs defined, the gate trivially passes — not every step needs
-  // output files; some steps are purely side-effectful (e.g. sending notifications).
-  if (!expectedPaths || expectedPaths.length === 0) {
-    return { passed: true, missing_files: [], checked_files: [] };
+export async function checkOutputs(
+  expectedOutputs, 
+  baseDir, 
+  validators = {}, 
+  workflowDir = ''
+) {
+  if (!expectedOutputs || expectedOutputs.length === 0) {
+    return { 
+      passed: true, 
+      decision: 'pass', 
+      missing_files: [], 
+      checked_files: [], 
+      validations: [] 
+    };
   }
 
-  const checked_files = [];
-  const missing_files = [];
+  const validations = [];
 
-  for (const rawPath of expectedPaths) {
-    // Resolve to absolute path
-    const absPath = isAbsolute(rawPath) ? rawPath : resolve(baseDir, rawPath);
-    checked_files.push(absPath);
-
-    try {
-      // access() with no mode defaults to F_OK — just checks existence
-      await access(absPath);
-      // File exists — no action needed
-    } catch {
-      // File does not exist (or is inaccessible)
-      missing_files.push(absPath);
-    }
+  for (const output of expectedOutputs) {
+    validations.push(
+      await validateOutput(output, baseDir, validators, workflowDir)
+    );
   }
+
+  const decision = mergeOutputDecisions(validations);
 
   return {
-    passed: missing_files.length === 0,
-    missing_files,
-    checked_files,
+    passed: decision === 'pass',
+    decision,
+    missing_files: validations.filter(v => !v.exists).map(v => v.path),
+    checked_files: validations.map(v => v.path),
+    validations,
   };
+}
+
+/**
+ * Merges multiple output validation decisions into a single outcome.
+ * Priority: fail > blocked > retry > unknown > pass
+ * 
+ * @param {OutputValidationResult[]} results
+ * @returns {ValidationDecision}
+ */
+function mergeOutputDecisions(results) {
+  if (results.some(r => r.decision === 'fail')) return 'fail';
+  if (results.some(r => r.decision === 'blocked')) return 'blocked';
+  if (results.some(r => r.decision === 'retry')) return 'retry';
+  if (results.some(r => r.decision === 'unknown')) return 'unknown';
+  return 'pass';
 }

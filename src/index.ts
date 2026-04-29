@@ -335,6 +335,8 @@ export default definePluginEntry({
 						steps_ok: steps.filter((step) => step.status === "ok").length,
 						steps_failed: steps.filter((step) => step.status === "failed")
 							.length,
+						steps_blocked: steps.filter((step) => step.status === "blocked")
+							.length,
 						steps_total: steps.length,
 						steps: stepSummary,
 					});
