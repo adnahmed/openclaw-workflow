@@ -63,6 +63,10 @@ export async function validateOutput(
     await access(absPath);
     result.exists = true;
   } catch {
+    if (outputSpec.optional) {
+      result.decision = 'pass';
+      return result;
+    }
     result.decision = 'fail';
     result.errors.push('File does not exist');
     result.failure_kind = 'missing_file';

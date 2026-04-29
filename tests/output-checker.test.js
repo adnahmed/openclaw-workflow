@@ -114,3 +114,25 @@ test('handles mix of absolute and relative paths', async () => {
     assert.equal(result.passed, true);
   });
 });
+
+// ── Optional files ───────────────────────────────────────────────────────────
+
+test('passes when optional file is missing', async () => {
+  await withTempDir('output-check', async (dir) => {
+    const result = await checkOutputs([{ path: 'optional-output.json', optional: true }], dir);
+    assert.equal(result.passed, true);
+    assert.equal(result.missing_files.length, 1);
+  });
+});
+
+test('fails when required file is missing but optional one is also missing', async () => {
+  await withTempDir('output-check', async (dir) => {
+    const result = await checkOutputs([
+      { path: 'required-output.json' },
+      { path: 'optional-output.json', optional: true }
+    ], dir);
+    assert.equal(result.passed, false);
+    assert.equal(result.missing_files.length, 2);
+  });
+});
+
