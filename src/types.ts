@@ -88,6 +88,7 @@ export type OutputValidationResult = {
   validator?: string;
   decision: ValidationDecision;
   errors: string[];
+  failure_kind?: "missing_file" | "schema" | "fail_when" | "parse" | "other";
   doc?: unknown;
 };
 

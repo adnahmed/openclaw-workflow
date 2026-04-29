@@ -65,6 +65,7 @@ export async function validateOutput(
   } catch {
     result.decision = 'fail';
     result.errors.push('File does not exist');
+    result.failure_kind = 'missing_file';
     return result;
   }
 
@@ -72,7 +73,12 @@ export async function validateOutput(
     const content = await readFile(absPath);
     result.bytes = content.length;
 
-    if (!validatorId || !validators[validatorId]) {
+    if (validatorId && !validators[validatorId]) {
+      result.decision = 'fail';
+      result.errors.push(`Unknown output validator: ${validatorId}`);
+      return result;
+    }
+    if (!validatorId) {
       result.decision = 'pass';
       return result;
     }
@@ -83,6 +89,7 @@ export async function validateOutput(
     if (validator.min_bytes && result.bytes < validator.min_bytes) {
       result.decision = 'fail';
       result.errors.push(`File size ${result.bytes} is less than minimum ${validator.min_bytes}`);
+      result.failure_kind = 'other';
       return result;
     }
 
@@ -98,15 +105,17 @@ export async function validateOutput(
            
            const validateSchema = ajv.compile(schema);
           const valid = validateSchema(doc);
-          if (!valid) {
-            result.decision = 'fail';
-            result.errors.push(...(validateSchema.errors?.map(e => `${e.instancePath} ${e.message}`) || ['Schema validation failed']));
-            return result;
-          }
+           if (!valid) {
+             result.decision = 'fail';
+             result.errors.push(...(validateSchema.errors?.map(e => `${e.instancePath} ${e.message}`) || ['Schema validation failed']));
+             result.failure_kind = 'schema';
+             return result;
+           }
         }
       } catch (e) {
         result.decision = 'fail';
         result.errors.push(`Failed to parse JSON: ${e instanceof Error ? e.message : String(e)}`);
+        result.failure_kind = 'parse';
         return result;
       }
     } else {
@@ -134,10 +143,11 @@ export async function validateOutput(
       if (!rule) continue;
       try {
         const isMatch = await evaluateCel(rule, celContext);
-        if (isMatch) {
-          result.decision = decision as ValidationDecision;
-          return result;
-        }
+         if (isMatch) {
+           result.decision = decision as ValidationDecision;
+           if (decision === 'fail') result.failure_kind = 'fail_when';
+           return result;
+         }
       } catch (e) {
         result.errors.push(`CEL evaluation error in ${decision}_when: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -150,6 +160,7 @@ export async function validateOutput(
   } catch (e) {
     result.decision = 'fail';
     result.errors.push(`Unexpected error during validation: ${e instanceof Error ? e.message : String(e)}`);
+    result.failure_kind = 'other';
   }
   return result;
 }
