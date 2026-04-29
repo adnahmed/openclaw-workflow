@@ -12,14 +12,14 @@ import { buildContext, substituteVars, substituteDeep } from '../dist/variable-s
 
 test('buildContext returns correct date format', () => {
   const fixed = new Date('2026-03-09T14:22:00.000Z');
-  const ctx = buildContext('my-run', fixed);
+  const ctx = buildContext('my-run', {}, fixed);
   assert.equal(ctx.date, '2026-03-09');
 });
 
 test('buildContext returns full ISO datetime', () => {
   const fixed = new Date('2026-03-09T14:22:00.000Z');
-  const ctx = buildContext('my-run', fixed);
-  assert.equal(ctx.datetime, '2026-03-09T14:22:00.000Z');
+  const ctx = buildContext('my-run', {}, fixed);
+  assert.equal(ctx.datetime, '2026-03-09T14:22:00');
 });
 
 test('buildContext preserves run_id', () => {
@@ -31,23 +31,43 @@ test('buildContext uses current time when now not provided', () => {
   const before = new Date();
   const ctx = buildContext('test-run');
   const after = new Date();
-  const ctxTime = new Date(ctx.datetime);
+  const ctxTime = new Date(ctx.utc_datetime);
   assert.ok(ctxTime >= before);
   assert.ok(ctxTime <= after);
 });
 
+test('buildContext supports timezones', () => {
+  const fixed = new Date('2026-03-09T22:00:00Z'); // 10 PM UTC
+  // Asia/Karachi is UTC+5, so it should be 2026-03-10 03:00:00
+  const ctx = buildContext('run', {}, fixed, 'Asia/Karachi');
+  
+  assert.equal(ctx.date, '2026-03-10');
+  assert.equal(ctx.datetime, '2026-03-10T03:00:00');
+  assert.equal(ctx.utc_date, '2026-03-09');
+  assert.equal(ctx.utc_datetime, '2026-03-09T22:00:00.000Z');
+});
+
+test('substitutes {utc_date} and {utc_datetime}', () => {
+  const fixed = new Date('2026-03-09T22:00:00Z');
+  const ctx = buildContext('run', {}, fixed, 'Asia/Karachi');
+  
+  assert.equal(substituteVars('UTC date: {utc_date}', ctx), 'UTC date: 2026-03-09');
+  assert.equal(substituteVars('UTC datetime: {utc_datetime}', ctx), 'UTC datetime: 2026-03-09T22:00:00.000Z');
+});
+
+
 // ── substituteVars ─────────────────────────────────────────────────────────
 
 test('substitutes {date}', () => {
-  const ctx = buildContext('run', new Date('2026-03-09T08:00:00Z'));
+  const ctx = buildContext('run', {}, new Date('2026-03-09T08:00:00Z'));
   assert.equal(substituteVars('output-{date}.json', ctx), 'output-2026-03-09.json');
 });
 
 test('substitutes {datetime}', () => {
-  const ctx = buildContext('run', new Date('2026-03-09T08:00:00.000Z'));
+  const ctx = buildContext('run', {}, new Date('2026-03-09T08:00:00.000Z'));
   assert.equal(
     substituteVars('Report at {datetime}', ctx),
-    'Report at 2026-03-09T08:00:00.000Z'
+    'Report at 2026-03-09T08:00:00'
   );
 });
 
@@ -57,7 +77,7 @@ test('substitutes {run_id}', () => {
 });
 
 test('substitutes multiple variables in one string', () => {
-  const ctx = buildContext('run-123', new Date('2026-03-09T10:00:00.000Z'));
+  const ctx = buildContext('run-123', {}, new Date('2026-03-09T10:00:00.000Z'));
   const result = substituteVars('{run_id} started on {date}', ctx);
   assert.equal(result, 'run-123 started on 2026-03-09');
 });
@@ -86,7 +106,7 @@ test('returns non-string values unchanged', () => {
 });
 
 test('substitutes same variable multiple times', () => {
-  const ctx = buildContext('run', new Date('2026-03-09T00:00:00Z'));
+  const ctx = buildContext('run', {}, new Date('2026-03-09T00:00:00Z'));
   assert.equal(
     substituteVars('{date}/{date}/{date}', ctx),
     '2026-03-09/2026-03-09/2026-03-09'
@@ -96,7 +116,7 @@ test('substitutes same variable multiple times', () => {
 // ── substituteDeep ─────────────────────────────────────────────────────────
 
 test('substituteDeep processes nested object', () => {
-  const ctx = buildContext('run-x', new Date('2026-03-09T08:00:00Z'));
+  const ctx = buildContext('run-x', {}, new Date('2026-03-09T08:00:00Z'));
   const obj = {
     task: 'Run audit for {date}',
     outputs: ['data/{date}/output.json'],
@@ -109,7 +129,7 @@ test('substituteDeep processes nested object', () => {
 });
 
 test('substituteDeep processes arrays', () => {
-  const ctx = buildContext('run', new Date('2026-03-09T00:00:00Z'));
+  const ctx = buildContext('run', {}, new Date('2026-03-09T00:00:00Z'));
   const arr = ['file-{date}-a.json', 'file-{date}-b.json'];
   const result = substituteDeep(arr, ctx);
   assert.deepEqual(result, ['file-2026-03-09-a.json', 'file-2026-03-09-b.json']);

@@ -188,14 +188,16 @@ Use `skip_if_empty` to avoid launching expensive agents when there is no data to
 
 The following `{variable}` tokens are substituted in `task` and `outputs` fields at run time:
 
- | Variable      | Example value                   | Description |
- |---------------|---------------------------------|-------------|
- | `{date}`      | `2026-03-09`                    | Current date as `YYYY-MM-DD` (UTC) |
- | `{datetime}`  | `2026-03-09T08:20:00.000Z`      | Current datetime as ISO 8601 (UTC) |
- | `{run_id}`    | `seo-pipeline-20260309T082000`  | The unique run identifier |
- | `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
-  | `{config.X}`  | `my-custom-value`               | Value of variable `X` from the top-level `config` block |
-  | `\{variable}`  | `{date}`                       | Literal text (escaped). Prevents substitution. |
+| Variable      | Example value                   | Description |
+|---------------|---------------------------------|-------------|
+| `{date}`      | `2026-03-09`                    | Current date as `YYYY-MM-DD` (Workflow timezone) |
+| `{datetime}`  | `2026-03-09T08:20:00`           | Current datetime as ISO-ish string (Workflow timezone) |
+| `{utc_date}`  | `2026-03-09`                    | Current date as `YYYY-MM-DD` (UTC) |
+| `{utc_datetime}` | `2026-03-09T08:20:00.000Z`   | Current datetime as ISO 8601 (UTC) |
+| `{run_id}`    | `seo-pipeline-20260309T082000`  | The unique run identifier |
+| `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
+| `{config.X}`  | `my-custom-value`               | Value of variable `X` from the top-level `config` block |
+| `\{variable}`  | `{date}`                       | Literal text (escaped). Prevents substitution. |
   
   Unknown `{variables}` are typically left as-is, except in `for_each` path templates where they cause an immediate error.
 
@@ -624,7 +626,7 @@ interface PluginApi {
 | `src/workflow-state.ts` | Atomic state file R/W, run listing |
 | `src/step-runner.ts` | Session lifecycle: spawn, poll, output check. Includes MockAdapter |
 | `src/output-checker.ts` | File existence validation for output gates |
-| `src/variable-substitution.ts` | `{date}`, `{datetime}`, `{run_id}` substitution |
+| `src/variable-substitution.ts` | `{date}`, `{datetime}`, `{utc_date}`, `{utc_datetime}`, `{run_id}` substitution |
 | `openclaw.plugin.json` | Plugin manifest + config schema |
 | `package.json` | Package metadata |
 | `tests/*.test.js` | Full test suite (Node built-in test runner) |

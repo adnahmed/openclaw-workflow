@@ -4,10 +4,12 @@
  * output file paths, and any other string fields in a workflow definition.
  *
  * Supported variables:
- *   {date}     → Current date in YYYY-MM-DD format (UTC)
- *   {datetime} → Current datetime as full ISO 8601 string (e.g. 2026-03-09T14:22:00.000Z)
- *   {run_id}   → The unique run identifier for this workflow execution
- *   {config.X} → Value of variable X from the workflow's config block
+ *   {date}          → Current date in YYYY-MM-DD format (Workflow timezone)
+ *   {datetime}      → Current datetime as ISO-ish string (Workflow timezone)
+ *   {utc_date}      → Current date in YYYY-MM-DD format (UTC)
+ *   {utc_datetime}  → Current datetime as full ISO 8601 string (UTC)
+ *   {run_id}        → The unique run identifier for this workflow execution
+ *   {config.X}      → Value of variable X from the workflow's config block
  *
  * Escaping:
  *   Use `\{variable}` to write the literal text of a variable without substituting it.
@@ -28,10 +30,12 @@
 
 /**
  * @typedef {Object} SubstitutionContext
- * @property {string} date     - Current date as YYYY-MM-DD (UTC)
- * @property {string} datetime - Current datetime as ISO 8601 string
- * @property {string} run_id   - The workflow run identifier
- * @property {Object} [config] - Workflow-specific configuration variables
+ * @property {string} date          - Current date as YYYY-MM-DD (Workflow timezone)
+ * @property {string} datetime      - Current datetime as ISO-ish string (Workflow timezone)
+ * @property {string} utc_date      - Current date as YYYY-MM-DD (UTC)
+ * @property {string} utc_datetime  - Current datetime as ISO 8601 string (UTC)
+ * @property {string} run_id        - The workflow run identifier
+ * @property {Object} [config]      - Workflow-specific configuration variables
  * @property {Object.<string, any>} [vars] - Additional workflow variables
  */
 
@@ -42,16 +46,37 @@
  * @param {string} runId - The workflow run ID
  * @param {Object} [workflowConfig={}] - Configuration block from the workflow definition
  * @param {Date} [now=new Date()] - Optional fixed timestamp (useful for testing)
+ * @param {string} [timezone='UTC'] - Workflow timezone (e.g. 'Asia/Karachi')
  * @returns {SubstitutionContext}
  */
-export function buildContext(runId, workflowConfig = {}, now = new Date()) {
-  const isoString = now.toISOString();
-  // Extract YYYY-MM-DD from the ISO string prefix
-  const date = isoString.slice(0, 10);
+export function buildContext(runId, workflowConfig = {}, now = new Date(), timezone = 'UTC') {
+  const utcIsoString = now.toISOString();
+  const utcDate = utcIsoString.slice(0, 10);
+
+  const tzDate = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+
+  const tzFormatter = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const tzDatetime = tzFormatter.format(now).replace(' ', 'T');
 
   return {
-    date,
-    datetime: isoString,
+    date: tzDate,
+    datetime: tzDatetime,
+    utc_date: utcDate,
+    utc_datetime: utcIsoString,
     run_id: runId,
     config: workflowConfig,
   };
@@ -77,7 +102,7 @@ const ANY_BRACED_TOKEN_RE = /(?<!\\)\{([\w.]+)\}/g;
 // Only these are engine tokens:
 // {date}, {datetime}, {run_id}, {config.X}, {config.X.Y}, {item}, {item.X}, {item.X.Y}
 const ENGINE_TOKEN_RE =
-  /(?<!\\)\{(date|datetime|run_id|config(?:\.[A-Za-z_]\w*)+|item(?:\.[A-Za-z_]\w*)*)\}/g;
+  /(?<!\\)\{(date|datetime|utc_date|utc_datetime|run_id|config(?:\.[A-Za-z_]\w*)+|item(?:\.[A-Za-z_]\w*)*)\}/g;
 
 type UnknownTokenMode = "preserve" | "throw";
 

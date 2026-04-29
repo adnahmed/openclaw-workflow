@@ -82,7 +82,7 @@ const TICK_INTERVAL_MS = 500;
 
 export async function compileWorkflow(workflow, runId, config) {
   validateWorkflowTemplates(workflow);
-  const varCtx = buildContext(runId, workflow.config);
+  const varCtx = buildContext(runId, workflow.config, new Date(), workflow.config?.timezone);
   const plannedSteps = [];
 
   for (const step of workflow.steps) {
@@ -181,7 +181,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 
 
   // Build substitution context once for the entire run
-  const varCtx = buildContext(runId, workflow.config);
+  const varCtx = buildContext(runId, workflow.config, new Date(), workflow.config?.timezone);
 
    // Apply variable substitution to all top-level steps.
    // Loop steps are preserved as-is (their inner steps will be substituted during expansion).
@@ -875,7 +875,7 @@ export async function resumeWorkflow(previousState, workflow, newRunId, api, con
  */
 export function dryRun(workflow, runId) {
   validateWorkflowTemplates(workflow);
-  const varCtx = buildContext(runId, workflow.config);
+  const varCtx = buildContext(runId, workflow.config, new Date(), workflow.config?.timezone);
   const steps = workflow.steps.map(step => step.for_each ? { ...step } : substituteDeep(step, varCtx));
 
   // Build execution waves (steps with no unresolved deps execute together)
