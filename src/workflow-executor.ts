@@ -298,7 +298,7 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
       for (const step of steps) {
         if (step.depends_on.includes(current) && !visited.has(step.id)) {
           const currentStatus = state.steps[step.id]?.status;
-          if (currentStatus === 'pending') {
+           if (currentStatus === 'pending' && !step.always_run) {
             visited.add(step.id);
             toSkip.push(step.id);
             queue.push(step.id);
@@ -671,11 +671,6 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
               ];
             }
 
-            const lastInnerId =
-              innerStepsDef.length > 0
-                ? innerStepsDef[innerStepsDef.length - 1].id
-                : null;
-
             for (let i = 0; i < list.length; i++) {
               const item = list[i];
               const prefix = `${step.id}:${i}:`;
@@ -707,18 +702,6 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
               );
             }
 
-            if (lastInnerId) {
-              const lastSteps = expandedChildren
-                .filter(child => child.id.endsWith(`:${lastInnerId}`))
-                .map(child => child.id);
-
-              for (const s of steps) {
-                if (s.depends_on?.includes(step.id)) {
-                  const newDeps = s.depends_on.filter(d => d !== step.id);
-                  s.depends_on = [...newDeps, ...lastSteps];
-                }
-              }
-            }
           }
 
            if (expandedChildren.length > 0) {
