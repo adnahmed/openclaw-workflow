@@ -373,16 +373,26 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
      // Increment attempts before launch
     const attempts = (state.steps[step.id]?.attempts || 0) + 1;
 
-    // Mark as running immediately (synchronously update our local state snapshot)
-    // We save this in the background — don't await here to avoid blocking the scheduler
-     mutateState(current => updateStepState(current, step.id, {
-       status: 'running',
-       started_at: new Date().toISOString(),
-       retry_not_before: null,
-       attempts,
-     }, runsDir)).catch(err => {
-      api?.logger?.error?.(`[workflow:${runId}] failed to mark step running`, err);
-    });
+    // Mark as running immediately.
+    // For cancellation safety, state writes should be ordered.
+    await mutateState(current => updateStepState(current, step.id, {
+      status: 'running',
+      started_at: new Date().toISOString(),
+      retry_not_before: null,
+      attempts,
+
+      session_key: null,
+      session_id: null,
+      subagent_run_id: null,
+      session_adapter: sessionAdapter,
+
+      cancel_requested_at: null,
+      cancel_confirmed_at: null,
+      cancel_method: null,
+      cancel_error: null,
+      cancellation_reason: null,
+    }, runsDir));
+
 
     const promise = (async () => {
       try {
@@ -409,6 +419,24 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
 				sessionAdapter,
 				validators: workflow.validators || {},
 				workflowDir: workflow.__dir || workflowsDir,
+
+				onSpawn: async (spawn) => {
+					await mutateState(current =>
+						updateStepState(
+							current,
+							step.id,
+							{
+								status: "running",
+								session_key: spawn.sessionKey,
+								session_id: spawn.sessionId,
+								subagent_run_id: spawn.sessionId,
+								session_adapter: spawn.sessionAdapter,
+								spawned_at: spawn.spawnedAt,
+							},
+							runsDir,
+						),
+					);
+				},
 			});
 		} catch (err) {
 
@@ -461,15 +489,17 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
           } else {
             // Failure path — check for retry
              const maxAttempts = (step.retry || 0) + 1;
-              const cancellationUnconfirmed =
-                typeof result.error === "string" &&
-                result.error.includes("cancellation was not confirmed");
+               const cancellationUnconfirmed =
+                 typeof result.error === "string" &&
+                 (result.error.includes("cancellation was not confirmed") ||
+                  (state.steps[step.id]?.cancel_requested_at && !state.steps[step.id]?.cancel_confirmed_at));
 
-              const shouldRetry =
-                result.status === 'failed' &&
-                attempts < maxAttempts &&
-                !cancellationUnconfirmed &&
-                result.retryable === true;
+               const shouldRetry =
+                 result.status === 'failed' &&
+                 attempts < maxAttempts &&
+                 !cancellationUnconfirmed &&
+                 result.retryable === true;
+
 
  
             if (shouldRetry) {
@@ -585,11 +615,30 @@ export async function executeWorkflow(workflow, runId, api, config, stepRunner =
       try {
         const { readRunState } = await import('./workflow-state.js');
         const diskState = await readRunState(runId, runsDir);
-         if (diskState.status === 'cancelled') {
-           // External cancel: drain active promises, and exit.
-           await Promise.allSettled([...inFlight.values()]);
-           return diskState;
-         }
+          if (diskState.status === 'cancelled') {
+            // External cancel: mark running steps as cancellation-requested, drain active promises, and exit.
+            for (const [stepId] of inFlight.entries()) {
+              await mutateState(current =>
+                updateStepState(
+                  current,
+                  stepId,
+                  {
+                    cancel_requested_at:
+                      current.steps[stepId]?.cancel_requested_at ||
+                      new Date().toISOString(),
+                    cancellation_reason:
+                      current.steps[stepId]?.cancellation_reason ||
+                      `external_cancel:${runId}`,
+                  },
+                  runsDir,
+                ),
+              );
+            }
+
+            await Promise.allSettled([...inFlight.values()]);
+            return await readRunState(runId, runsDir);
+          }
+
       } catch {
         // If we can't read the state file, continue with in-memory state
       }

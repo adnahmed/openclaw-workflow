@@ -288,6 +288,10 @@ usable file input, use OpenClaw's upload flow above.
  * @property {number}   [cronRunTimeoutMs] - Timeout for cron run (ms)
  * @property {number}   [cronPollTimeoutMs] - Timeout for cron poll (ms)
  * @property {Record<string, any>} [validators] - Workflow-level validators
+ * @property {string}   [workflowDir] - Workflow directory for resolving output paths
+ * @property {Function} [onSpawn] - Callback called immediately after subagent spawn
+ * @property {string}   [sessionAdapter] - Explicit adapter to use (auto, runtime-subagent, etc.)
+ * @property {number}   [cancelGraceMs] - Grace period to wait for cancellation to confirm (ms)
  */
 
 /**
@@ -319,6 +323,44 @@ async function waitForTerminalAfterCancel(
 	}
 
 	return null;
+}
+
+/**
+ * Request cancellation of a step session using the appropriate adapter.
+ *
+ * @param {Object} api - OpenClaw plugin api object
+ * @param {Object} options - Cancellation options
+ * @returns {Promise<CancelResult>}
+ */
+export async function cancelStepSession(api, options) {
+	const {
+		sessionAdapter = "auto",
+		sessionId,
+		sessionKey,
+		runId,
+		reason,
+		logger = console,
+		cronRunTimeoutMs,
+	} = options;
+
+	const adapter = selectAdapter(api, sessionAdapter);
+
+	if (!adapter.cancel) {
+		return {
+			requested: false,
+			confirmed: false,
+			method: null,
+			error: `Adapter ${sessionAdapter} does not support cancel`,
+		};
+	}
+
+	return adapter.cancel(sessionId, {
+		sessionKey,
+		runId: sessionId || runId,
+		reason,
+		timeoutMs: options.timeoutMs,
+		cancelGraceMs: options.cancelGraceMs,
+	});
 }
 
 /**
@@ -395,6 +437,37 @@ export async function runStep(step, runId, api, options) {
 			cronPollTimeoutMs,
 		});
 		sessionKey = spawnResult.sessionKey;
+
+		if (options.onSpawn) {
+			try {
+				await options.onSpawn({
+					stepId: step.id,
+					runId,
+					sessionId: spawnResult.sessionId,
+					sessionKey: spawnResult.sessionKey,
+					sessionAdapter: options.sessionAdapter || "auto",
+					spawnedAt: new Date().toISOString(),
+				});
+			} catch (err) {
+				const cancelErr = await adapter.cancel?.(spawnResult.sessionId, {
+					sessionKey: spawnResult.sessionKey,
+					runId: spawnResult.sessionId,
+					reason: `workflow_spawn_metadata_persist_failed:${step.id}`,
+				}).catch(() => ({ requested: false }));
+
+				return {
+					status: "failed",
+					retryable: false,
+					session_key: spawnResult.sessionKey,
+					output_check: { passed: false, missing_files: [], checked_files: [] },
+					error: `Spawned session but failed to persist cancellation metadata: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+					logs: null,
+					duration_ms: Date.now() - startTime,
+				};
+			}
+		}
 
 		const timeoutMs = step.timeout * 1000;
 		const deadline = Date.now() + timeoutMs;

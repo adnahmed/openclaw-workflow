@@ -45,23 +45,31 @@ import { randomBytes } from 'node:crypto';
  * @property {string|null}          started_at   - ISO timestamp when step started
  * @property {string|null}          completed_at - ISO timestamp when step completed
  * @property {number|null}          duration_ms  - Wall-clock duration in milliseconds
-   * @property {string|null}          session_key  - OpenClaw session identifier for this step
-   * @property {string|null}          retry_not_before - ISO timestamp before which step should not retry
-   * @property {OutputCheckResult|null} output_check - Result of output file validation
-  * @property {string|null}          error        - Error message if step failed
-  * @property {string|null}          logs         - Debug logs/output for the step
-  * @property {number}               attempts     - Number of execution attempts made so far
-
- */
-
-/**
+ * @property {string|null}          session_key  - OpenClaw session identifier for this step
+ * @property {string|null}          session_id    - Adapter session id (e.g. subagent runId)
+ * @property {string|null}          subagent_run_id - Subagent run identifier
+ * @property {string|null}          session_adapter - Adapter used (e.g. runtime-subagent)
+ * @property {string|null}          cancel_requested_at - ISO timestamp when cancellation was requested
+ * @property {string|null}          cancel_confirmed_at - ISO timestamp when cancellation was confirmed
+ * @property {string|null}          cancel_method       - Method used for cancellation
+ * @property {string|null}          cancel_error        - Error during cancellation
+ * @property {string|null}          cancellation_reason - Reason for cancellation
+ * @property {string|null}          retry_not_before - ISO timestamp before which step should not retry
+ * @property {OutputCheckResult|null} output_check - Result of output file validation
+ * @property {string|null}          error        - Error message if step failed
+ * @property {string|null}          logs         - Debug logs/output for the step
+ * @property {number}               attempts     - Number of execution attempts made so far
+ *
  * @typedef {Object} RunState
  * @property {string}                    run_id       - Unique run identifier
  * @property {string}                    workflow     - Workflow name (file stem)
  * @property {RunStatus}                 status       - Overall pipeline status
  * @property {string}                    started_at   - ISO timestamp when run started
  * @property {string|null}               completed_at - ISO timestamp when run finished
+ * @property {string|null}               cancel_requested_at - ISO timestamp when run cancellation requested
+ * @property {string|null}               cancelled_at - ISO timestamp when run was marked cancelled
  * @property {Object.<string, StepState>} steps       - Per-step state keyed by step ID
+
  */
 
 /**
@@ -114,9 +122,17 @@ export function createRunState(workflowName, stepIds, runId) {
       started_at: null,
       completed_at: null,
       duration_ms: null,
-       session_key: null,
-       retry_not_before: null,
-       output_check: null,
+      session_key: null,
+      session_id: null,
+      subagent_run_id: null,
+      session_adapter: null,
+      cancel_requested_at: null,
+      cancel_confirmed_at: null,
+      cancel_method: null,
+      cancel_error: null,
+      cancellation_reason: null,
+      retry_not_before: null,
+      output_check: null,
       error: null,
       logs: null,
       attempts: 0,
@@ -129,6 +145,8 @@ export function createRunState(workflowName, stepIds, runId) {
     status: 'pending',
     started_at: new Date().toISOString(),
     completed_at: null,
+    cancel_requested_at: null,
+    cancelled_at: null,
     steps,
   };
 }

@@ -1,7 +1,10 @@
 // @ts-nocheck
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizePluginConfig } from "./config.js";
-import { runStep } from "./step-runner.js";
+import {
+	runStep,
+	cancelStepSession,
+} from "./step-runner.js";
 import {
 	WorkflowCancelParameters,
 	WorkflowListParameters,
@@ -20,6 +23,7 @@ import {
 	createRunState,
 	readRunState,
 	updateRunState,
+	updateStepState,
 } from "./workflow-state.js";
 
 function textResult(data) {
@@ -397,40 +401,137 @@ export default definePluginEntry({
 			async execute(first, second) {
 				const { run_id } = readParams(first, second);
 				try {
-					const state = await readRunState(run_id, runsDir);
+					let state = await readRunState(run_id, runsDir);
 
 					if (["ok", "failed", "cancelled"].includes(state.status)) {
-						return textResult({
-							run_id,
-							message: `Run "${run_id}" is already in terminal state "${state.status}" - nothing to cancel.`,
-						});
+						const runningSteps = Object.entries(state.steps)
+							.filter(([, step]) => step.status === "running");
+
+						if (runningSteps.length === 0) {
+							return textResult({
+								run_id,
+								message: `Run "${run_id}" is already in terminal state "${state.status}" - nothing to cancel.`,
+							});
+						}
 					}
 
-					const updatedState = await updateRunState(
+					const cancelRequestedAt = new Date().toISOString();
+
+					state = await updateRunState(
 						state,
 						{
 							status: "cancelled",
-							completed_at: new Date().toISOString(),
+							cancel_requested_at: cancelRequestedAt,
+							cancelled_at: cancelRequestedAt,
+							completed_at: cancelRequestedAt,
 						},
 						runsDir,
 					);
 
-					const inFlightSteps = Object.entries(updatedState.steps)
-						.filter(([, step]) => step.status === "running")
-						.map(([id]) => id);
+					const runningSteps = Object.entries(state.steps)
+						.filter(([, step]) => step.status === "running");
+
+					const results = [];
+
+					for (const [stepId, stepState] of runningSteps) {
+						const sessionKey = stepState.session_key;
+						const sessionId =
+							stepState.session_id ||
+							stepState.subagent_run_id ||
+							null;
+
+						if (!sessionKey) {
+							results.push({
+								step_id: stepId,
+								requested: false,
+								confirmed: false,
+								method: null,
+								error: "missing session_key; cannot abort active worker",
+							});
+
+							state = await updateStepState(
+								state,
+								stepId,
+								{
+									cancel_requested_at: cancelRequestedAt,
+									cancellation_reason: `workflow_cancel:${run_id}`,
+									cancel_error: "missing session_key; cannot abort active worker",
+								},
+								runsDir,
+							);
+
+							continue;
+						}
+
+						state = await updateStepState(
+							state,
+							stepId,
+							{
+								cancel_requested_at: cancelRequestedAt,
+								cancellation_reason: `workflow_cancel:${run_id}`,
+							},
+							runsDir,
+						);
+
+						let cancelResult;
+
+						try {
+							cancelResult = await cancelStepSession(api, {
+								sessionAdapter,
+								sessionId,
+								sessionKey,
+								runId: sessionId || run_id,
+								reason: `workflow_cancel:${run_id}`,
+								cronRunTimeoutMs,
+								cancelGraceMs: config.cancelGraceMs ?? 30000,
+							});
+						} catch (err) {
+							cancelResult = {
+								requested: false,
+								confirmed: false,
+								method: null,
+								error: err instanceof Error ? err.message : String(err),
+							};
+						}
+
+						results.push({
+							step_id: stepId,
+							session_key: sessionKey,
+							session_id: sessionId,
+							...cancelResult,
+						});
+
+						state = await updateStepState(
+							state,
+							stepId,
+							{
+								cancel_method: cancelResult.method || null,
+								cancel_error: cancelResult.error || null,
+								cancel_confirmed_at: cancelResult.confirmed
+									? new Date().toISOString()
+									: null,
+							},
+							runsDir,
+						);
+					}
+
+					const abortRequested = results.filter(r => r.requested).length;
+					const abortFailed = results.filter(r => !r.requested).length;
 
 					return textResult({
 						run_id,
 						status: "cancelled",
-						message: `Run "${run_id}" marked as cancelled. ${
-							inFlightSteps.length > 0
-								? `${inFlightSteps.length} step(s) currently in-flight will complete: ${inFlightSteps.join(", ")}`
-								: "No steps currently running."
-						}`,
+						running_steps: runningSteps.length,
+						abort_requested: abortRequested,
+						abort_failed: abortFailed,
+						results,
+						message:
+							runningSteps.length === 0
+								? `Run "${run_id}" marked as cancelled. No workers were active.`
+								: `Run "${run_id}" marked as cancelled. Abort requested for ${abortRequested}/${runningSteps.length} active worker(s).`,
 					});
 				} catch (err) {
-					if (err?.code === "ENOENT")
-						return errorResult(`Run not found: ${run_id}`);
+					if (err?.code === "ENOENT") return errorResult(`Run not found: ${run_id}`);
 					return errorResult(err instanceof Error ? err.message : String(err));
 				}
 			},
