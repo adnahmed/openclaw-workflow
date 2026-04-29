@@ -415,7 +415,7 @@ export async function executeWorkflow(
 	 *
 	 * @param {import('./workflow-loader.js').WorkflowStep} step
 	 */
-	function launchStep(step) {
+	async function launchStep(step) {
 		if (cancelled) return;
 
 		const trackingId = step.original_id || step.id;
@@ -426,23 +426,30 @@ export async function executeWorkflow(
 
 		// Mark as running immediately.
 		// For cancellation safety, state writes should be ordered.
-		await mutateState(current => updateStepState(current, step.id, {
-      status: 'running',
-      started_at: new Date().toISOString(),
-      retry_not_before: null,
-      attempts,
+		await mutateState((current) =>
+			updateStepState(
+				current,
+				step.id,
+				{
+					status: "running",
+					started_at: new Date().toISOString(),
+					retry_not_before: null,
+					attempts,
 
-      session_key: null,
-      session_id: null,
-      subagent_run_id: null,
-      session_adapter: sessionAdapter,
+					session_key: null,
+					session_id: null,
+					subagent_run_id: null,
+					session_adapter: sessionAdapter,
 
-      cancel_requested_at: null,
-      cancel_confirmed_at: null,
-      cancel_method: null,
-      cancel_error: null,
-      cancellation_reason: null,
-    }, runsDir));
+					cancel_requested_at: null,
+					cancel_confirmed_at: null,
+					cancel_method: null,
+					cancel_error: null,
+					cancellation_reason: null,
+				},
+				runsDir,
+			),
+		);
 
 		const promise = (async () => {
 			try {
@@ -560,13 +567,11 @@ export async function executeWorkflow(
 					// Failure path — check for retry
 					const maxAttempts = (step.retry || 0) + 1;
 					const cancellationUnconfirmed =
-						(
-							typeof result.error === "string" &&
-							result.error.includes("cancellation was not confirmed")
-						) ||
+						(typeof result.error === "string" &&
+							result.error.includes("cancellation was not confirmed")) ||
 						Boolean(
 							state.steps[step.id]?.cancel_requested_at &&
-							!state.steps[step.id]?.cancel_confirmed_at
+								!state.steps[step.id]?.cancel_confirmed_at,
 						);
 
 					const shouldRetry =
@@ -987,7 +992,11 @@ export async function executeWorkflow(
 	});
 	const anyNonOptionalBlocked = steps.some((s) => {
 		const stepState = state.steps[s.id];
-		return !s.optional && s.on_block !== "continue" && stepState?.status === "blocked";
+		return (
+			!s.optional &&
+			s.on_block !== "continue" &&
+			stepState?.status === "blocked"
+		);
 	});
 
 	let finalStatus = "ok";
