@@ -358,19 +358,13 @@ export async function runStep(step, runId, api, options) {
 			const statusResult = await adapter.getStatus(spawnResult.sessionId, options);
 
 			if (statusResult.status === "done") {
-				finalStatus = "ok";
 				logs = statusResult.logs;
+				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+				finalStatus = outputCheck.decision === "pass" ? "ok" : "failed";
 				break;
 			}
 			if (statusResult.status === "error") {
-				if (step.outputs && step.outputs.length > 0) {
-					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
-					if (outputCheck.decision === "pass") {
-						finalStatus = "ok";
-						logs = statusResult.logs;
-						break;
-					}
-				}
+				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 				finalStatus = "failed";
 				errorMsg = statusResult.error || "Step session exited with error";
 				logs = statusResult.logs;
@@ -1035,17 +1029,12 @@ export function createStepRunner(adapter) {
 					options,
 				);
 				if (statusResult.status === "done") {
-					finalStatus = "ok";
+					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+					finalStatus = outputCheck.decision === "pass" ? "ok" : "failed";
 					break;
 				}
 				if (statusResult.status === "error") {
-					if (step.outputs && step.outputs.length > 0) {
-						outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
-						if (outputCheck.decision === "pass") {
-							finalStatus = "ok";
-							break;
-						}
-					}
+					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 					finalStatus = "failed";
 					errorMsg = statusResult.error || "Session error";
 					break;
