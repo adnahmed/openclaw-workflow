@@ -9,8 +9,8 @@
  * The executor implements a **dependency-driven scheduler**:
  *
  * 1. On each tick (loop iteration), it scans all pending steps and determines
- *    which ones are now "ready" — meaning all their dependencies are in `ok`
- *    status (or `skipped` for optional deps, or OK for optional failed deps).
+ *    which ones are now "ready" — meaning all their dependencies are satisfied
+ *    (see Dependency Resolution Rules below).
  *
  * 2. Ready steps that fit within the concurrency limit are launched immediately.
  *    Launched steps run in background (Promises); the loop doesn't await them.
@@ -23,8 +23,9 @@
  *    picks it up on the next tick and re-evaluates readiness.
  *
  * ## Dependency Resolution Rules
- *   - A step is ready when all `depends_on` steps have reached terminal state
- *   - Terminal states: `ok`, `failed` (only if optional), `skipped`
+ *   - A step is ready when all dependencies are satisfied
+ *   - Satisfied: 'ok', or ('failed'/'blocked' AND optional). 'skipped' blocks.
+ *   - 'always_run' steps wait for any terminal state.
  *   - If a non-optional dependency fails, all transitively-dependent steps are
  *     marked `skipped` (not failed) — this prevents false failure counts
  *
@@ -294,10 +295,11 @@ export async function executeWorkflow(
 
 	/**
 	 * Determine if a step's dependencies are all satisfied.
-	 * A dependency is satisfied if:
-	 *   - It is 'ok', OR
-	 *   - It is 'skipped' (downstream of a failure), OR
-	 *   - It is 'failed' and marked optional
+	 * A dependency is satisfied only if:
+	 *   - it is 'ok', or
+	 *   - it is 'failed'/'blocked' and the dependency step is optional.
+	 * Skipped dependencies block normal downstream steps.
+	 * 'always_run' steps wait for dependencies to reach any terminal state.
 	 *
 	 * @param {import('./workflow-loader.js').WorkflowStep} step
 	 * @returns {{ ready: boolean, blocked: boolean }}
