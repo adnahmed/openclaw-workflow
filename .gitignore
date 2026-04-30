@@ -3,3 +3,5 @@ dist/
 .tmp-tests/
 .npm-cache/
 *.tgz
+node_modules/
+dist/
