@@ -248,6 +248,20 @@ function normalizeAndValidate(raw, filePath) {
 				}
 			}
 
+			const validCompleteWhen = new Set([
+				"session",
+				"outputs",
+				"session_then_outputs",
+			]);
+			const completeWhen = step.complete_when || "session";
+			if (!validCompleteWhen.has(completeWhen)) {
+				throw new Error(
+					`Step "${step.id}" in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+						`has invalid complete_when "${completeWhen}". ` +
+						`Expected one of: ${[...validCompleteWhen].join(", ")}.`,
+				);
+			}
+
 			// Normalize with defaults
 			return {
 				id: step.id,
@@ -273,8 +287,9 @@ function normalizeAndValidate(raw, filePath) {
  				optional: step.optional === true,
  				always_run: step.always_run === true,
  				on_block: step.on_block || "block_run",
- 				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],
- 				complete_when: step.complete_when || "session",
+				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],
+				complete_when: completeWhen,
+
 
 			};
 		});

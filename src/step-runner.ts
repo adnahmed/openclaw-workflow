@@ -280,6 +280,83 @@ async function waitForTerminalAfterCancel(
 	return null;
 }
 
+async function settleSessionAfterOutputPass(
+	adapter,
+	spawnResult,
+	step,
+	options,
+	pollIntervalMs,
+) {
+	const cancelGraceMs = options.cancelGraceMs ?? 30000;
+
+	let statusResult = await adapter.getStatus(spawnResult.sessionId, options);
+
+	if (statusResult.status === "done" || statusResult.status === "error") {
+		return {
+			settled: true,
+			statusResult,
+			cancelResult: null,
+			stopped: statusResult,
+			error: null,
+		};
+	}
+
+	if (typeof adapter.cancel !== "function") {
+		return {
+			settled: false,
+			statusResult,
+			cancelResult: null,
+			stopped: null,
+			error:
+				`Output gate passed for step "${step.id}", but the session is still running ` +
+				"and the selected adapter does not support cancellation. Refusing to mark " +
+				"the step successful because that would orphan a live subagent.",
+		};
+	}
+
+	const cancelResult = await adapter
+		.cancel(spawnResult.sessionId, {
+			...options,
+			sessionKey: spawnResult.sessionKey,
+			runId: spawnResult.sessionId,
+			reason: `workflow_output_complete:${step.id}`,
+			cancelGraceMs,
+		})
+		.catch((err) => ({
+			requested: false,
+			confirmed: false,
+			error: err instanceof Error ? err.message : String(err),
+		}));
+
+	const stopped = await waitForTerminalAfterCancel(
+		adapter,
+		spawnResult.sessionId,
+		options,
+		cancelGraceMs,
+		pollIntervalMs,
+	);
+
+	if (stopped) {
+		return {
+			settled: true,
+			statusResult,
+			cancelResult,
+			stopped,
+			error: null,
+		};
+	}
+
+	return {
+		settled: false,
+		statusResult,
+		cancelResult,
+		stopped: null,
+		error:
+			`Output gate passed for step "${step.id}", but cancellation was not confirmed. ` +
+			`Cancel result: ${cancelResult?.error || cancelResult?.method || "unknown"}`,
+	};
+}
+
 /**
  * Request cancellation of a step session using the appropriate adapter.
  *
@@ -451,14 +528,45 @@ export async function runStep(step, runId, api, options) {
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
 
-			if (step.complete_when === "outputs" && step.outputs?.length) {
-				outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+			if (
+				step.complete_when === "outputs" &&
+				step.outputs &&
+				step.outputs.length > 0
+			) {
+				outputCheck = await checkOutputs(
+					step.outputs,
+					baseDir,
+					validators,
+					workflowDir,
+				);
+
 				const mapped = statusFromOutputDecision(outputCheck);
 
-				if (mapped.finalStatus === "ok" || mapped.finalStatus === "blocked") {
+				// Important: complete_when=outputs means "allow early success once
+				// outputs pass"; it must not fail early just because outputs are not
+				// present yet. Non-pass output states should keep polling until the
+				// session finishes or times out.
+				if (mapped.finalStatus === "ok") {
+					const settled = await settleSessionAfterOutputPass(
+						adapter,
+						spawnResult,
+						step,
+						options,
+						pollIntervalMs,
+					);
+
+					if (!settled.settled) {
+						finalStatus = "failed";
+						retryable = false;
+						errorMsg = settled.error;
+						logs = settled.statusResult?.logs || logs;
+						break;
+					}
+
 					finalStatus = mapped.finalStatus;
 					retryable = mapped.retryable;
 					errorMsg = mapped.errorMsg;
+					logs = settled.stopped?.logs || settled.statusResult?.logs || logs;
 					break;
 				}
 
