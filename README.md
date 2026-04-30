@@ -178,6 +178,7 @@ workflow_status({ name: "hello" })
 | `on_block`     | string    | ❌       | `"block_run"` | Behavior when blocked: `"block_run"` (fails pipeline) or `"continue"`. |
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for this specific step. Overrides workflow-level `required_skills`. Injected as instructions into the step prompt and verified against agent config. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
+| `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"` (default, wait for session end), `"outputs"` (complete early if output gates pass), or `"session_then_outputs"` (wait for session end, then check outputs). |
 
 **Example Pattern: Conditional Execution**
 Use `skip_if_empty` to avoid launching expensive agents when there is no data to process:
