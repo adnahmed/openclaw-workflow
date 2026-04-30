@@ -205,6 +205,21 @@ function statusFromOutputDecision(outputCheck) {
 	}
 }
 
+function hasOnlyMissingOutputFiles(outputCheck: OutputCheckResult): boolean {
+	const validations = outputCheck.validations ?? [];
+	return (
+		validations.length > 0 &&
+		validations.every((v) => v.failure_kind === "missing_file")
+	);
+}
+
+function hasHardOutputFailure(outputCheck: OutputCheckResult): boolean {
+	const validations = outputCheck.validations ?? [];
+	return validations.some(
+		(v) => v.failure_kind && v.failure_kind !== "missing_file",
+	);
+}
+
 /**
  * Preamble injected at the start of every step task prompt.
  *
@@ -537,6 +552,7 @@ export async function runStep(step, runId, api, options) {
 		let errorMsg = null;
 		let logs = null;
 		let outputCheck = { passed: false, decision: "unknown", missing_files: [], checked_files: [], validations: [] };
+		let cancelResult: CancelResult | null = null;
 
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
@@ -553,13 +569,8 @@ export async function runStep(step, runId, api, options) {
 					workflowDir,
 				);
 
-				const mapped = statusFromOutputDecision(outputCheck);
-
-				// Important: complete_when=outputs means "allow early success once
-				// outputs pass"; it must not fail early just because outputs are not
-				// present yet. Non-pass output states should keep polling until the
-				// session finishes or times out.
-				if (mapped.finalStatus === "ok") {
+				if (outputCheck.passed) {
+					const mapped = statusFromOutputDecision(outputCheck);
 					const settled = await settleSessionAfterOutputPass(
 						adapter,
 						spawnResult,
@@ -583,20 +594,23 @@ export async function runStep(step, runId, api, options) {
 					break;
 				}
 
-				const transientOutputFailure =
-					outputCheck.validations?.length &&
-					outputCheck.validations.every(v =>
-						v.failure_kind === "missing_file" || v.failure_kind === "parse"
-					);
-
-				if (transientOutputFailure && Date.now() < deadline) {
-					continue;
+				if (outputCheck.decision === "blocked" || outputCheck.decision === "retry") {
+					const mapped = statusFromOutputDecision(outputCheck);
+					finalStatus = mapped.finalStatus;
+					retryable = mapped.retryable;
+					errorMsg = mapped.errorMsg;
+					break;
 				}
 
-				finalStatus = mapped.finalStatus;
-				retryable = mapped.retryable;
-				errorMsg = mapped.errorMsg;
-				break;
+				if (hasHardOutputFailure(outputCheck) && !hasOnlyMissingOutputFiles(outputCheck)) {
+					const mapped = statusFromOutputDecision(outputCheck);
+					finalStatus = mapped.finalStatus;
+					retryable = mapped.retryable;
+					errorMsg = mapped.errorMsg;
+					break;
+				}
+
+				// Missing output files are not terminal while the session is still within timeout.
 			}
 
 			const statusResult = await adapter.getStatus(
@@ -662,7 +676,7 @@ export async function runStep(step, runId, api, options) {
 		}
 
 		if (finalStatus === null) {
-			const cancelResult: CancelResult | null = await (adapter.cancel?.(spawnResult.sessionId, {
+			cancelResult = await (adapter.cancel?.(spawnResult.sessionId, {
 				...options,
 				sessionKey: spawnResult.sessionKey,
 				runId: spawnResult.sessionId,
@@ -684,7 +698,7 @@ export async function runStep(step, runId, api, options) {
 			);
 
 			finalStatus = "failed";
-			const cancellationConfirmed = Boolean(stopped);
+			const cancellationConfirmed = Boolean(cancelResult?.confirmed || stopped);
 			const cancellationRequested = Boolean(cancelResult?.requested);
 			retryable = cancellationRequested && cancellationConfirmed;
 			errorMsg = stopped
@@ -693,9 +707,6 @@ export async function runStep(step, runId, api, options) {
 
 			logs = stopped?.logs || logs;
 		} else if (finalStatus === "ok") {
-			// The final status is already determined by statusFromOutputDecision in the polling loop.
-			// We keep this block for compatibility or if finalStatus was set to "ok" elsewhere,
-			// but the logic is now centralized.
 			const mapped = statusFromOutputDecision(outputCheck);
 			finalStatus = mapped.finalStatus;
 			retryable = mapped.retryable;
@@ -710,7 +721,9 @@ export async function runStep(step, runId, api, options) {
 			error: errorMsg,
 			logs: logs,
 			duration_ms: Date.now() - startTime,
+			cancel_result: cancelResult,
 		};
+
 	} catch (err) {
 		return {
 			status: "failed",
@@ -878,6 +891,19 @@ class RuntimeSubagentAdapter implements SessionAdapter {
 			});
 
 			const status = result?.status || result?.state;
+
+			if (
+				status === "cancelled" ||
+				status === "canceled" ||
+				status === "aborted" ||
+				status === "stopped"
+			) {
+				return {
+					status: "error",
+					error: result?.error || result?.message || "Subagent run was cancelled",
+					logs: result?.logs || result?.summary || null,
+				};
+			}
 
 			if (
 				status === "ok" ||
@@ -1557,36 +1583,41 @@ export function createStepRunner(adapter) {
 			let retryable = false;
 			let errorMsg = null;
 			let logs = null;
-		let outputCheck = { passed: false, decision: "unknown", missing_files: [], checked_files: [], validations: [] };
+			let outputCheck = { passed: false, decision: "unknown", missing_files: [], checked_files: [], validations: [] };
+			let cancelResult: CancelResult | null = null;
 
 			while (Date.now() < deadline) {
+
 				await sleep(pollIntervalMs);
 
 				if (step.complete_when === "outputs" && step.outputs?.length) {
 					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
-					const mapped = statusFromOutputDecision(outputCheck);
 
-					if (mapped.finalStatus === "ok" || mapped.finalStatus === "blocked") {
+					if (outputCheck.passed) {
+						const mapped = statusFromOutputDecision(outputCheck);
 						finalStatus = mapped.finalStatus;
 						retryable = mapped.retryable;
 						errorMsg = mapped.errorMsg;
 						break;
 					}
 
-					const transientOutputFailure =
-						outputCheck.validations?.length &&
-						outputCheck.validations.every(v =>
-							v.failure_kind === "missing_file" || v.failure_kind === "parse"
-						);
-
-					if (transientOutputFailure && Date.now() < deadline) {
-						continue;
+					if (outputCheck.decision === "blocked" || outputCheck.decision === "retry") {
+						const mapped = statusFromOutputDecision(outputCheck);
+						finalStatus = mapped.finalStatus;
+						retryable = mapped.retryable;
+						errorMsg = mapped.errorMsg;
+						break;
 					}
 
-					finalStatus = mapped.finalStatus;
-					retryable = mapped.retryable;
-					errorMsg = mapped.errorMsg;
-					break;
+					if (hasHardOutputFailure(outputCheck) && !hasOnlyMissingOutputFiles(outputCheck)) {
+						const mapped = statusFromOutputDecision(outputCheck);
+						finalStatus = mapped.finalStatus;
+						retryable = mapped.retryable;
+						errorMsg = mapped.errorMsg;
+						break;
+					}
+
+					// Missing output files are not terminal while the session is still within timeout.
 				}
 
 				const statusResult = await adapter.getStatus(
