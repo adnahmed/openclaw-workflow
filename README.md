@@ -174,6 +174,7 @@ workflow_status({ name: "hello" })
 | `retry`        | number    | ❌       | `0`     | Number of retry attempts after first failure. `retry: 2` = up to 3 total attempts. |
 | `retry_delay`  | number    | ❌       | `30`    | Seconds to wait between retry attempts. |
 | `retry_on`     | string[]  | ❌       | `[]`    | Specific failure kinds to retry on (e.g., `["missing_file", "timeout"]`). If empty, only retries when `retryable` is true. |
+| `retry_except`  | string[]  | ❌       | `[]`    | Specific failure kinds that prevent retry, even if `retry > 0` or `retry_on` matches. |
 | `optional`     | boolean   | ❌       | `false` | If `true`, step failure doesn't fail the pipeline or block dependent steps. |
 | `always_run`   | boolean   | ❌       | `false` | If `true`, step runs regardless of dependency failure. |
 | `on_block`     | string    | ❌       | `"block_run"` | Behavior when blocked: `"block_run"` (fails pipeline) or `"continue"`. |
@@ -181,6 +182,9 @@ workflow_status({ name: "hello" })
 | `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by this step (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 | `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"` (default, wait for session end), `"outputs"` (complete early if output gates pass), or `"session_then_outputs"` (wait for session end, then check outputs). |
+
+**Retry Policy Notes:**
+`retry_on` and `retry_except` use **Failure Kinds**. Available kinds: `timeout`, `timeout_stop_confirmed`, `timeout_stop_unconfirmed`, `missing_file`, `schema`, `fail_when`, `parse`, `other`.
 
 **Example Pattern: Conditional Execution**
 Use `skip_if_empty` to avoid launching expensive agents when there is no data to process:
