@@ -123,9 +123,16 @@ export type WorkflowDefinition = {
   concurrency: number;
 };
 
-/**
- * A single step in a workflow.
- */
+export type StepFailureKind =
+  | "timeout"
+  | "timeout_stop_confirmed"
+  | "timeout_stop_unconfirmed"
+  | "missing_file"
+  | "schema"
+  | "fail_when"
+  | "parse"
+  | "other";
+
 export type WorkflowStep = {
   id: string;
   name: string;
@@ -143,6 +150,7 @@ export type WorkflowStep = {
   retry: number;
   retry_delay: number;
   retry_on?: string[];
+  retry_except?: string[];
   optional: boolean;
   always_run?: boolean;
    complete_when?: "outputs" | "session";
@@ -174,7 +182,7 @@ export type OutputValidationResult = {
   validator?: string;
   decision: ValidationDecision;
   errors: string[];
-  failure_kind?: "missing_file" | "schema" | "fail_when" | "parse" | "other";
+  failure_kind?: StepFailureKind;
   doc?: unknown;
 };
 
@@ -195,6 +203,7 @@ export type OutputCheckResult = {
 export type StepRunResult = {
   status: "ok" | "failed" | "blocked";
   retryable?: boolean;
+  failure_kind?: StepFailureKind | string | null;
   session_key: string | null;
   output_check: OutputCheckResult;
   error: string | null;

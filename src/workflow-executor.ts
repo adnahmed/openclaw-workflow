@@ -572,30 +572,57 @@ export async function executeWorkflow(
 				} else {
 					// Failure path — check for retry
 					const maxAttempts = (step.retry || 0) + 1;
-					const cancellationUnconfirmed =
-						(typeof result.error === "string" &&
-							result.error.includes("cancellation was not confirmed")) ||
-						Boolean(
-							state.steps[step.id]?.cancel_requested_at &&
-								!state.steps[step.id]?.cancel_confirmed_at,
-						);
+					function retryKindMatches(policyKind: string, actualKind: string): boolean {
+						if (policyKind === actualKind) return true;
+						if (policyKind === "timeout" && actualKind.startsWith("timeout")) return true;
+						return false;
+					}
 
-					const failureKinds =
+					const outputFailureKinds =
 						result.output_check?.validations
 							?.map((v) => v.failure_kind)
-							.filter(Boolean) ?? [];
+							.filter((kind): kind is string => Boolean(kind)) ?? [];
+
+					const resultFailureKind =
+						typeof result.failure_kind === "string" ? result.failure_kind : null;
+
+					const failureKinds = [
+						...(resultFailureKind ? [resultFailureKind] : []),
+						...outputFailureKinds,
+					];
+
 					const isTimeout =
-						typeof result.error === "string" &&
-						result.error.includes("timed out");
+						failureKinds.some((kind) => kind.startsWith("timeout")) ||
+						(typeof result.error === "string" && result.error.includes("timed out"));
+
+					const stopUnconfirmed =
+						failureKinds.includes("timeout_stop_unconfirmed") ||
+						(typeof result.error === "string" &&
+							(result.error.includes("cancellation was not confirmed") ||
+								result.error.includes("subagent stop after timeout was not confirmed")));
+
+					const retryExcept = step.retry_except ?? [];
+					const retryOn = step.retry_on ?? [];
+
+					const excludedByPolicy = failureKinds.some((kind) =>
+						retryExcept.some((excluded) => retryKindMatches(excluded, kind)),
+					);
+
+					const includedByPolicy = failureKinds.some((kind) =>
+						retryOn.some((included) => retryKindMatches(included, kind)),
+					);
+
 					const retryableByPolicy =
-						result.retryable === true ||
-						failureKinds.some((kind) => step.retry_on?.includes(kind)) ||
-						(step.retry_on?.includes("timeout") && isTimeout);
+						!excludedByPolicy &&
+						(
+							result.retryable === true ||
+							includedByPolicy ||
+							(retryOn.includes("timeout") && isTimeout)
+						);
 
 					const shouldRetry =
 						result.status === "failed" &&
 						attempts < maxAttempts &&
-						!cancellationUnconfirmed &&
 						retryableByPolicy;
 
 					if (shouldRetry) {
@@ -619,6 +646,13 @@ export async function executeWorkflow(
 									error: result.error,
 									logs: result.logs,
 									attempts,
+									cancel_requested_at: result.cancel_result?.requested ? completedAt : null,
+									cancel_confirmed_at: result.cancel_result?.confirmed ? completedAt : null,
+									cancel_method: result.cancel_result?.method ?? null,
+									cancel_error: result.cancel_result?.error ?? null,
+									cancellation_reason: result.cancel_result?.requested
+										? `workflow_step_timeout:${step.id}`
+										: null,
 								},
 								runsDir,
 							),
@@ -640,6 +674,13 @@ export async function executeWorkflow(
 									error: result.error,
 									logs: result.logs,
 									attempts,
+									cancel_requested_at: result.cancel_result?.requested ? completedAt : null,
+									cancel_confirmed_at: result.cancel_result?.confirmed ? completedAt : null,
+									cancel_method: result.cancel_result?.method ?? null,
+									cancel_error: result.cancel_result?.error ?? null,
+									cancellation_reason: result.cancel_result?.requested
+										? `workflow_step_timeout:${step.id}`
+										: null,
 								},
 								runsDir,
 							),
@@ -859,6 +900,7 @@ export async function executeWorkflow(
 											retry: step.retry,
 											retry_delay: step.retry_delay,
 											retry_on: step.retry_on,
+											retry_except: step.retry_except,
 											optional: step.optional,
 											outputs: step.outputs,
 											depends_on: [],

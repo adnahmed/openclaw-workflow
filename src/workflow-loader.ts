@@ -284,7 +284,9 @@ function normalizeAndValidate(raw, filePath) {
 				retry_delay:
 					typeof step.retry_delay === "number" ? step.retry_delay : 30,
 				retry_on: Array.isArray(step.retry_on) ? step.retry_on : [],
- 				optional: step.optional === true,
+				retry_except: Array.isArray(step.retry_except) ? step.retry_except : [],
+				optional: step.optional === true,
+
  				always_run: step.always_run === true,
  				on_block: step.on_block || "block_run",
  				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],

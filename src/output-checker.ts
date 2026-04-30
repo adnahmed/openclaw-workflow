@@ -57,7 +57,7 @@ export async function checkOutputs(
   if (!expectedOutputs || expectedOutputs.length === 0) {
     return { 
       passed: true, 
-      decision: 'pass', 
+      decision: 'pass' as ValidationDecision, 
       missing_files: [], 
       checked_files: [], 
       validations: [] 
@@ -76,7 +76,7 @@ export async function checkOutputs(
 
   return {
     passed: decision === 'pass',
-    decision,
+    decision: decision as ValidationDecision,
     missing_files: validations.filter(v => !v.exists).map(v => v.path),
     checked_files: validations.map(v => v.path),
     validations,
@@ -90,10 +90,11 @@ export async function checkOutputs(
  * @param {OutputValidationResult[]} results
  * @returns {ValidationDecision}
  */
-function mergeOutputDecisions(results) {
-  if (results.some(r => r.decision === 'fail')) return 'fail';
-  if (results.some(r => r.decision === 'blocked')) return 'blocked';
-  if (results.some(r => r.decision === 'retry')) return 'retry';
-  if (results.some(r => r.decision === 'unknown')) return 'unknown';
-  return 'pass';
-}
+function mergeOutputDecisions(results): ValidationDecision {
+   if (results.some(r => r.decision === 'fail')) return 'fail';
+   if (results.some(r => r.decision === 'blocked')) return 'blocked';
+   if (results.some(r => r.decision === 'retry')) return 'retry';
+   if (results.some(r => r.decision === 'unknown')) return 'unknown';
+   return 'pass';
+ }
+

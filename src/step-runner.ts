@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
 import { getLocalISOString } from "./workflow-state.js";
-import { OutputCheckResult, StepRunResult, SpawnOptions, CancelResult, MockAdapterOptions, SessionAdapter } from "./types.js";
+import { OutputCheckResult, StepRunResult, SpawnOptions, CancelResult, MockAdapterOptions, SessionAdapter, StepFailureKind } from "./types.js";
 
 const execAsync = promisify(exec);
 let cachedOpenClawPath = null;
@@ -179,21 +179,18 @@ function statusFromOutputDecision(outputCheck) {
 				retryable: false,
 				errorMsg: null,
 			};
-
 		case "retry":
 			return {
 				finalStatus: "failed",
 				retryable: true,
 				errorMsg: "Output validator requested retry",
 			};
-
 		case "blocked":
 			return {
 				finalStatus: "blocked",
 				retryable: false,
 				errorMsg: "Output validator blocked step",
 			};
-
 		case "fail":
 		case "unknown":
 		default:
@@ -205,7 +202,16 @@ function statusFromOutputDecision(outputCheck) {
 	}
 }
 
+function outputFailureKinds(outputCheck: OutputCheckResult): string[] {
+  return (
+    outputCheck.validations
+      ?.map((v) => v.failure_kind)
+      .filter((kind): kind is StepFailureKind => Boolean(kind)) ?? []
+  );
+}
+
 function hasOnlyMissingOutputFiles(outputCheck: OutputCheckResult): boolean {
+
 	const validations = outputCheck.validations ?? [];
 	return (
 		validations.length > 0 &&
@@ -549,10 +555,18 @@ export async function runStep(step, runId, api, options) {
 		const deadline = Date.now() + timeoutMs;
 		let finalStatus = null;
 		let retryable = false;
+		let failureKind: string | null = null;
 		let errorMsg = null;
 		let logs = null;
-		let outputCheck = { passed: false, decision: "unknown", missing_files: [], checked_files: [], validations: [] };
 		let cancelResult: CancelResult | null = null;
+		let outputCheck: OutputCheckResult = {
+			passed: false,
+			decision: "unknown" as any,
+			missing_files: [],
+			checked_files: [],
+			validations: []
+		};
+
 
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
@@ -571,26 +585,9 @@ export async function runStep(step, runId, api, options) {
 
 				if (outputCheck.passed) {
 					const mapped = statusFromOutputDecision(outputCheck);
-					const settled = await settleSessionAfterOutputPass(
-						adapter,
-						spawnResult,
-						step,
-						options,
-						pollIntervalMs,
-					);
-
-					if (!settled.settled) {
-						finalStatus = "failed";
-						retryable = false;
-						errorMsg = settled.error;
-						logs = settled.statusResult?.logs || logs;
-						break;
-					}
-
 					finalStatus = mapped.finalStatus;
 					retryable = mapped.retryable;
 					errorMsg = mapped.errorMsg;
-					logs = settled.stopped?.logs || settled.statusResult?.logs || logs;
 					break;
 				}
 
@@ -599,18 +596,20 @@ export async function runStep(step, runId, api, options) {
 					finalStatus = mapped.finalStatus;
 					retryable = mapped.retryable;
 					errorMsg = mapped.errorMsg;
+					failureKind = outputFailureKinds(outputCheck)[0] ?? null;
 					break;
 				}
 
-				if (hasHardOutputFailure(outputCheck) && !hasOnlyMissingOutputFiles(outputCheck)) {
+				if (hasHardOutputFailure(outputCheck)) {
 					const mapped = statusFromOutputDecision(outputCheck);
 					finalStatus = mapped.finalStatus;
 					retryable = mapped.retryable;
 					errorMsg = mapped.errorMsg;
+					failureKind = outputFailureKinds(outputCheck)[0] ?? "other";
 					break;
 				}
 
-				// Missing output files are not terminal while the session is still within timeout.
+				// Missing output files are not terminal while the step is still running.
 			}
 
 			const statusResult = await adapter.getStatus(
@@ -698,14 +697,23 @@ export async function runStep(step, runId, api, options) {
 			);
 
 			finalStatus = "failed";
-			const cancellationConfirmed = Boolean(cancelResult?.confirmed || stopped);
-			const cancellationRequested = Boolean(cancelResult?.requested);
-			retryable = cancellationRequested && cancellationConfirmed;
-			errorMsg = stopped
-				? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
-				: `Step timed out after ${step.timeout}s; cancellation was not confirmed. Do not retry automatically. Cancel result: ${cancelResult?.error || "unknown"}`;
 
-			logs = stopped?.logs || logs;
+			const stopConfirmed = Boolean(cancelResult?.confirmed || stopped);
+			const stopRequested = Boolean(cancelResult?.requested);
+
+			failureKind = stopConfirmed
+				? "timeout_stop_confirmed"
+				: "timeout_stop_unconfirmed";
+
+			// Default retryable: timeout failures are retryable when the workflow step has attempts left.
+			// The executor will still enforce step.retry and retry_except.
+			retryable = true;
+
+			errorMsg = stopConfirmed
+				? `Step timed out after ${step.timeout}s; subagent stop after timeout was confirmed via ${cancelResult?.method || "unknown"}`
+				: `Step timed out after ${step.timeout}s; subagent stop after timeout was not confirmed. Previous subagent may still be running. Stop result: ${stopRequested ? "requested" : "not_requested"}`;
+
+			logs = stopped?.logs || null;
 		} else if (finalStatus === "ok") {
 			const mapped = statusFromOutputDecision(outputCheck);
 			finalStatus = mapped.finalStatus;
@@ -716,6 +724,7 @@ export async function runStep(step, runId, api, options) {
 		return {
 			status: finalStatus,
 			retryable,
+			failure_kind: failureKind,
 			session_key: sessionKey,
 			output_check: outputCheck,
 			error: errorMsg,
@@ -1583,7 +1592,7 @@ export function createStepRunner(adapter) {
 			let retryable = false;
 			let errorMsg = null;
 			let logs = null;
-			let outputCheck = { passed: false, decision: "unknown", missing_files: [], checked_files: [], validations: [] };
+			let outputCheck: OutputCheckResult = { passed: false, decision: "unknown" as any, missing_files: [], checked_files: [], validations: [] };
 			let cancelResult: CancelResult | null = null;
 
 			while (Date.now() < deadline) {
