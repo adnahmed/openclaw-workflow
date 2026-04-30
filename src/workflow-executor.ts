@@ -603,6 +603,12 @@ export async function executeWorkflow(
 							(result.error.includes("cancellation was not confirmed") ||
 								result.error.includes("subagent stop after timeout was not confirmed")));
 
+					if (isTimeout && failureKinds.length === 0) {
+						failureKinds.push(
+							stopUnconfirmed ? "timeout_stop_unconfirmed" : "timeout",
+						);
+					}
+
 					const retryExcept = step.retry_except ?? [];
 					const retryOn = step.retry_on ?? [];
 

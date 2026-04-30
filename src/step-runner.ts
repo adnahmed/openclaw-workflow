@@ -171,6 +171,16 @@ async function runOpenClaw(args: string[], options: { timeout?: number } = {}) {
 	});
 }
 
+export function emptyOutputCheck(): OutputCheckResult {
+	return {
+		passed: false,
+		decision: "unknown",
+		missing_files: [],
+		checked_files: [],
+		validations: [],
+	};
+}
+
 function statusFromOutputDecision(outputCheck) {
 	switch (outputCheck.decision) {
 		case "pass":
@@ -461,7 +471,7 @@ export async function runStep(step, runId, api, options) {
 		return {
 			status: "failed",
 			session_key: null,
-			output_check: { passed: false, missing_files: [], checked_files: [] },
+			output_check: emptyOutputCheck(),
 			error: "Step was cancelled",
 			logs: null,
 			duration_ms: 0,
@@ -541,7 +551,7 @@ export async function runStep(step, runId, api, options) {
 					status: "failed",
 					retryable: false,
 					session_key: spawnResult.sessionKey,
-					output_check: { passed: false, missing_files: [], checked_files: [] },
+					output_check: emptyOutputCheck(),
 					error: `Spawned session but failed to persist cancellation metadata: ${
 						err instanceof Error ? err.message : String(err)
 					}`,
@@ -737,7 +747,7 @@ export async function runStep(step, runId, api, options) {
 		return {
 			status: "failed",
 			session_key: sessionKey,
-			output_check: { passed: false, missing_files: [], checked_files: [] },
+			output_check: emptyOutputCheck(),
 			error: err.message,
 			logs: null,
 			duration_ms: Date.now() - startTime,
@@ -1567,7 +1577,7 @@ export function createStepRunner(adapter) {
 			return {
 				status: "failed",
 				session_key: null,
-				output_check: { passed: false, missing_files: [], checked_files: [] },
+				output_check: emptyOutputCheck(),
 				error: "Step was cancelled",
 				duration_ms: 0,
 			};
@@ -1760,7 +1770,7 @@ export function createStepRunner(adapter) {
 			return {
 				status: "failed",
 				session_key: sessionKey,
-				output_check: { passed: false, missing_files: [], checked_files: [] },
+				output_check: emptyOutputCheck(),
 				error: err.message,
 				duration_ms: Date.now() - startTime,
 			};
