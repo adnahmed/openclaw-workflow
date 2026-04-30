@@ -1724,12 +1724,18 @@ export function createStepRunner(adapter) {
 				);
 
 				finalStatus = "failed";
-				const cancellationConfirmed = Boolean(stopped);
-				const cancellationRequested = Boolean(cancelResult?.requested);
-				retryable = cancellationRequested && cancellationConfirmed;
-				errorMsg = stopped
-					? `Step timed out after ${step.timeout}s; cancellation requested via ${cancelResult?.method || "unknown"}`
-					: `Step timed out after ${step.timeout}s; cancellation was not confirmed. Do not retry automatically. Cancel result: ${cancelResult?.error || "unknown"}`;
+				const stopConfirmed = Boolean(cancelResult?.confirmed || stopped);
+				const stopRequested = Boolean(cancelResult?.requested);
+
+				failureKind = stopConfirmed
+					? "timeout_stop_confirmed"
+					: "timeout_stop_unconfirmed";
+
+				retryable = true;
+
+				errorMsg = stopConfirmed
+					? `Step timed out after ${step.timeout}s; subagent stop after timeout was confirmed via ${cancelResult?.method || "unknown"}`
+					: `Step timed out after ${step.timeout}s; subagent stop after timeout was not confirmed. Previous subagent may still be running. Stop result: ${stopRequested ? "requested" : "not_requested"}`;
 
 				logs = stopped?.logs || logs;
 			} else if (finalStatus === "ok") {
@@ -1742,11 +1748,13 @@ export function createStepRunner(adapter) {
 			return {
 				status: finalStatus,
 				retryable,
+				failure_kind: failureKind,
 				session_key: sessionKey,
 				output_check: outputCheck,
 				error: errorMsg,
-				logs: logs,
+				logs,
 				duration_ms: Date.now() - startTime,
+				cancel_result: cancelResult,
 			};
 		} catch (err) {
 			return {
