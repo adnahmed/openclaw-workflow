@@ -596,7 +596,7 @@ export async function executeWorkflow(
 					const stopUnconfirmed =
 						failureKinds.includes("timeout_stop_unconfirmed") ||
 						(typeof result.error === "string" &&
-							(result.error.includes("cancellation was not confirmed") ||
+							(result.error.includes("subagent stop after output completion was not confirmed") ||
 								result.error.includes("subagent stop after timeout was not confirmed")));
 
 					if (isTimeout && failureKinds.length === 0) {

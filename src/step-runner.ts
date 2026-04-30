@@ -384,7 +384,7 @@ async function settleSessionAfterOutputPass(
 		cancelResult,
 		stopped: null,
 		error:
-			`Output gate passed for step "${step.id}", but cancellation was not confirmed. ` +
+			`Output gate passed for step "${step.id}", but subagent stop after output completion was not confirmed. ` +
 			`Cancel result: ${cancelResult?.error || cancelResult?.method || "unknown"}`,
 	};
 }
