@@ -65,14 +65,6 @@ import {
 } from "./workflow-state.js";
 import { RunState, StepState, WorkflowStep } from "./types.js";
 
-async function logSkipDebug(msg: string) {
-	try {
-		await appendFile(
-			join(process.cwd(), "skip-debug.log"),
-			`${new Date().toISOString()} [executor] ${msg}\n`,
-		);
-	} catch {}
-}
 
 /** Scheduler tick interval in milliseconds. Lower = more responsive but more CPU. */
 const TICK_INTERVAL_MS = 500;
@@ -969,20 +961,11 @@ export async function executeWorkflow(
 						await notify(
 							`🔍 Checking skip_if_empty for ${step.id}: ${checkPath}`,
 						);
-						await logSkipDebug(
-							`Checking skip_if_empty for ${step.id}. Raw: ${step.skip_if_empty}, Resolved: ${checkPath}`,
-						);
 
 						const list = await resolvePathToList(checkPath, baseDir);
 						await notify(`📊 List length for ${step.id}: ${list.length}`);
-						await logSkipDebug(
-							`Resolved list for ${step.id}. Length: ${list.length}, Value: ${JSON.stringify(list)}`,
-						);
 
 						if (list.length === 0) {
-							await logSkipDebug(
-								`Decision: SKIP ${step.id} (list length is 0)`,
-							);
 							await mutateState((current) =>
 								updateStepState(
 									current,
@@ -998,9 +981,6 @@ export async function executeWorkflow(
 							await notify(`⏩ Skipped ${step.name} (input data empty)`);
 							continue;
 						}
-						await logSkipDebug(
-							`Decision: PROCEED ${step.id} (list length is ${list.length})`,
-						);
 					}
 					await launchStep(step);
 				}

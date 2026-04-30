@@ -3,11 +3,6 @@ import { join, isAbsolute as pathIsAbsolute } from 'node:path';
 import yaml from 'js-yaml';
 import { substituteVars } from './variable-substitution.js';
 
-async function logSkipDebug(msg: string) {
-  try {
-    await appendFile(join(process.cwd(), 'skip-debug.log'), `${new Date().toISOString()} [list-resolver] ${msg}\n`);
-  } catch {}
-}
 
 
 /**
@@ -92,9 +87,7 @@ export function validateLoopItems(step: any, list: any[]) {
 export async function resolvePathToList(filePath, baseDir, parser = 'auto', strict = false) {
   const fullPath = pathIsAbsolute(filePath) ? filePath : join(baseDir, filePath);
   try {
-    await logSkipDebug(`Resolving path: ${fullPath} (parser: ${parser})`);
     const content = await readFile(fullPath, 'utf8');
-    await logSkipDebug(`Raw content length: ${content.length} | Content: ${JSON.stringify(content)}`);
     
     let effectiveParser = parser;
     if (parser === 'auto') {
@@ -104,13 +97,10 @@ export async function resolvePathToList(filePath, baseDir, parser = 'auto', stri
       else if (fullPath.endsWith('.csv')) effectiveParser = 'csv';
       else if (fullPath.endsWith('.txt')) effectiveParser = 'newline';
     }
-    await logSkipDebug(`Effective parser: ${effectiveParser}`);
 
     const result = parseValue(content, effectiveParser);
-    await logSkipDebug(`Parse result length: ${result.length} | Result: ${JSON.stringify(result)}`);
     return result;
   } catch (e) {
-    await logSkipDebug(`Error resolving path ${fullPath}: ${e.message}`);
     if (strict) throw e;
     return [];
   }
