@@ -4,7 +4,6 @@ import yaml from 'js-yaml';
 import { substituteVars } from './variable-substitution.js';
 
 
-
 /**
  * Validates each item in a resolved list against an optional schema.
  * 
@@ -128,8 +127,9 @@ export async function resolveList(token, ctx, baseDir, parser = 'auto') {
       throw new Error(`for_each path did not resolve to a string: ${token}`);
     }
 
-    return resolvePathToList(substitutedPath, baseDir, parser, true);
-
+    // Only use strict if the token actually contained a variable
+    const isTemplate = token.includes('{');
+    return resolvePathToList(substitutedPath, baseDir, parser, isTemplate);
   }
 
   // Whole-token case:
@@ -155,10 +155,21 @@ export async function resolveList(token, ctx, baseDir, parser = 'auto') {
   }
 
   if (typeof current === 'string') {
-    return resolvePathToList(current, baseDir, parser);
+    const list = await resolvePathToList(current, baseDir, parser);
+    if (list.length > 0) return list;
+    
+    const effectiveParser = parser === 'auto' ? 'csv' : parser;
+    return parseValue(current, effectiveParser);
   }
 
-  return resolvePathToList(`${key}.json`, baseDir, parser);
+  const extensions: Record<string, string> = {
+    json: '.json',
+    csv: '.csv',
+    newline: '.txt',
+    auto: '.json',
+  };
+  const ext = extensions[parser] || '.json';
+  return resolvePathToList(`${key}${ext}`, baseDir, parser);
 }
 
 /**

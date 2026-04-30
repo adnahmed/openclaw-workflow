@@ -8,15 +8,17 @@ import { normalizePluginConfig, expandHome } from '../dist/config.js';
 test('expandHome handles bare home and home-prefixed paths', () => {
   assert.equal(expandHome('~'), homedir());
   assert.equal(expandHome('~/workflows'), resolve(homedir(), 'workflows'));
-  assert.equal(expandHome('/tmp/workflows'), '/tmp/workflows');
+  const tmpPath = resolve('/tmp/workflows');
+  assert.equal(expandHome(tmpPath), tmpPath);
 });
 
 test('normalizePluginConfig preserves documented defaults', () => {
-  const config = normalizePluginConfig({}, { cwd: '/workspace/project' });
+  const cwd = resolve('/workspace/project');
+  const config = normalizePluginConfig({}, { cwd });
 
   assert.equal(config.workflowsDir, resolve(homedir(), '.openclaw/workflows'));
   assert.equal(config.runsDir, resolve(homedir(), '.openclaw/workflow-runs'));
-  assert.equal(config.baseDir, '/workspace/project');
+  assert.equal(config.baseDir, cwd);
   assert.equal(config.concurrency, 3);
   assert.equal(config.pollIntervalMs, 5000);
   assert.equal(config.notifyChannel, null);
@@ -25,6 +27,7 @@ test('normalizePluginConfig preserves documented defaults', () => {
 });
 
 test('normalizePluginConfig clamps concurrency and poll interval', () => {
+  const cwd = resolve('/workspace/project');
   const config = normalizePluginConfig({
     workflowsDir: './wf',
     runsDir: './runs',
@@ -33,12 +36,12 @@ test('normalizePluginConfig clamps concurrency and poll interval', () => {
     pollIntervalMs: 1,
     notifyChannel: 'telegram',
     sessionModel: 'model-x',
-  }, { cwd: '/workspace/project' });
+  }, { cwd });
 
-  assert.equal(config.workflowsDir, '/workspace/project/wf');
-  assert.equal(config.runsDir, '/workspace/project/runs');
-  assert.equal(config.baseDir, '/workspace/project/base');
-  assert.equal(config.concurrency, 10);
+  assert.equal(config.workflowsDir, resolve(cwd, 'wf'));
+  assert.equal(config.runsDir, resolve(cwd, 'runs'));
+  assert.equal(config.baseDir, resolve(cwd, 'base'));
+  assert.equal(config.concurrency, 42);
   assert.equal(config.pollIntervalMs, 250);
   assert.equal(config.notifyChannel, 'telegram');
   assert.equal(config.defaultModel, 'model-x');

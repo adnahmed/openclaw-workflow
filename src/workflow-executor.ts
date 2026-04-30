@@ -300,10 +300,11 @@ export async function executeWorkflow(
 	 */
 	function evalDependencies(step) {
 		if (step.always_run) {
-			const allDepsTerminal = step.depends_on.every((depId) => {
+			const allDepsTerminal = (step.depends_on || []).every((depId) => {
 				const depState = state.steps[depId];
 				return depState && isTerminalStatus(depState.status);
 			});
+
 
 			return {
 				ready: allDepsTerminal,
@@ -311,9 +312,10 @@ export async function executeWorkflow(
 			};
 		}
 
-		for (const depId of step.depends_on) {
+		for (const depId of (step.depends_on || [])) {
 			const depState = state.steps[depId];
 			if (!depState) continue;
+
 
 			const depDef = stepMap.get(depId);
 			const depOptional = depDef?.optional === true;

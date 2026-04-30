@@ -104,8 +104,8 @@ export function generateRunId(workflowName) {
   // UTC compact datetime: YYYYMMDDTHHmmss (no colons — safe for filenames)
   const now = new Date();
   const ts = getLocalISOString()
-    .replace(/[-:]/g, '')   // remove dashes and colons
-    .replace(/\.\d+Z$/, ''); // remove milliseconds and Z → e.g. 20260309T082000
+    .replace(/[-:]/g, '')
+    .split('.')[0]; // remove milliseconds → e.g. 20260309T082000
 
   return `${slug}-${ts}`;
 }

@@ -63,7 +63,12 @@
       },
       "sessionAdapter": {
         "type": "string",
-        "enum": ["auto", "runtime-subagent", "legacy-api", "cli"],
+        "enum": [
+          "auto",
+          "runtime-subagent",
+          "legacy-api",
+          "cli"
+        ],
         "description": "Session adapter to use. For headless browser/application workflows, use runtime-subagent."
       },
       "cliTimeoutMs": {
