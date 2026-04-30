@@ -49,7 +49,7 @@ import {
 	resolvePathToList,
 	validateLoopItems,
 } from "./list-resolver.js";
-import { runStep } from "./step-runner.js";
+import { runStep, emptyOutputCheck } from "./step-runner.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import type { RunState, StepState, WorkflowStep } from "./types.js";
 import {
@@ -507,11 +507,7 @@ export async function executeWorkflow(
 					result = {
 						status: "failed",
 						session_key: null,
-						output_check: {
-							passed: false,
-							missing_files: [],
-							checked_files: [],
-						},
+						output_check: emptyOutputCheck(),
 						error: err.message,
 						duration_ms: 0,
 					};
