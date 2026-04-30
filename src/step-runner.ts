@@ -458,15 +458,27 @@ export async function runStep(step, runId, api, options) {
 			...(workflow?.required_skills ?? []),
 			...(step.required_skills ?? []),
 		];
-		const uniqueRequiredSkills = [...new Set(combinedSkills)];
+ 		const uniqueRequiredSkills = [...new Set(combinedSkills)];
+ 
+ 		const combinedMcpServers = [
+ 			...(workflow?.required_mcp_servers ?? []),
+ 			...(step.required_mcp_servers ?? []),
+ 		];
+ 		const uniqueRequiredMcpServers = [...new Set(combinedMcpServers)];
+ 
+ 		// Only OpenClaw skills are checked against the agent skill allowlist.
+ 		// MCP server names such as MCP_DOCKER are validated/used by the MCP layer,
+ 		// not by the OpenClaw skill registry.
+ 		assertSkillsNotConfigBlocked(api.config, uniqueRequiredSkills);
+ 		assertMcpServersConfigured(api.config, uniqueRequiredMcpServers);
 
-		assertSkillsNotConfigBlocked(api.config, uniqueRequiredSkills);
-
-		const skillContract = uniqueRequiredSkills.length
-			? `\nRequired skills for this step: ${uniqueRequiredSkills.join(", ")}.\n\nUse these skills directly when relevant.\nDo not substitute host shell commands for these skills.\nIf a required skill is unavailable, write the declared blocked/retryable output artifact explaining which skill was unavailable.\n`
-			: "";
-
-		const taskWithPreamble = EXEC_POLL_PREAMBLE + skillContract + step.task;
+ 		const skillContract = uniqueRequiredSkills.length
+ 			? `\nRequired skills for this step: ${uniqueRequiredSkills.join(", ")}.\n\nUse these skills directly when relevant.\nDo not substitute host shell commands for these skills.\nIf a required skill is unavailable, write the declared blocked/retryable output artifact explaining which skill was unavailable.\n`
+ 			: "";
+ 		const mcpContract = uniqueRequiredMcpServers.length
+ 			? `\nRequired MCP servers for this step: ${uniqueRequiredMcpServers.join(", ")}.\n\nUse tools from these MCP servers directly when the task names them, for example MCP_DOCKER.hset or MCP_DOCKER.browser_snapshot.\nDo not list MCP server names under required_skills; they are not OpenClaw skills.\nIf a required MCP server/tool is unavailable, write the declared blocked/retryable output artifact explaining which MCP server/tool was unavailable.\n`
+ 			: "";
+ 		const taskWithPreamble = EXEC_POLL_PREAMBLE + skillContract + mcpContract + step.task;
  
  		const spawnResult = await adapter.spawn(taskWithPreamble, {
 
@@ -737,15 +749,30 @@ function configuredSkillVisibility(cfg: any, agentId = "main"): string[] | null 
 
 function assertSkillsNotConfigBlocked(cfg: any, required: string[], agentId = "main") {
 	const visible = configuredSkillVisibility(cfg, agentId);
-
+ 
 	if (visible === null) return; // unrestricted by config
-
+ 
 	for (const skill of required) {
 		if (!visible.includes(skill)) {
 			throw new Error(
 				`Required skill "${skill}" is blocked by configured agent skill allowlist.`,
 			);
 		}
+	}
+}
+ 
+function assertMcpServersConfigured(cfg: any, requiredMcpServers: string[]) {
+	if (!requiredMcpServers.length) return;
+ 
+	const configuredServers = cfg?.mcp?.servers ?? {};
+	const missing = requiredMcpServers.filter(
+		(name) => !Object.prototype.hasOwnProperty.call(configuredServers, name),
+	);
+ 
+	if (missing.length) {
+		throw new Error(
+			`Required MCP server(s) not configured under mcp.servers: ${missing.join(", ")}`,
+		);
 	}
 }
 

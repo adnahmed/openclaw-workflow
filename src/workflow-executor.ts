@@ -869,8 +869,9 @@ export async function executeWorkflow(
 											optional: step.optional,
 											outputs: step.outputs,
 											depends_on: [],
-											required_skills: step.required_skills,
-											complete_when: step.complete_when,
+ 											required_skills: step.required_skills,
+ 											required_mcp_servers: step.required_mcp_servers,
+ 											complete_when: step.complete_when,
 											on_block: step.on_block,
 										},
 									];

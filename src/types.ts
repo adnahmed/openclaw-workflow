@@ -116,8 +116,10 @@ export type WorkflowDefinition = {
   description: string;
   config: Record<string, unknown>;
   validators?: Record<string, ValidatorSpec>;
-  required_skills?: string[];
-  steps: WorkflowStep[];
+   required_skills?: string[];
+   /** MCP server names required by the workflow, e.g. MCP_DOCKER. Not OpenClaw skills. */
+   required_mcp_servers?: string[];
+   steps: WorkflowStep[];
   concurrency: number;
 };
 
@@ -144,9 +146,11 @@ export type WorkflowStep = {
   optional: boolean;
   always_run?: boolean;
    complete_when?: "outputs" | "session";
-   on_block?: "block_run" | "fail_step" | "continue";
-   required_skills?: string[];
-   original_id?: string;
+    on_block?: "block_run" | "fail_step" | "continue";
+    required_skills?: string[];
+    /** MCP server names required by this step, e.g. MCP_DOCKER. Not OpenClaw skills. */
+    required_mcp_servers?: string[];
+    original_id?: string;
 
 };
 

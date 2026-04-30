@@ -152,6 +152,7 @@ workflow_status({ name: "hello" })
 | `config`       | object    | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
 | `validators`    | object    | ❌       | `{}`     | Custom validation rules for output checks, supporting schemas and conditional outcomes (`pass_when`, `retry_when`, `block_when`, `fail_when`). |
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for the entire workflow. Steps without their own `required_skills` inherit these. Injected as instructions into step prompts and verified against agent config. |
+| `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by the workflow (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
 
 
 ### Step fields
@@ -177,6 +178,7 @@ workflow_status({ name: "hello" })
 | `always_run`   | boolean   | ❌       | `false` | If `true`, step runs regardless of dependency failure. |
 | `on_block`     | string    | ❌       | `"block_run"` | Behavior when blocked: `"block_run"` (fails pipeline) or `"continue"`. |
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for this specific step. Overrides workflow-level `required_skills`. Injected as instructions into the step prompt and verified against agent config. |
+| `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by this step (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 | `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"` (default, wait for session end), `"outputs"` (complete early if output gates pass), or `"session_then_outputs"` (wait for session end, then check outputs). |
 

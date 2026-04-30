@@ -287,8 +287,9 @@ function normalizeAndValidate(raw, filePath) {
  				optional: step.optional === true,
  				always_run: step.always_run === true,
  				on_block: step.on_block || "block_run",
-				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],
-				complete_when: completeWhen,
+ 				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],
+ 				required_mcp_servers: Array.isArray(step.required_mcp_servers) ? step.required_mcp_servers : [],
+ 				complete_when: completeWhen,
 
 
 			};
@@ -352,6 +353,7 @@ function normalizeAndValidate(raw, filePath) {
 		config: raw.config || {},
  		validators: raw.validators || {},
  		required_skills: Array.isArray(raw.required_skills) ? raw.required_skills : [],
+ 		required_mcp_servers: Array.isArray(raw.required_mcp_servers) ? raw.required_mcp_servers : [],
  		steps,
 
 		concurrency:
