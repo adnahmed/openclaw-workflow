@@ -200,4 +200,5 @@ export type StepRunResult = {
   error: string | null;
   logs: string | null;
   duration_ms: number;
+  cancel_result?: CancelResult | null;
 };
