@@ -7,7 +7,7 @@ import {
 	WorkflowRunParameters,
 	WorkflowStatusParameters,
 } from "./tool-schemas.js";
-import { RunState, StepState } from "./types.js";
+import type { RunState, StepState } from "./types.js";
 import {
 	dryRun,
 	executeWorkflow,
@@ -18,6 +18,7 @@ import {
 	createRunState,
 	findLatestRun,
 	generateRunId,
+	getLocalISOString,
 	listRuns,
 	readRunState,
 	updateRunState,
@@ -160,7 +161,7 @@ export default definePluginEntry({
 						state,
 						{
 							status: "failed",
-							completed_at: new Date().toISOString(),
+							completed_at: getLocalISOString(),
 							error: message,
 						},
 						runsDir,
@@ -221,7 +222,9 @@ export default definePluginEntry({
 				return;
 			}
 
-			logger.warn(`[workflow] auto-resume: found ${interrupted.length} interrupted run(s)`);
+			logger.warn(
+				`[workflow] auto-resume: found ${interrupted.length} interrupted run(s)`,
+			);
 
 			for (const previousRun of interrupted) {
 				try {
@@ -232,7 +235,7 @@ export default definePluginEntry({
 						previousRun,
 						{
 							status: "failed",
-							completed_at: new Date().toISOString(),
+							completed_at: getLocalISOString(),
 							error: `Gateway restart detected; auto-resumed as ${newRunId}`,
 							resumed_as: newRunId,
 						},
@@ -272,10 +275,7 @@ export default definePluginEntry({
 			api.registerService?.({
 				id: "openclaw-workflow-auto-resume",
 				async start() {
-					runInBackground(
-						"auto-resume",
-						autoResumeInterruptedRuns(),
-					);
+					runInBackground("auto-resume", autoResumeInterruptedRuns());
 				},
 			});
 		}
@@ -419,7 +419,9 @@ export default definePluginEntry({
 					}
 
 					const stepSummary = {};
-					for (const [stepId, stepState] of Object.entries((state as RunState).steps)) {
+					for (const [stepId, stepState] of Object.entries(
+						(state as RunState).steps,
+					)) {
 						const s = stepState as StepState;
 						stepSummary[stepId] = {
 							status: s.status,
@@ -436,8 +438,9 @@ export default definePluginEntry({
 
 					const s = state as RunState;
 					const elapsedMs = s.started_at
-						? (s.completed_at ? new Date(s.completed_at).getTime() : Date.now()) -
-							new Date(s.started_at).getTime()
+						? (s.completed_at
+								? new Date(s.completed_at).getTime()
+								: Date.now()) - new Date(s.started_at).getTime()
 						: null;
 					const steps = Object.values(state.steps);
 
@@ -448,11 +451,15 @@ export default definePluginEntry({
 						started_at: state.started_at,
 						completed_at: state.completed_at,
 						elapsed_s: elapsedMs ? Math.round(elapsedMs / 1000) : null,
-						steps_ok: steps.filter((step) => (step as StepState).status === "ok").length,
-						steps_failed: steps.filter((step) => (step as StepState).status === "failed")
-							.length,
-						steps_blocked: steps.filter((step) => (step as StepState).status === "blocked")
-							.length,
+						steps_ok: steps.filter(
+							(step) => (step as StepState).status === "ok",
+						).length,
+						steps_failed: steps.filter(
+							(step) => (step as StepState).status === "failed",
+						).length,
+						steps_blocked: steps.filter(
+							(step) => (step as StepState).status === "blocked",
+						).length,
 						steps_total: steps.length,
 						steps: stepSummary,
 					});
@@ -527,8 +534,7 @@ export default definePluginEntry({
 						});
 					}
 
-					const now = new Date().toISOString();
-
+					const now = getLocalISOString();
 					state = await updateRunState(
 						state,
 						{
@@ -616,7 +622,7 @@ export default definePluginEntry({
 								cancel_method: cancelResult.method || null,
 								cancel_error: cancelResult.error || null,
 								cancel_confirmed_at: cancelResult.confirmed
-									? new Date().toISOString()
+									? getLocalISOString()
 									: null,
 							},
 							runsDir,

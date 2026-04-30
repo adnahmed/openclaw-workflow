@@ -51,6 +51,7 @@ import {
 } from "./list-resolver.js";
 import { runStep } from "./step-runner.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
+import type { RunState, StepState, WorkflowStep } from "./types.js";
 import {
 	assertSafeOutputPath,
 	buildContext,
@@ -59,12 +60,11 @@ import {
 } from "./variable-substitution.js";
 import {
 	createRunState,
+	getLocalISOString,
 	saveRunState,
 	updateRunState,
 	updateStepState,
 } from "./workflow-state.js";
-import { RunState, StepState, WorkflowStep } from "./types.js";
-
 
 /** Scheduler tick interval in milliseconds. Lower = more responsive but more CPU. */
 const TICK_INTERVAL_MS = 500;
@@ -188,7 +188,7 @@ export async function executeWorkflow(
 				status: "failed",
 				phase: "compile",
 				error: err instanceof Error ? err.message : String(err),
-				completed_at: new Date().toISOString(),
+				completed_at: getLocalISOString(),
 				spawned_sessions: 0,
 			},
 			config.runsDir,
@@ -371,7 +371,7 @@ export async function executeWorkflow(
 
 	async function failLoopExpansion(step, err) {
 		const message = err instanceof Error ? err.message : String(err);
-		const now = new Date().toISOString();
+		const now = getLocalISOString();
 
 		await mutateState(async (current) => {
 			let next = await updateStepState(
@@ -436,7 +436,7 @@ export async function executeWorkflow(
 				step.id,
 				{
 					status: "running",
-					started_at: new Date().toISOString(),
+					started_at: getLocalISOString(),
 					retry_not_before: null,
 					attempts,
 
@@ -480,11 +480,10 @@ export async function executeWorkflow(
 						cancelGraceMs,
 						sessionAdapter,
 						validators: workflow.validators || {},
- 						workflowDir: workflow.__dir || workflowsDir,
- 						workflow,
- 
- 						onSpawn: async (spawn) => {
+						workflowDir: workflow.__dir || workflowsDir,
+						workflow,
 
+						onSpawn: async (spawn) => {
 							await mutateState((current) =>
 								updateStepState(
 									current,
@@ -516,7 +515,7 @@ export async function executeWorkflow(
 					};
 				}
 
-				const completedAt = new Date().toISOString();
+				const completedAt = getLocalISOString();
 				const startedAt = state.steps[step.id]?.started_at;
 				const durationMs =
 					result.duration_ms ||
@@ -582,11 +581,15 @@ export async function executeWorkflow(
 						);
 
 					const failureKinds =
-						result.output_check?.validations?.map(v => v.failure_kind).filter(Boolean) ?? [];
-					const isTimeout = typeof result.error === "string" && result.error.includes("timed out");
+						result.output_check?.validations
+							?.map((v) => v.failure_kind)
+							.filter(Boolean) ?? [];
+					const isTimeout =
+						typeof result.error === "string" &&
+						result.error.includes("timed out");
 					const retryableByPolicy =
 						result.retryable === true ||
-						failureKinds.some(kind => step.retry_on?.includes(kind)) ||
+						failureKinds.some((kind) => step.retry_on?.includes(kind)) ||
 						(step.retry_on?.includes("timeout") && isTimeout);
 
 					const shouldRetry =
@@ -602,9 +605,9 @@ export async function executeWorkflow(
 							`❌ ${step.name} failed — retrying (attempt ${nextAttempt}/${maxAttempts})`,
 						);
 
-						const retryNotBefore = new Date(
-							Date.now() + step.retry_delay * 1000,
-						).toISOString();
+						const retryNotBefore = getLocalISOString(
+							new Date(Date.now() + step.retry_delay * 1000),
+						);
 
 						await mutateState((current) =>
 							updateStepState(
@@ -700,7 +703,7 @@ export async function executeWorkflow(
 					const anyFailed = childStates.includes("failed");
 					const anyBlocked = childStates.includes("blocked");
 					const startedAt = state.steps[step.id]?.started_at;
-					const completedAt = new Date().toISOString();
+					const completedAt = getLocalISOString();
 					const durationMs = startedAt
 						? Date.now() - new Date(startedAt).getTime()
 						: 0;
@@ -753,7 +756,7 @@ export async function executeWorkflow(
 								{
 									cancel_requested_at:
 										current.steps[stepId]?.cancel_requested_at ||
-										new Date().toISOString(),
+										getLocalISOString(),
 									cancellation_reason:
 										current.steps[stepId]?.cancellation_reason ||
 										`external_cancel:${runId}`,
@@ -772,11 +775,10 @@ export async function executeWorkflow(
 		}
 
 		// Check if all steps have reached terminal status
-	const allTerminal = steps.every((s) => {
-		const status = (state as RunState).steps[s.id]?.status;
-		return ["ok", "failed", "blocked", "skipped"].includes(status);
-	});
-
+		const allTerminal = steps.every((s) => {
+			const status = (state as RunState).steps[s.id]?.status;
+			return ["ok", "failed", "blocked", "skipped"].includes(status);
+		});
 
 		if (allTerminal) break;
 
@@ -785,13 +787,13 @@ export async function executeWorkflow(
 
 		if (slotsAvailable > 0) {
 			// Find all pending steps that could be launched
-	for (const step of steps) {
-		if (inFlight.size >= concurrency) break;
-		if ((state as RunState).steps[step.id]?.status !== "pending") continue;
-		if (inFlight.has(step.id)) continue; // Already tracked
+			for (const step of steps) {
+				if (inFlight.size >= concurrency) break;
+				if ((state as RunState).steps[step.id]?.status !== "pending") continue;
+				if (inFlight.has(step.id)) continue; // Already tracked
 
-
-				const retryNotBefore = (state as RunState).steps[step.id]?.retry_not_before;
+				const retryNotBefore = (state as RunState).steps[step.id]
+					?.retry_not_before;
 				if (retryNotBefore && Date.now() < new Date(retryNotBefore).getTime())
 					continue;
 
@@ -823,8 +825,7 @@ export async function executeWorkflow(
 								{
 									status: "running",
 									started_at:
-										current.steps[step.id]?.started_at ??
-										new Date().toISOString(),
+										current.steps[step.id]?.started_at ?? getLocalISOString(),
 									attempts: (current.steps[step.id]?.attempts || 0) + 1,
 									error: null,
 								},
@@ -861,9 +862,9 @@ export async function executeWorkflow(
 											optional: step.optional,
 											outputs: step.outputs,
 											depends_on: [],
- 											required_skills: step.required_skills,
- 											required_mcp_servers: step.required_mcp_servers,
- 											complete_when: step.complete_when,
+											required_skills: step.required_skills,
+											required_mcp_servers: step.required_mcp_servers,
+											complete_when: step.complete_when,
 											on_block: step.on_block,
 										},
 									];
@@ -875,7 +876,10 @@ export async function executeWorkflow(
 									const itemCtx = { ...varCtx, item };
 
 									for (const innerDef of innerStepsDef) {
-										const substitutedInner = substituteDeep(innerDef, itemCtx) as WorkflowStep;
+										const substitutedInner = substituteDeep(
+											innerDef,
+											itemCtx,
+										) as WorkflowStep;
 
 										const originalInnerId = substitutedInner.id;
 										substitutedInner.id = prefix + originalInnerId;
@@ -925,7 +929,7 @@ export async function executeWorkflow(
 										step.id,
 										{
 											status: "ok",
-											completed_at: new Date().toISOString(),
+											completed_at: getLocalISOString(),
 											duration_ms: 0,
 										},
 										runsDir,
@@ -972,7 +976,7 @@ export async function executeWorkflow(
 									step.id,
 									{
 										status: "ok",
-										completed_at: new Date().toISOString(),
+										completed_at: getLocalISOString(),
 										duration_ms: 0,
 									},
 									runsDir,
@@ -996,7 +1000,9 @@ export async function executeWorkflow(
 
 	// ── Determine final run status ─────────────────────────────────────────────
 	// Only non-optional step failures or blocks cause the pipeline to fail/block.
-	const finalStepStatuses = Object.values((state as RunState).steps).map((s) => (s as StepState).status);
+	const finalStepStatuses = Object.values((state as RunState).steps).map(
+		(s) => (s as StepState).status,
+	);
 	const anyNonOptionalFailed = steps.some((s) => {
 		const stepState = state.steps[s.id];
 		return !s.optional && stepState?.status === "failed";
@@ -1018,7 +1024,7 @@ export async function executeWorkflow(
 		state,
 		{
 			status: finalStatus,
-			completed_at: new Date().toISOString(),
+			completed_at: getLocalISOString(),
 		},
 		runsDir,
 	);
@@ -1087,7 +1093,9 @@ export async function resumeWorkflow(
 	);
 
 	// Copy over 'ok' steps from previous run (preserve their results)
-	for (const [stepId, stepStateRaw] of Object.entries((previousState as RunState).steps)) {
+	for (const [stepId, stepStateRaw] of Object.entries(
+		(previousState as RunState).steps,
+	)) {
 		const stepState = stepStateRaw as StepState;
 		if (stepState.status === "ok") {
 			(state as RunState).steps[stepId] = { ...stepState };
@@ -1099,7 +1107,15 @@ export async function resumeWorkflow(
 	await saveRunState(state, runsDir);
 
 	// Pass initialState so executeWorkflow doesn't overwrite our pre-seeded ok steps
-	return executeWorkflow(workflow, newRunId, api, config, stepRunner, state, workflowKey);
+	return executeWorkflow(
+		workflow,
+		newRunId,
+		api,
+		config,
+		stepRunner,
+		state,
+		workflowKey,
+	);
 }
 
 /**

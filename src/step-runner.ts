@@ -41,6 +41,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
+import { getLocalISOString } from "./workflow-state.js";
 import { OutputCheckResult, StepRunResult, SpawnOptions, CancelResult, MockAdapterOptions, SessionAdapter } from "./types.js";
 
 const execAsync = promisify(exec);
@@ -504,7 +505,7 @@ export async function runStep(step, runId, api, options) {
 					sessionId: spawnResult.sessionId,
 					sessionKey: spawnResult.sessionKey,
 					sessionAdapter: options.sessionAdapter || "auto",
-					spawnedAt: new Date().toISOString(),
+					spawnedAt: getLocalISOString(),
 				});
 			} catch (err) {
 				const cancelErr = await adapter

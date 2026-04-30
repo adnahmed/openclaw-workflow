@@ -16,7 +16,7 @@
  *     corrupt state if the process crashes mid-write. On Linux, rename() is
  *     atomic for files on the same filesystem, so a crash leaves either the
  *     old or new state, never a partial write.
- *   - All timestamps are stored as ISO 8601 strings (UTC) for portability.
+ *   - All timestamps are stored as ISO 8601 strings (local timezone) for portability.
  *   - The run_id is embedded in the file content (not just the filename) so
  *     a state file is self-describing if moved or renamed.
  *
@@ -33,6 +33,16 @@
 import { readFile, writeFile, readdir, mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+
+/**
+ * Returns a date as an ISO 8601 string in the system's local timezone.
+ * @param {Date} [date] - The date to format. Defaults to current time.
+ * @returns {string} Local ISO timestamp (e.g. "2026-04-30T15:30:00.123")
+ */
+export function getLocalISOString(date = new Date()) {
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, -1);
+}
 
 /**
  * @typedef {'pending'|'running'|'ok'|'failed'|'blocked'|'cancelled'} RunStatus
@@ -93,7 +103,7 @@ export function generateRunId(workflowName) {
 
   // UTC compact datetime: YYYYMMDDTHHmmss (no colons — safe for filenames)
   const now = new Date();
-  const ts = now.toISOString()
+  const ts = getLocalISOString()
     .replace(/[-:]/g, '')   // remove dashes and colons
     .replace(/\.\d+Z$/, ''); // remove milliseconds and Z → e.g. 20260309T082000
 
@@ -145,7 +155,7 @@ export function createRunState(workflowName, workflowKey, stepIds, runId) {
     workflow: workflowName,
     workflow_key: workflowKey,
     status: 'pending',
-    started_at: new Date().toISOString(),
+    started_at: getLocalISOString(),
     completed_at: null,
     cancel_requested_at: null,
     cancelled_at: null,
@@ -239,8 +249,9 @@ export async function updateRunState(state, updates, runsDir) {
  * @example
  * state = await updateStepState(state, 'tech-auditor', {
  *   status: 'running',
- *   started_at: new Date().toISOString(),
- *   attempts: 1,
+  *   started_at: getLocalISOString(),
+  *   attempts: 1,
+
  * }, runsDir);
  */
 export async function updateStepState(state, stepId, stepUpdates, runsDir) {
