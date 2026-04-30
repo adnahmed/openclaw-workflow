@@ -1574,6 +1574,7 @@ export function createStepRunner(adapter) {
 		}
 		const startTime = Date.now();
 		let sessionKey = null;
+		let failureKind: string | null = null;
 
 		try {
 			const model = step.model || options.defaultModel || null;
@@ -1700,7 +1701,7 @@ export function createStepRunner(adapter) {
 			}
 
 		if (finalStatus === null) {
-			const cancelResult: CancelResult | null = await (adapter.cancel?.(spawnResult.sessionId, {
+			cancelResult = await (adapter.cancel?.(spawnResult.sessionId, {
 				...options,
 				sessionKey: spawnResult.sessionKey,
 				runId: spawnResult.sessionId,

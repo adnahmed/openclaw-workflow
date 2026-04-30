@@ -153,7 +153,7 @@ export type WorkflowStep = {
   retry_except?: string[];
   optional: boolean;
   always_run?: boolean;
-   complete_when?: "outputs" | "session";
+    complete_when?: "outputs" | "session" | "session_then_outputs";
     on_block?: "block_run" | "fail_step" | "continue";
     required_skills?: string[];
     /** MCP server names required by this step, e.g. MCP_DOCKER. Not OpenClaw skills. */
