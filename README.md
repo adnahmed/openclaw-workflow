@@ -2,7 +2,7 @@
 
 **YAML/JSON-driven workflow orchestration for OpenClaw agents.**
 
-Compose multi-step agent pipelines with dependency management, parallel execution, retry logic, output gates, and partial resume — all in a declarative YAML file.
+Compose multi-step agent pipelines with dependency management, parallel execution, retry logic, output gates, cache adoption with contract freshness signatures, explicit handoff completion, and partial resume — all in a declarative YAML file.
 
 ---
 
@@ -14,6 +14,7 @@ OpenClaw subagents are powerful — but fire-and-forget. There's no native way t
 - Retry a flaky step before failing the whole pipeline
 - Resume a partially-completed pipeline after a crash
 - Validate that a step actually produced the expected output files
+- Reuse cached outputs safely when they still match the **current** contract
 
 Developers work around this with shell scripts, manual timing, and fragile cron chains. `openclaw-workflow` solves this at the platform level.
 
@@ -181,7 +182,23 @@ workflow_status({ name: "hello" })
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for this specific step. Overrides workflow-level `required_skills`. Injected as instructions into the step prompt and verified against agent config. |
 | `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by this step (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
-| `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"` (default, wait for session end), `"outputs"` (complete early if output gates pass), or `"session_then_outputs"` (wait for session end, then check outputs). |
+| `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"`, `"outputs"`, `"session_then_outputs"`, `"handoff"`, or `"handoff_or_outputs"`. |
+| `output_contract_version` | number | ❌ | `null` | Optional explicit contract version for cache freshness signatures. Increment to invalidate older cache artifacts even when files are structurally valid. |
+| `reuse_outputs` | object | ❌ | — | Structured cache adoption policy. Supports pre-launch reuse checks with validator + signature freshness gates. |
+
+### `reuse_outputs` fields
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `enabled` | boolean | ❌ | `false` | Enables pre-launch cache adoption checks for this step. |
+| `when` | string | ❌ | — | CEL expression to decide if cache reuse is allowed (permission gate). |
+| `require` | string | ❌ | `"declared_outputs"` | Currently must be `"declared_outputs"`. |
+| `accept_decisions` | string[] | ❌ | `["pass"]` | Which merged validator decisions are adoptable (e.g., include `"blocked"` if desired). |
+| `require_signature` | boolean | ❌ | `true` | Requires cache manifest/signature match before adoption. |
+| `legacy_unsigned_cache` | string | ❌ | `"stale"` | Policy for old artifacts without signatures: `"stale"` or `"allow_if_valid"`. |
+| `freshness.include` | string[] | ❌ | all supported | Signature components to include: `output_contract_version`, `step_task`, `validators`, `schemas`, `selected_config`, `input_signature`. |
+| `on_hit.reason` | string | ❌ | `"cache_hit"` | Audit reason persisted when cache is adopted. |
+| `on_invalid` | string | ❌ | `"run_step"` | Behavior when cache is invalid/stale: `"run_step"` or `"fail_step"`. |
 
 **Retry Policy Notes:**
 `retry_on` and `retry_except` use **Failure Kinds**. Available kinds: `timeout`, `timeout_stop_confirmed`, `timeout_stop_unconfirmed`, `missing_file`, `schema`, `fail_when`, `parse`, `other`.
@@ -405,6 +422,60 @@ This is registered as an optional tool because it modifies persisted run state.
 
 ---
 
+### `workflow_step_update`
+
+Non-authoritative observability update from a running worker/step. This updates progress metadata only; it does **not** satisfy dependencies or complete the step.
+
+**Input:**
+```json
+{
+  "run_id": "seo-pipeline-20260309T082000",
+  "step_id": "content-creator",
+  "status": "progress",
+  "message": "Collected 12/30 items",
+  "counters": { "processed": 12 }
+}
+```
+
+---
+
+### `workflow_step_complete`
+
+Authoritative handoff request from a running worker/step. The orchestrator still validates the declared output contract (and cache freshness signature when relevant) before accepting completion.
+
+**Input:**
+```json
+{
+  "run_id": "seo-pipeline-20260309T082000",
+  "step_id": "content-creator",
+  "reason": "generated",
+  "message": "Outputs written and ready",
+  "attempt": 1,
+  "handoff_token": "..."
+}
+```
+
+If validation fails, the response returns structured details (missing/invalid outputs) so the worker can repair and continue.
+
+---
+
+## Cache Reuse and Contract Freshness
+
+Cache adoption is a first-class orchestration feature and follows this order:
+
+1. Evaluate `reuse_outputs.when`.
+2. Validate declared outputs using the same validator engine as normal completion.
+3. Compare cached artifact signature with the **current** contract signature.
+4. Adopt only if decision is accepted and signature is fresh.
+
+This distinguishes:
+- **invalid cache**: fails current validators.
+- **stale cache**: passes structure, but signature differs (task/validator/schema/config/input/contract version changed).
+
+Cache manifests are stored under `baseDir/.openclaw-workflow-cache/` and include producer run ID and signature metadata for auditability.
+
+---
+
 ## State File Format
 
 Each workflow run writes state to `{runsDir}/{run_id}.json`:
@@ -423,10 +494,22 @@ Each workflow run writes state to `{runsDir}/{run_id}.json`:
       "completed_at": "2026-03-09T08:23:15.000Z",
       "duration_ms": 195000,
       "session_key": "agent:main:subagent:abc123",
+      "handoff_token": "seo-pipeline-20260309T082000:tech-auditor:attempt:1",
       "output_check": {
         "passed": true,
         "missing_files": [],
         "checked_files": ["/home/user/project/data/seo-state/ta-handoff-2026-03-09.json"]
+      },
+      "cache": {
+        "hit": true,
+        "adopted": true,
+        "reason": "cache_hit",
+        "current_contract_signature": "sha256:..."
+      },
+      "handoff": {
+        "requested_at": "2026-03-09T08:23:12.000Z",
+        "completed_at": "2026-03-09T08:23:15.000Z",
+        "reason": "generated"
       },
       "error": null,
       "attempts": 1
@@ -647,7 +730,7 @@ interface PluginApi {
 
 | File | Purpose |
 |------|---------|
-| `src/index.ts` | Plugin entry: registers 4 tools |
+| `src/index.ts` | Plugin entry: registers workflow tools (`workflow_run`, `workflow_status`, `workflow_list`, `workflow_cancel`, `workflow_step_update`, `workflow_step_complete`) |
 | `src/config.ts` | Plugin configuration normalization |
 | `src/workflow-loader.ts` | YAML/JSON parsing, validation, cycle detection |
 | `src/workflow-executor.ts` | Core execution engine: scheduling, deps, retry, resume, dry run |
@@ -655,6 +738,7 @@ interface PluginApi {
 | `src/step-runner.ts` | Session lifecycle: spawn, poll, output check. Includes MockAdapter |
 | `src/output-checker.ts` | File existence validation for output gates |
 | `src/output-validator.ts` | Advanced output content validation |
+| `src/step-contract.ts` | Shared contract validation, cache signature freshness, and cache manifest I/O |
 | `src/variable-substitution.ts` | `{date}`, `{datetime}`, `{utc_date}`, `{utc_datetime}`, `{run_id}` substitution |
 | `src/list-resolver.ts` | Resolves `for_each` sources (JSON, CSV, Newline) |
 | `src/template-schema-validator.ts` | Validates variable templates in workflow definitions |
