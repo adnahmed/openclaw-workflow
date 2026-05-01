@@ -183,8 +183,44 @@ workflow_status({ name: "hello" })
 | `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by this step (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 | `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"`, `"outputs"`, `"session_then_outputs"`, `"handoff"`, or `"handoff_or_outputs"`. |
+| `signaling` | string | ❌ | auto for `handoff`/`handoff_or_outputs`, otherwise `off` | Controls plugin-injected signaling instructions. `"auto"` injects `workflow_step_update` + `workflow_step_complete` protocol into the runtime prompt so authors don't need to repeat this boilerplate in every step task. `"off"` disables injection for that step. |
 | `output_contract_version` | number | ❌ | `null` | Optional explicit contract version for cache freshness signatures. Increment to invalidate older cache artifacts even when files are structurally valid. |
 | `reuse_outputs` | object | ❌ | — | Structured cache adoption policy. Supports pre-launch reuse checks with validator + signature freshness gates. |
+
+### Automatic Step Signaling (Prompt Injection)
+
+When signaling is enabled for a step, the plugin injects a runtime protocol into the spawned step prompt so workflow authors do **not** need to embed signaling boilerplate in every `task`.
+
+Injected guidance includes:
+- periodic `workflow_step_update` progress updates
+- final `workflow_step_complete` handoff request
+- current `run_id` and `step_id`
+- current `attempt` and `handoff_token` when available
+- repair-and-retry behavior when completion is rejected due to invalid outputs
+
+Default behavior:
+- `complete_when: handoff` or `complete_when: handoff_or_outputs` → `signaling: auto`
+- all other completion modes → `signaling: off`
+
+You can override per-step:
+
+```yaml
+- id: produce_manifest
+  complete_when: handoff_or_outputs
+  signaling: auto   # optional, auto by default for this complete_when
+  task: |
+    Build and validate manifest JSON outputs.
+
+- id: custom_controller
+  complete_when: handoff
+  signaling: off    # disable auto-injection if you need fully custom behavior
+  task: |
+    Run custom orchestration logic.
+```
+
+Migration note:
+- Existing workflows that already include manual “Workflow signaling protocol” text in `task` will continue to work.
+- You can safely remove most of that repeated text and rely on `signaling: auto` for cleaner workflow files.
 
 ### `reuse_outputs` fields
 

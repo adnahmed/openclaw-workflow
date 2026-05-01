@@ -491,6 +491,64 @@ steps:
 
 		const wf = await loadWorkflow("handoff", dir);
 		assert.equal(wf.steps[0].complete_when, "handoff_or_outputs");
+		assert.equal(wf.steps[0].signaling, "auto");
+	});
+});
+
+test("defaults signaling to off for non-handoff completion modes", async () => {
+	await withTempDir("wf-test", async (dir) => {
+		await writeFile(
+			join(dir, "signaling-default.yml"),
+			`
+name: Signaling Default
+steps:
+  - id: s1
+    task: Do work
+    complete_when: session
+`,
+		);
+
+		const wf = await loadWorkflow("signaling-default", dir);
+		assert.equal(wf.steps[0].signaling, "off");
+	});
+});
+
+test("allows explicit signaling override", async () => {
+	await withTempDir("wf-test", async (dir) => {
+		await writeFile(
+			join(dir, "signaling-override.yml"),
+			`
+name: Signaling Override
+steps:
+  - id: s1
+    task: Do work
+    complete_when: handoff_or_outputs
+    signaling: off
+`,
+		);
+
+		const wf = await loadWorkflow("signaling-override", dir);
+		assert.equal(wf.steps[0].signaling, "off");
+	});
+});
+
+test("throws on invalid signaling mode", async () => {
+	await withTempDir("wf-test", async (dir) => {
+		await writeFile(
+			join(dir, "bad-signaling.yml"),
+			`
+name: Bad Signaling
+steps:
+  - id: s1
+    task: Do work
+    signaling: manual
+`,
+		);
+
+		await assert.rejects(
+			() => loadWorkflow("bad-signaling", dir),
+			/invalid signaling/,
+		);
 	});
 });
 

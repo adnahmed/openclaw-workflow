@@ -213,6 +213,8 @@ function normalizeAndValidate(raw, filePath) {
 			"unknown",
 		]);
 
+		const validStepSignalingModes = new Set(["auto", "off"]);
+
 		const validFreshnessIncludes = new Set([
 			"output_contract_version",
 			"step_task",
@@ -404,6 +406,23 @@ function normalizeAndValidate(raw, filePath) {
 				);
 			}
 
+			let signalingMode = step.signaling;
+			if (signalingMode === undefined || signalingMode === null || signalingMode === "") {
+				signalingMode =
+					completeWhen === "handoff" || completeWhen === "handoff_or_outputs"
+						? "auto"
+						: "off";
+			}
+
+			if (!validStepSignalingModes.has(signalingMode)) {
+				throw new Error(
+					`Step "${step.id}" in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+						`has invalid signaling "${signalingMode}". Expected one of: ${[
+							...validStepSignalingModes,
+						].join(", ")}.`,
+				);
+			}
+
 			// Normalize with defaults
 			return {
 				id: step.id,
@@ -439,6 +458,7 @@ function normalizeAndValidate(raw, filePath) {
  				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],
  				required_mcp_servers: Array.isArray(step.required_mcp_servers) ? step.required_mcp_servers : [],
  				complete_when: completeWhen,
+				signaling: signalingMode,
 
 
 			};

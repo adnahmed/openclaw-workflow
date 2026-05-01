@@ -262,6 +262,56 @@ a failure. Only report failure if the final exit code is non-zero or the output 
 explicitly indicates an error.
 `;
 
+function signalingModeForStep(step: any): "auto" | "off" {
+	if (step?.signaling === "auto" || step?.signaling === "off") {
+		return step.signaling;
+	}
+
+	return step?.complete_when === "handoff" ||
+		step?.complete_when === "handoff_or_outputs"
+		? "auto"
+		: "off";
+}
+
+function buildWorkflowSignalingPreamble(args: {
+	step: any;
+	runId: string;
+	attempts?: number;
+	handoffToken?: string;
+}): string {
+	const mode = signalingModeForStep(args.step);
+	if (mode !== "auto") {
+		return "";
+	}
+
+	const attemptLine =
+		typeof args.attempts === "number"
+			? `  - attempt: ${args.attempts}`
+			: "  - attempt: <current attempt number when known>";
+
+	const tokenLine = args.handoffToken
+		? `  - handoff_token: "${args.handoffToken}"`
+		: "  - handoff_token: <provided by runtime context when available>";
+
+	return `
+IMPORTANT — Workflow signaling protocol (auto-injected by plugin):
+- This step should use workflow signaling tools directly; do not ask the workflow author to include signaling boilerplate in task text.
+- At start and after major milestones, call workflow_step_update with:
+  - run_id: "${args.runId}"
+  - step_id: "${args.step.id}"
+  - status: "progress"
+  - message: concise progress summary
+  - counters: useful numeric counters when available
+- After declared outputs are written and validated locally, call workflow_step_complete with:
+  - run_id: "${args.runId}"
+  - step_id: "${args.step.id}"
+  - reason: "generated"
+${attemptLine}
+${tokenLine}
+- If completion is rejected due to missing/invalid outputs, repair outputs and retry workflow_step_complete before exiting.
+`;
+}
+
 /**
  * @typedef {Object} StepRunOptions
  * @property {number}  pollIntervalMs  - How often to poll for session completion (ms)
@@ -280,6 +330,8 @@ explicitly indicates an error.
  * @property {Function} [onSpawn] - Callback called immediately after subagent spawn
  * @property {string}   [sessionAdapter] - Explicit adapter to use (auto, runtime-subagent, etc.)
  * @property {number}   [cancelGraceMs] - Grace period to wait for cancellation to confirm (ms)
+ * @property {number}   [attempts] - Current step attempt number (when available)
+ * @property {string}   [handoffToken] - Current handoff token for this attempt (when available)
  */
 
 /**
@@ -465,6 +517,8 @@ export async function runStep(step, runId, api, options) {
 		cronPollTimeoutMs,
 		validators = {},
 		workflowDir = "",
+		attempts,
+		handoffToken,
 	} = options;
 
 	if (cancelled) {
@@ -510,7 +564,18 @@ export async function runStep(step, runId, api, options) {
  		const mcpContract = uniqueRequiredMcpServers.length
  			? `\nRequired MCP servers for this step: ${uniqueRequiredMcpServers.join(", ")}.\n\nUse tools from these MCP servers directly when the task names them, for example MCP_DOCKER.hset or MCP_DOCKER.browser_snapshot.\nDo not list MCP server names under required_skills; they are not OpenClaw skills.\nIf a required MCP server/tool is unavailable, write the declared blocked/retryable output artifact explaining which MCP server/tool was unavailable.\n`
  			: "";
- 		const taskWithPreamble = EXEC_POLL_PREAMBLE + skillContract + mcpContract + step.task;
+		const signalingPreamble = buildWorkflowSignalingPreamble({
+			step,
+			runId,
+			attempts,
+			handoffToken,
+		});
+		const taskWithPreamble =
+			EXEC_POLL_PREAMBLE +
+			skillContract +
+			mcpContract +
+			signalingPreamble +
+			step.task;
  
  		const spawnResult = await adapter.spawn(taskWithPreamble, {
 
@@ -1589,7 +1654,13 @@ export function createStepRunner(adapter) {
 
 		try {
 			const model = step.model || options.defaultModel || null;
-			const taskWithPreamble = EXEC_POLL_PREAMBLE + step.task;
+			const signalingPreamble = buildWorkflowSignalingPreamble({
+				step,
+				runId,
+				attempts: options.attempts,
+				handoffToken: options.handoffToken,
+			});
+			const taskWithPreamble = EXEC_POLL_PREAMBLE + signalingPreamble + step.task;
 			const spawnResult = await adapter.spawn(taskWithPreamble, {
 				model,
 				timeout: step.timeout,

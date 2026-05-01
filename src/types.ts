@@ -22,6 +22,8 @@ export type CompletionMode =
   | "handoff"
   | "handoff_or_outputs";
 
+export type StepSignalingMode = "auto" | "off";
+
 export type ReuseOutputsSpec = {
   enabled?: boolean;
   when?: string;
@@ -229,6 +231,7 @@ export type WorkflowStep = {
     required_skills?: string[];
     /** MCP server names required by this step, e.g. MCP_DOCKER. Not OpenClaw skills. */
     required_mcp_servers?: string[];
+    signaling?: StepSignalingMode;
     original_id?: string;
 
 };

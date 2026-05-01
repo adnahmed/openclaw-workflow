@@ -493,6 +493,8 @@ export async function executeWorkflow(
 						pollIntervalMs,
 						baseDir,
 						defaultModel,
+						attempts,
+						handoffToken,
 						cronDeliveryMode,
 						cronDeliveryChannel,
 						cronDeliveryTo,
