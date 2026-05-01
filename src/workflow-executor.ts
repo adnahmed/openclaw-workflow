@@ -50,6 +50,17 @@ import {
 	validateLoopItems,
 } from "./list-resolver.js";
 import { runStep, emptyOutputCheck } from "./step-runner.js";
+import {
+	adoptStepContract,
+	buildStepHandoffToken,
+	decisionAcceptedForReuse,
+	evaluateCacheFreshness,
+	evaluateReuseCondition,
+	markCacheProbe,
+	validateStepContract,
+	writeStepCacheManifest,
+	computeStepContractSignature,
+} from "./step-contract.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import type { RunState, StepState, WorkflowStep } from "./types.js";
 import {
@@ -61,6 +72,7 @@ import {
 import {
 	createRunState,
 	getLocalISOString,
+	readRunState,
 	saveRunState,
 	updateRunState,
 	updateStepState,
@@ -432,6 +444,12 @@ export async function executeWorkflow(
 
 		// Mark as running immediately.
 		// For cancellation safety, state writes should be ordered.
+		const handoffToken = buildStepHandoffToken({
+			runId,
+			stepId: step.id,
+			attempts,
+		});
+
 		await mutateState((current) =>
 			updateStepState(
 				current,
@@ -441,11 +459,14 @@ export async function executeWorkflow(
 					started_at: getLocalISOString(),
 					retry_not_before: null,
 					attempts,
+					declared_outputs: step.outputs || [],
 
 					session_key: null,
 					session_id: null,
 					subagent_run_id: null,
 					session_adapter: sessionAdapter,
+					handoff_token: handoffToken,
+					handoff: null,
 
 					cancel_requested_at: null,
 					cancel_confirmed_at: null,
@@ -519,6 +540,11 @@ export async function executeWorkflow(
 					result.duration_ms ||
 					(startedAt ? Date.now() - new Date(startedAt).getTime() : 0);
 
+				const liveStepState = state.steps[step.id];
+				if (liveStepState && liveStepState.status !== "running") {
+					return;
+				}
+
 				if (result.status === "ok") {
 					// Success path
 					await mutateState((current) =>
@@ -538,6 +564,30 @@ export async function executeWorkflow(
 							runsDir,
 						),
 					);
+
+					try {
+						const signature = await computeStepContractSignature({
+							workflow,
+							step,
+							state,
+							baseDir,
+							workflowsDir,
+						});
+						await writeStepCacheManifest({
+							baseDir,
+							stepId: step.id,
+							outputs: (step.outputs || []).map((o) => outputPathOf(o)),
+							producerRunId: runId,
+							reason: "generated",
+							decision: result.output_check?.decision || "pass",
+							signature,
+						});
+					} catch (manifestErr) {
+						api?.logger?.warn?.(
+							`[workflow:${runId}] failed to write cache manifest for ${step.id}`,
+							manifestErr,
+						);
+					}
 
 					const durationSec = Math.round(durationMs / 1000);
 					await notify(`✅ ${step.name} complete (${durationSec}s)`);
@@ -560,6 +610,30 @@ export async function executeWorkflow(
 							runsDir,
 						),
 					);
+
+					try {
+						const signature = await computeStepContractSignature({
+							workflow,
+							step,
+							state,
+							baseDir,
+							workflowsDir,
+						});
+						await writeStepCacheManifest({
+							baseDir,
+							stepId: step.id,
+							outputs: (step.outputs || []).map((o) => outputPathOf(o)),
+							producerRunId: runId,
+							reason: "blocked_result",
+							decision: result.output_check?.decision || "blocked",
+							signature,
+						});
+					} catch (manifestErr) {
+						api?.logger?.warn?.(
+							`[workflow:${runId}] failed to write cache manifest for blocked step ${step.id}`,
+							manifestErr,
+						);
+					}
 
 					await notify(
 						`⛔ ${step.name} blocked: ${result.error || "validator blocked step"}`,
@@ -724,6 +798,149 @@ export async function executeWorkflow(
 		inFlight.set(step.id, promise);
 	}
 
+	async function tryReuseStepOutputs(step) {
+		if (!step.reuse_outputs?.enabled) {
+			return { adopted: false, skippedLaunch: false };
+		}
+
+		const reuseGate = evaluateReuseCondition({
+			reuseOutputs: step.reuse_outputs,
+			context: {
+				config: workflow.config || {},
+				run_id: runId,
+				workflow: workflow.name,
+				step: step.id,
+			},
+		});
+
+		if (!reuseGate.allowed) {
+			if (reuseGate.error) {
+				await notify(
+					`⚠️ reuse_outputs.when evaluation failed for ${step.name}: ${reuseGate.error}`,
+				);
+			}
+			return { adopted: false, skippedLaunch: false };
+		}
+
+		const outputCheck = await validateStepContract({
+			workflow,
+			step,
+			baseDir,
+			workflowsDir,
+		});
+
+		const freshness = await evaluateCacheFreshness({
+			workflow,
+			step,
+			state,
+			baseDir,
+			workflowsDir,
+		});
+
+		if (!freshness.ok) {
+			await mutateState((current) =>
+				markCacheProbe({
+					state: current,
+					runsDir,
+					stepId: step.id,
+					hit: true,
+					adopted: false,
+					decision: outputCheck.decision,
+					reason: freshness.reason || "stale_contract",
+					producer_run_id: freshness.producer_run_id,
+					previous_contract_signature: freshness.previous_signature,
+					current_contract_signature: freshness.current_signature,
+					validator_hash: freshness.validator_hash,
+				}),
+			);
+
+			return { adopted: false, skippedLaunch: false };
+		}
+
+		const accepted = decisionAcceptedForReuse(
+			step.reuse_outputs,
+			outputCheck.decision,
+		);
+
+		if (accepted) {
+			await mutateState(async (current) => {
+				let next = await markCacheProbe({
+					state: current,
+					runsDir,
+					stepId: step.id,
+					hit: true,
+					adopted: true,
+					decision: outputCheck.decision,
+					reason: "cache_hit",
+					producer_run_id: freshness.producer_run_id,
+					contract_signature: freshness.current_signature,
+					validator_hash: freshness.validator_hash,
+				});
+
+				next = await adoptStepContract({
+					state: next,
+					runsDir,
+					stepId: step.id,
+					outputCheck,
+					reason: step.reuse_outputs?.on_hit?.reason || "cache_hit",
+					message: `Step reused cached outputs (${outputCheck.decision})`,
+				});
+
+				return next;
+			});
+
+			await notify(`♻️ Reused cached outputs for ${step.name}`);
+
+			if (
+				state.steps[step.id]?.status === "failed" &&
+				!step.optional
+			) {
+				await cascadeSkip(step.id);
+			}
+
+			return { adopted: true, skippedLaunch: true };
+		}
+
+		await mutateState((current) =>
+			markCacheProbe({
+				state: current,
+				runsDir,
+				stepId: step.id,
+				hit: false,
+				adopted: false,
+				decision: outputCheck.decision,
+				reason: "cache_invalid",
+				producer_run_id: freshness.producer_run_id,
+				contract_signature: freshness.current_signature,
+				validator_hash: freshness.validator_hash,
+			}),
+		);
+
+		if (step.reuse_outputs?.on_invalid === "fail_step") {
+			await mutateState((current) =>
+				updateStepState(
+					current,
+					step.id,
+					{
+						status: "failed",
+						completed_at: getLocalISOString(),
+						output_check: outputCheck,
+						error: `Cache validation failed (${outputCheck.decision}) and on_invalid=fail_step`,
+					},
+					runsDir,
+				),
+			);
+
+			if (!step.optional) {
+				await cascadeSkip(step.id);
+			}
+
+			return { adopted: false, skippedLaunch: true };
+		}
+
+		return { adopted: false, skippedLaunch: false };
+	}
+
 	// ── Main scheduling loop ───────────────────────────────────────────────────
 	// Runs until all steps reach a terminal state or the run is cancelled.
 	let iterationGuard = 0;
@@ -783,14 +1000,11 @@ export async function executeWorkflow(
 			}
 		}
 
-		// Re-read state from disk to pick up external cancellation signals
-
-		// (Do this every ~10 ticks to avoid excessive I/O; in-flight updates
-		//  are already applied to our local `state` variable.)
-		if (iterationGuard % 10 === 0) {
+		// Re-read state from disk to pick up external updates (handoff, progress, cancel).
+		if (iterationGuard % 2 === 0) {
 			try {
-				const { readRunState } = await import("./workflow-state.js");
 				const diskState = await readRunState(runId, runsDir);
+				state = diskState;
 				if (diskState.status === "cancelled") {
 					// External cancel: mark running steps as cancellation-requested, drain active promises, and exit.
 					for (const [stepId] of inFlight.entries()) {
@@ -1032,6 +1246,12 @@ export async function executeWorkflow(
 							continue;
 						}
 					}
+
+					const reuse = await tryReuseStepOutputs(step);
+					if (reuse.skippedLaunch) {
+						continue;
+					}
+
 					await launchStep(step);
 				}
 			}

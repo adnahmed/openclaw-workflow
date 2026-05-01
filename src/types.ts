@@ -6,6 +6,45 @@
 export type RunStatus = 'pending' | 'running' | 'ok' | 'failed' | 'blocked' | 'cancelled';
 export type StepStatus = 'pending' | 'running' | 'ok' | 'failed' | 'blocked' | 'skipped';
 
+export type CompletionReason =
+  | "generated"
+  | "cache_hit"
+  | "cache_repaired"
+  | "empty_result"
+  | "blocked_result"
+  | "external_result"
+  | "manual_adoption";
+
+export type CompletionMode =
+  | "outputs"
+  | "session"
+  | "session_then_outputs"
+  | "handoff"
+  | "handoff_or_outputs";
+
+export type ReuseOutputsSpec = {
+  enabled?: boolean;
+  when?: string;
+  require?: "declared_outputs";
+  require_signature?: boolean;
+  legacy_unsigned_cache?: "stale" | "allow_if_valid";
+  freshness?: {
+    include?: Array<
+      | "output_contract_version"
+      | "step_task"
+      | "validators"
+      | "schemas"
+      | "selected_config"
+      | "input_signature"
+    >;
+  };
+  accept_decisions?: ValidationDecision[];
+  on_hit?: {
+    reason?: CompletionReason;
+  };
+  on_invalid?: "run_step" | "fail_step";
+};
+
 /**
  * Current execution state of a single workflow step.
  */
@@ -25,6 +64,36 @@ export type StepState = {
   cancellation_reason: string | null;
   retry_not_before: string | null;
   output_check: OutputCheckResult | null;
+  declared_outputs: OutputSpec[] | null;
+  handoff: {
+    requested_at?: string;
+    completed_at?: string;
+    reason?: CompletionReason | string;
+    message?: string;
+    outputs?: string[];
+    token?: string;
+    metadata?: Record<string, unknown>;
+    attempt?: number;
+    session_key?: string;
+    subagent_run_id?: string;
+  } | null;
+  cache: {
+    checked_at?: string;
+    hit?: boolean;
+    adopted?: boolean;
+    decision?: ValidationDecision;
+    reason?: string;
+    producer_run_id?: string;
+    contract_signature?: string;
+    previous_contract_signature?: string;
+    current_contract_signature?: string;
+    validator_hash?: string;
+  } | null;
+  counters: Record<string, number> | null;
+  reported_status: string | null;
+  last_update_at: string | null;
+  last_message: string | null;
+  handoff_token: string | null;
   error: string | null;
   logs: string | null;
   attempts: number;
@@ -152,9 +221,11 @@ export type WorkflowStep = {
   retry_on?: string[];
   retry_except?: string[];
   optional: boolean;
+  output_contract_version?: number | null;
   always_run?: boolean;
-    complete_when?: "outputs" | "session" | "session_then_outputs";
+    complete_when?: CompletionMode;
     on_block?: "block_run" | "fail_step" | "continue";
+    reuse_outputs?: ReuseOutputsSpec;
     required_skills?: string[];
     /** MCP server names required by this step, e.g. MCP_DOCKER. Not OpenClaw skills. */
     required_mcp_servers?: string[];
@@ -210,4 +281,29 @@ export type StepRunResult = {
   logs: string | null;
   duration_ms: number;
   cancel_result?: CancelResult | null;
+};
+
+export type WorkflowStepUpdateStatus = "progress" | "ready" | "blocked" | "failed";
+
+export type WorkflowStepUpdatePayload = {
+  run_id: string;
+  step_id: string;
+  status?: WorkflowStepUpdateStatus;
+  message?: string;
+  counters?: Record<string, number>;
+  metadata?: Record<string, unknown>;
+};
+
+export type WorkflowStepCompletePayload = {
+  run_id: string;
+  step_id: string;
+  reason?: CompletionReason;
+  outputs?: string[];
+  message?: string;
+  counters?: Record<string, number>;
+  metadata?: Record<string, unknown>;
+  attempt?: number;
+  session_key?: string;
+  subagent_run_id?: string;
+  handoff_token?: string;
 };

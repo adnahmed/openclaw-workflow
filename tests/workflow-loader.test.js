@@ -475,3 +475,74 @@ steps:
 		);
 	});
 });
+
+test("accepts complete_when: handoff_or_outputs", async () => {
+	await withTempDir("wf-test", async (dir) => {
+		await writeFile(
+			join(dir, "handoff.yml"),
+			`
+name: Handoff Mode
+steps:
+  - id: handoff-step
+    task: Complete via handoff
+    complete_when: handoff_or_outputs
+`,
+		);
+
+		const wf = await loadWorkflow("handoff", dir);
+		assert.equal(wf.steps[0].complete_when, "handoff_or_outputs");
+	});
+});
+
+test("normalizes reuse_outputs block", async () => {
+	await withTempDir("wf-test", async (dir) => {
+		await writeFile(
+			join(dir, "reuse.yml"),
+			`
+name: Reuse
+steps:
+  - id: reuse-step
+    task: Reuse if possible
+    reuse_outputs:
+      enabled: true
+      when: config.force_refresh == false
+      require: declared_outputs
+      accept_decisions: [pass, blocked]
+      on_invalid: run_step
+`,
+		);
+
+		const wf = await loadWorkflow("reuse", dir);
+		assert.equal(wf.steps[0].reuse_outputs.enabled, true);
+		assert.deepEqual(wf.steps[0].reuse_outputs.accept_decisions, [
+			"pass",
+			"blocked",
+		]);
+		assert.equal(wf.steps[0].reuse_outputs.require, "declared_outputs");
+		assert.equal(wf.steps[0].reuse_outputs.require_signature, true);
+		assert.equal(wf.steps[0].reuse_outputs.legacy_unsigned_cache, "stale");
+		assert.ok(Array.isArray(wf.steps[0].reuse_outputs.freshness.include));
+	});
+});
+
+test("throws on invalid reuse_outputs.accept_decisions", async () => {
+	await withTempDir("wf-test", async (dir) => {
+		await writeFile(
+			join(dir, "bad-reuse.yml"),
+			`
+name: Bad Reuse
+steps:
+  - id: bad
+    task: bad
+    reuse_outputs:
+      enabled: true
+      accept_decisions: [banana]
+`,
+		);
+
+		await assert.rejects(
+			() => loadWorkflow("bad-reuse", dir),
+			/reuse_outputs.accept_decisions contains invalid decision/,
+		);
+	});
+});

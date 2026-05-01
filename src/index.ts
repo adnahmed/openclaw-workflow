@@ -2,11 +2,22 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizePluginConfig } from "./config.js";
 import { cancelStepSession, runStep } from "./step-runner.js";
 import {
+	WorkflowStepCompleteParameters,
+	WorkflowStepUpdateParameters,
 	WorkflowCancelParameters,
 	WorkflowListParameters,
 	WorkflowRunParameters,
 	WorkflowStatusParameters,
 } from "./tool-schemas.js";
+import {
+	adoptStepContract,
+	computeStepContractSignature,
+	evaluateCacheFreshness,
+	handoffMatchesCurrentAttempt,
+	validateStepContract,
+	writeStepCacheManifest,
+} from "./step-contract.js";
+import { outputPathOf } from "./variable-substitution.js";
 import type { RunState, StepState } from "./types.js";
 import {
 	dryRun,
@@ -505,6 +516,335 @@ export default definePluginEntry({
 						workflows,
 					});
 				} catch (err) {
+					return errorResult(err instanceof Error ? err.message : String(err));
+				}
+			},
+		});
+
+		api.registerTool({
+			name: "workflow_step_update",
+			description:
+				"Report non-authoritative step progress and counters for an active workflow run.",
+			parameters: WorkflowStepUpdateParameters,
+			optional: true,
+			async execute(first, second) {
+				const { run_id, step_id, status, message, counters } = readParams(
+					first,
+					second,
+				);
+
+				try {
+					let state = await readRunState(run_id, runsDir);
+					const step = (state as RunState).steps?.[step_id] as StepState | undefined;
+
+					if (!step) {
+						return errorResult(
+							`Step "${step_id}" does not exist in run "${run_id}".`,
+						);
+					}
+
+					if (state.status !== "running") {
+						return errorResult(
+							`Run "${run_id}" is not active (status=${state.status}).`,
+						);
+					}
+
+					const now = getLocalISOString();
+					const mergedCounters = {
+						...((step.counters as Record<string, number>) || {}),
+						...(counters || {}),
+					};
+
+					state = await updateStepState(
+						state,
+						step_id,
+						{
+							reported_status: status || step.reported_status || "progress",
+							counters:
+								Object.keys(mergedCounters).length > 0 ? mergedCounters : null,
+							last_update_at: now,
+							last_message: message || step.last_message || null,
+						},
+						runsDir,
+					);
+
+					return textResult({
+						ok: true,
+						run_id,
+						step_id,
+						status: state.steps[step_id].status,
+						reported_status: state.steps[step_id].reported_status,
+						last_update_at: state.steps[step_id].last_update_at,
+						message: "Progress update recorded.",
+					});
+				} catch (err) {
+					if (err?.code === "ENOENT") {
+						return errorResult(`Run not found: ${run_id}`);
+					}
+					return errorResult(err instanceof Error ? err.message : String(err));
+				}
+			},
+		});
+
+		api.registerTool({
+			name: "workflow_step_complete",
+			description:
+				"Request step completion by validating the declared output contract for the active attempt.",
+			parameters: WorkflowStepCompleteParameters,
+			optional: true,
+			async execute(first, second) {
+				const params = readParams(first, second);
+				const {
+					run_id,
+					step_id,
+					reason = "generated",
+					outputs,
+					message,
+					counters,
+					metadata,
+					attempt,
+					session_key,
+					subagent_run_id,
+					handoff_token,
+				} = params;
+
+				try {
+					let state = await readRunState(run_id, runsDir);
+					const step = (state as RunState).steps?.[step_id] as StepState | undefined;
+
+					if (!step) {
+						return errorResult(
+							`Step "${step_id}" does not exist in run "${run_id}".`,
+						);
+					}
+
+					if (state.status !== "running") {
+						return errorResult(
+							`Run "${run_id}" is not active (status=${state.status}).`,
+						);
+					}
+
+					if (step.status !== "running") {
+						return errorResult(
+							`Step "${step_id}" is not currently running (status=${step.status}).`,
+						);
+					}
+
+					const attemptMatch = handoffMatchesCurrentAttempt({
+						stepState: step,
+						attempt,
+						session_key,
+						subagent_run_id,
+						handoff_token,
+					});
+
+					if (!attemptMatch.ok) {
+						const now = getLocalISOString();
+						state = await updateStepState(
+							state,
+							step_id,
+							{
+								handoff: {
+									...(step.handoff || {}),
+									requested_at: now,
+									reason,
+									message,
+									outputs: outputs || undefined,
+									metadata,
+									attempt,
+									session_key,
+									subagent_run_id,
+									token: handoff_token,
+								},
+								last_update_at: now,
+								last_message:
+									message || `Handoff rejected: ${attemptMatch.reason}`,
+							},
+							runsDir,
+						);
+
+						return textResult({
+							ok: false,
+							decision: "fail",
+							message: `Handoff rejected: ${attemptMatch.reason}`,
+						});
+					}
+
+					const workflow = await loadWorkflowForRun(state as RunState);
+					const workflowStepDef = workflow.steps.find((s) => s.id === step_id);
+
+					const outputCheck = await validateStepContract({
+						workflow,
+						step: {
+							id: step_id,
+							outputs:
+								(outputs && outputs.length > 0
+									? outputs
+									: step.declared_outputs || []),
+						} as any,
+						baseDir,
+						workflowsDir,
+						outputsOverride: outputs,
+					});
+
+					const decision = outputCheck.decision;
+					let freshness: any = {
+						ok: true,
+						reason: "signature_match",
+						current_signature: "",
+						previous_signature: undefined,
+						producer_run_id: undefined,
+						validator_hash: undefined,
+					};
+
+					if (reason === "cache_hit" || reason === "cache_repaired") {
+						freshness = await evaluateCacheFreshness({
+							workflow,
+							step: {
+								id: step_id,
+								task: workflowStepDef?.task || null,
+								outputs: (step.declared_outputs || []) as any,
+								output_contract_version:
+									workflowStepDef?.output_contract_version,
+								reuse_outputs: {
+									enabled: true,
+									require_signature:
+										workflowStepDef?.reuse_outputs?.require_signature !== false,
+									legacy_unsigned_cache:
+										workflowStepDef?.reuse_outputs?.legacy_unsigned_cache ||
+										"stale",
+									freshness: workflowStepDef?.reuse_outputs?.freshness,
+								},
+							} as any,
+							state,
+							baseDir,
+							workflowsDir,
+							outputsOverride: outputs,
+						});
+					}
+
+					const handoffValid =
+						(decision === "pass" || decision === "blocked") && freshness.ok;
+
+					const now = getLocalISOString();
+					state = await updateStepState(
+						state,
+						step_id,
+						{
+							handoff: {
+								...(step.handoff || {}),
+								requested_at: now,
+								reason,
+								message,
+								outputs: outputs || undefined,
+								metadata,
+								attempt,
+								session_key,
+								subagent_run_id,
+								token: handoff_token,
+							},
+							counters: counters || step.counters || null,
+							last_update_at: now,
+							last_message: message || step.last_message || null,
+							output_check: outputCheck,
+						},
+						runsDir,
+					);
+
+					if (!handoffValid) {
+						const invalidOutputs = outputCheck.validations
+							.filter((v) => v.decision !== "pass")
+							.map((v) => ({
+								path: v.path,
+								validator: v.validator,
+								errors: v.errors,
+							}));
+
+						return textResult({
+							ok: false,
+							decision: freshness.ok ? decision : "stale",
+							missing_outputs: outputCheck.missing_files,
+							invalid_outputs: invalidOutputs,
+							message:
+								freshness.ok
+									? "Handoff received but step contract did not validate."
+									: "Cached outputs passed validators but were produced under an older output contract.",
+							action: freshness.ok ? "fix_outputs" : "continue_running",
+						});
+					}
+
+					state = await adoptStepContract({
+						state,
+						runsDir,
+						stepId: step_id,
+						outputCheck,
+						reason,
+						message,
+						metadata,
+						counters,
+					});
+
+					try {
+						const signature = await computeStepContractSignature({
+							workflow,
+							step: {
+								id: step_id,
+								task: workflowStepDef?.task || null,
+								outputs: (step.declared_outputs || []) as any,
+								output_contract_version:
+									workflowStepDef?.output_contract_version,
+								reuse_outputs: {
+									enabled: true,
+									freshness: workflowStepDef?.reuse_outputs?.freshness,
+								},
+							} as any,
+							state,
+							baseDir,
+							workflowsDir,
+							outputsOverride: outputs,
+						});
+
+						await writeStepCacheManifest({
+							baseDir,
+							stepId: step_id,
+							outputs:
+								(outputs && outputs.length > 0
+									? outputs
+									: (step.declared_outputs || []).map((o) => outputPathOf(o as any))),
+							producerRunId: run_id,
+							reason,
+							decision: outputCheck.decision,
+							signature,
+						});
+					} catch {
+						// Non-fatal: handoff completion should not fail solely on manifest persistence.
+					}
+
+					const latest = state.steps[step_id] as StepState;
+					if (latest.session_key && latest.status !== "running") {
+						await cancelStepSession(api, {
+							sessionAdapter: latest.session_adapter || sessionAdapter,
+							sessionId: latest.session_id || latest.subagent_run_id,
+							sessionKey: latest.session_key,
+							runId: latest.session_id || run_id,
+							reason: `workflow_step_handoff_complete:${step_id}`,
+							cronRunTimeoutMs,
+							cancelGraceMs: config.cancelGraceMs ?? 30000,
+							logger,
+						}).catch(() => null);
+					}
+
+					return textResult({
+						ok: true,
+						decision,
+						status: state.steps[step_id].status,
+						message:
+							"Handoff accepted and step contract validated successfully.",
+					});
+				} catch (err) {
+					if (err?.code === "ENOENT") {
+						return errorResult(`Run not found: ${run_id}`);
+					}
 					return errorResult(err instanceof Error ? err.message : String(err));
 				}
 			},

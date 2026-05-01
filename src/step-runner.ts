@@ -582,7 +582,8 @@ export async function runStep(step, runId, api, options) {
 			await sleep(pollIntervalMs);
 
 			if (
-				step.complete_when === "outputs" &&
+				(step.complete_when === "outputs" ||
+					step.complete_when === "handoff_or_outputs") &&
 				step.outputs &&
 				step.outputs.length > 0
 			) {
@@ -1610,7 +1611,11 @@ export function createStepRunner(adapter) {
 
 				await sleep(pollIntervalMs);
 
-				if (step.complete_when === "outputs" && step.outputs?.length) {
+				if (
+					(step.complete_when === "outputs" ||
+						step.complete_when === "handoff_or_outputs") &&
+					step.outputs?.length
+				) {
 					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
 
 					if (outputCheck.passed) {

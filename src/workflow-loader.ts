@@ -31,7 +31,7 @@ import { mkdir, readdir, readFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import yaml from "js-yaml";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
-import { WorkflowDefinition, WorkflowStep } from "./types.js";
+import { ReuseOutputsSpec, WorkflowDefinition, WorkflowStep } from "./types.js";
 
 /**
  * @typedef {import('./types.js').WorkflowStep} WorkflowStep
@@ -205,6 +205,146 @@ function normalizeAndValidate(raw, filePath) {
 	}
 
 	const validateSteps = (stepsList, parentName = raw.name, isInner = false) => {
+		const validReuseDecisions = new Set([
+			"pass",
+			"blocked",
+			"retry",
+			"fail",
+			"unknown",
+		]);
+
+		const validFreshnessIncludes = new Set([
+			"output_contract_version",
+			"step_task",
+			"validators",
+			"schemas",
+			"selected_config",
+			"input_signature",
+		]);
+
+		const normalizeReuseOutputs = (stepId, reuseRaw): ReuseOutputsSpec | undefined => {
+			if (reuseRaw === undefined || reuseRaw === null) return undefined;
+			if (typeof reuseRaw !== "object") {
+				throw new Error(
+					`Step "${stepId}" has invalid reuse_outputs. Expected an object.`,
+				);
+			}
+
+			const reuse = reuseRaw as any;
+			if (reuse.enabled !== undefined && typeof reuse.enabled !== "boolean") {
+				throw new Error(
+					`Step "${stepId}" reuse_outputs.enabled must be boolean.`,
+				);
+			}
+			if (reuse.when !== undefined && typeof reuse.when !== "string") {
+				throw new Error(
+					`Step "${stepId}" reuse_outputs.when must be a string expression.`,
+				);
+			}
+			if (
+				reuse.require !== undefined &&
+				reuse.require !== "declared_outputs"
+			) {
+				throw new Error(
+					`Step "${stepId}" reuse_outputs.require must be "declared_outputs" when provided.`,
+				);
+			}
+
+			const acceptDecisions = Array.isArray(reuse.accept_decisions)
+				? reuse.accept_decisions
+				: undefined;
+
+			if (acceptDecisions) {
+				for (const decision of acceptDecisions) {
+					if (!validReuseDecisions.has(decision)) {
+						throw new Error(
+							`Step "${stepId}" reuse_outputs.accept_decisions contains invalid decision "${decision}".`,
+						);
+					}
+				}
+			}
+
+			if (
+				reuse.on_invalid !== undefined &&
+				reuse.on_invalid !== "run_step" &&
+				reuse.on_invalid !== "fail_step"
+			) {
+				throw new Error(
+					`Step "${stepId}" reuse_outputs.on_invalid must be "run_step" or "fail_step".`,
+				);
+			}
+
+			if (reuse.on_hit !== undefined && typeof reuse.on_hit !== "object") {
+				throw new Error(
+					`Step "${stepId}" reuse_outputs.on_hit must be an object when provided.`,
+				);
+			}
+
+			if (
+				reuse.require_signature !== undefined &&
+				typeof reuse.require_signature !== "boolean"
+			) {
+				throw new Error(
+					`Step "${stepId}" reuse_outputs.require_signature must be boolean when provided.`,
+				);
+			}
+
+			if (
+				reuse.legacy_unsigned_cache !== undefined &&
+				reuse.legacy_unsigned_cache !== "stale" &&
+				reuse.legacy_unsigned_cache !== "allow_if_valid"
+			) {
+				throw new Error(
+					`Step "${stepId}" reuse_outputs.legacy_unsigned_cache must be "stale" or "allow_if_valid".`,
+				);
+			}
+
+			if (
+				reuse.freshness !== undefined &&
+				(typeof reuse.freshness !== "object" || reuse.freshness === null)
+			) {
+				throw new Error(
+					`Step "${stepId}" reuse_outputs.freshness must be an object when provided.`,
+				);
+			}
+
+			const include = Array.isArray(reuse.freshness?.include)
+				? reuse.freshness.include
+				: undefined;
+
+			if (include) {
+				for (const item of include) {
+					if (!validFreshnessIncludes.has(item)) {
+						throw new Error(
+							`Step "${stepId}" reuse_outputs.freshness.include contains invalid token "${item}".`,
+						);
+					}
+				}
+			}
+
+			return {
+				enabled: reuse.enabled === true,
+				when: reuse.when,
+				require: reuse.require || "declared_outputs",
+				require_signature: reuse.require_signature !== false,
+				legacy_unsigned_cache:
+					reuse.legacy_unsigned_cache || "stale",
+				freshness: {
+					include: include || [
+						"output_contract_version",
+						"step_task",
+						"validators",
+						"schemas",
+						"selected_config",
+						"input_signature",
+					],
+				},
+				accept_decisions: acceptDecisions,
+				on_hit: reuse.on_hit,
+				on_invalid: reuse.on_invalid || "run_step",
+			};
+		};
+
 		const seenIds = new Set();
 		return stepsList.map((step, index) => {
 			if (
@@ -252,6 +392,8 @@ function normalizeAndValidate(raw, filePath) {
 				"session",
 				"outputs",
 				"session_then_outputs",
+				"handoff",
+				"handoff_or_outputs",
 			]);
 			const completeWhen = step.complete_when || "session";
 			if (!validCompleteWhen.has(completeWhen)) {
@@ -286,9 +428,14 @@ function normalizeAndValidate(raw, filePath) {
 				retry_on: Array.isArray(step.retry_on) ? step.retry_on : [],
 				retry_except: Array.isArray(step.retry_except) ? step.retry_except : [],
 				optional: step.optional === true,
+				output_contract_version:
+					typeof step.output_contract_version === "number"
+						? step.output_contract_version
+						: null,
 
  				always_run: step.always_run === true,
  				on_block: step.on_block || "block_run",
+				reuse_outputs: normalizeReuseOutputs(step.id, step.reuse_outputs),
  				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],
  				required_mcp_servers: Array.isArray(step.required_mcp_servers) ? step.required_mcp_servers : [],
  				complete_when: completeWhen,

@@ -31,9 +31,59 @@ export const WorkflowCancelParameters = Type.Object({
   }),
 }, { additionalProperties: false });
 
+export const WorkflowStepUpdateParameters = Type.Object({
+  run_id: Type.String({
+    description: 'The active workflow run ID.',
+  }),
+  step_id: Type.String({
+    description: 'The running step ID to update.',
+  }),
+  status: Type.Optional(
+    Type.Union([
+      Type.Literal('progress'),
+      Type.Literal('ready'),
+      Type.Literal('blocked'),
+      Type.Literal('failed'),
+    ]),
+  ),
+  message: Type.Optional(Type.String()),
+  counters: Type.Optional(Type.Record(Type.String(), Type.Number())),
+  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+}, { additionalProperties: false });
+
+export const WorkflowStepCompleteParameters = Type.Object({
+  run_id: Type.String({
+    description: 'The active workflow run ID.',
+  }),
+  step_id: Type.String({
+    description: 'The running step ID requesting completion.',
+  }),
+  reason: Type.Optional(
+    Type.Union([
+      Type.Literal('generated'),
+      Type.Literal('cache_hit'),
+      Type.Literal('cache_repaired'),
+      Type.Literal('empty_result'),
+      Type.Literal('blocked_result'),
+      Type.Literal('external_result'),
+      Type.Literal('manual_adoption'),
+    ]),
+  ),
+  outputs: Type.Optional(Type.Array(Type.String())),
+  message: Type.Optional(Type.String()),
+  counters: Type.Optional(Type.Record(Type.String(), Type.Number())),
+  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  attempt: Type.Optional(Type.Number({ minimum: 0 })),
+  session_key: Type.Optional(Type.String()),
+  subagent_run_id: Type.Optional(Type.String()),
+  handoff_token: Type.Optional(Type.String()),
+}, { additionalProperties: false });
+
 export const toolSchemas = {
   workflow_run: WorkflowRunParameters,
   workflow_status: WorkflowStatusParameters,
   workflow_list: WorkflowListParameters,
   workflow_cancel: WorkflowCancelParameters,
+  workflow_step_update: WorkflowStepUpdateParameters,
+  workflow_step_complete: WorkflowStepCompleteParameters,
 };

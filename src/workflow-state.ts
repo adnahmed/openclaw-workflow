@@ -66,6 +66,14 @@ export function getLocalISOString(date = new Date()) {
  * @property {string|null}          cancellation_reason - Reason for cancellation
  * @property {string|null}          retry_not_before - ISO timestamp before which step should not retry
  * @property {OutputCheckResult|null} output_check - Result of output file validation
+ * @property {Array|null}           declared_outputs - Step output contract captured at launch
+ * @property {Object|null}          handoff      - Handoff metadata for explicit completion requests
+ * @property {Object|null}          cache        - Cache adoption metadata
+ * @property {Object.<string, number>|null} counters - Progress counters reported by worker/tool
+ * @property {string|null}          reported_status - Last non-authoritative progress status reported
+ * @property {string|null}          last_update_at - Last progress update timestamp
+ * @property {string|null}          last_message - Last progress/handoff message
+ * @property {string|null}          handoff_token - Current attempt handoff token
  * @property {string|null}          error        - Error message if step failed
  * @property {string|null}          logs         - Debug logs/output for the step
  * @property {number}               attempts     - Number of execution attempts made so far
@@ -144,6 +152,14 @@ export function createRunState(workflowName, workflowKey, stepIds, runId) {
       cancellation_reason: null,
       retry_not_before: null,
       output_check: null,
+      declared_outputs: null,
+      handoff: null,
+      cache: null,
+      counters: null,
+      reported_status: null,
+      last_update_at: null,
+      last_message: null,
+      handoff_token: null,
       error: null,
       logs: null,
       attempts: 0,
