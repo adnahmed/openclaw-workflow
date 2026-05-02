@@ -554,16 +554,45 @@ function buildWriteOutputPreamble(args: {
 	step: { outputs?: OutputSpec[] } | null | undefined;
 	validators?: Record<string, ValidatorSpec>;
 	workflowDir?: string;
+	runId: string;
+	stepId: string;
+	attempts?: number;
+	handoffToken?: string;
 }): string {
 	if (!Array.isArray(args.step?.outputs) || args.step.outputs.length === 0) {
 		return "";
 	}
 
-	return buildDeclaredOutputContractsPreamble({
+	const contract = buildDeclaredOutputContractsPreamble({
 		step: args.step,
 		validators: args.validators || {},
 		workflowDir: args.workflowDir,
 	});
+
+	const attemptLine =
+		typeof args.attempts === "number" ? `- attempt: ${args.attempts}` : "";
+	const tokenLine = args.handoffToken
+		? `- handoff_token: "${args.handoffToken}"`
+		: "";
+
+	return `${contract}
+IMPORTANT — Every write_output call MUST include:
+- run_id: "${args.runId}"
+- step_id: "${args.stepId}"
+${attemptLine}
+${tokenLine}
+
+Example JSON output write:
+{
+  "run_id": "${args.runId}",
+  "step_id": "${args.stepId}",
+  "path": "<declared output path>",
+  "data": <JSON value matching the validator>
+}
+
+For text outputs, use "text" instead of "data".
+Provide exactly one of "data" or "text".
+`;
 }
 
 function signalingModeForStep(step: any): "auto" | "off" {
@@ -878,6 +907,10 @@ export async function runStep(step, runId, api, options) {
 			step,
 			validators,
 			workflowDir,
+			runId,
+			stepId: step.id,
+			attempts,
+			handoffToken,
 		});
 		const taskWithPreamble =
 			EXEC_POLL_PREAMBLE +
@@ -1995,6 +2028,10 @@ export function createStepRunner(adapter) {
 				step,
 				validators,
 				workflowDir,
+				runId,
+				stepId: step.id,
+				attempts: options.attempts,
+				handoffToken: options.handoffToken,
 			});
 			const taskWithPreamble =
 				EXEC_POLL_PREAMBLE +

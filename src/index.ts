@@ -320,6 +320,12 @@ export default definePluginEntry({
 				} = params;
 
 				try {
+					if (!run_id || !step_id) {
+						return errorResult(
+							"write_output requires run_id and step_id. These must be injected into the step prompt by the workflow runner.",
+						);
+					}
+
 					if (
 						(typeof data === "undefined" && typeof text === "undefined") ||
 						(typeof data !== "undefined" && typeof text !== "undefined")
