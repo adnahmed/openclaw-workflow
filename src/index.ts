@@ -783,6 +783,64 @@ export default definePluginEntry({
 
 					if (!attemptMatch.ok) {
 						const now = getLocalISOString();
+
+						// Stale-attempt fast path: if outputs already validate, store as a
+						// late_success_candidate so the executor can adopt before next retry.
+						if (attemptMatch.reason === "stale_attempt") {
+							const workflow = await loadWorkflowForRun(state as RunState);
+							const workflowStepDef = workflow.steps.find(
+								(s) => s.id === step_id,
+							);
+							const declaredOutputs = step.declared_outputs || [];
+							const contractStep: WorkflowStep = {
+								...(workflowStepDef || {
+									id: step_id,
+									name: step_id,
+									task: null,
+									depends_on: [],
+									outputs: declaredOutputs,
+									timeout: 60,
+									retry: 0,
+									retry_delay: 0,
+									optional: false,
+								}),
+								id: step_id,
+								outputs: declaredOutputs,
+							};
+							const lateOutputCheck = await validateStepContract({
+								workflow,
+								step: contractStep,
+								baseDir,
+								workflowsDir,
+							});
+
+							if (lateOutputCheck.passed) {
+								state = await updateStepState(
+									state,
+									step_id,
+									{
+										late_success_candidate: {
+											attempt: attempt ?? 0,
+											handoff_token: handoff_token ?? null,
+											checked_at: now,
+											output_check: lateOutputCheck,
+											reason: "stale_attempt_but_outputs_passed",
+										},
+										last_update_at: now,
+										last_message: `Stale attempt ${attempt} — outputs validated; queued for adoption`,
+									},
+									runsDir,
+								);
+
+								return textResult({
+									ok: true,
+									decision: "late_success_candidate",
+									message:
+										"Stale attempt, but declared outputs validate and will be adopted by runner.",
+								});
+							}
+						}
+
 						state = await updateStepState(
 							state,
 							step_id,

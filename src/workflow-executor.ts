@@ -446,6 +446,43 @@ export async function executeWorkflow(
 			attempts,
 		});
 
+		// Before spawning a new session, check whether a previous stale attempt
+		// already produced valid declared outputs and stored a late_success_candidate.
+		const existingStepState = state.steps[step.id];
+		if (existingStepState?.late_success_candidate) {
+			const candidate = existingStepState.late_success_candidate;
+			const recheck = await validateStepContract({
+				workflow,
+				step,
+				baseDir,
+				workflowsDir,
+			});
+			if (recheck.passed) {
+				runningCounts.set(
+					trackingId,
+					Math.max(0, (runningCounts.get(trackingId) || 1) - 1),
+				);
+				await mutateState(async (current) => {
+					const next = await adoptStepContract({
+						state: current,
+						runsDir,
+						stepId: step.id,
+						outputCheck: recheck,
+						reason: "generated",
+						message: `Late handoff adopted (attempt ${candidate.attempt})`,
+					});
+					return updateStepState(
+						next,
+						step.id,
+						{ late_success_candidate: null, attempts },
+						runsDir,
+					);
+				});
+				await notify(`✅ ${step.name} complete (late handoff adopted)`);
+				return;
+			}
+		}
+
 		await mutateState((current) =>
 			updateStepState(
 				current,
@@ -456,6 +493,7 @@ export async function executeWorkflow(
 					retry_not_before: null,
 					attempts,
 					declared_outputs: step.outputs || [],
+					...(attempts === 1 ? { first_started_at_ms: Date.now() } : {}),
 
 					session_key: null,
 					session_id: null,
@@ -464,6 +502,7 @@ export async function executeWorkflow(
 					handoff_token: handoffToken,
 					handoff: null,
 					output_writes: null,
+					late_success_candidate: null,
 
 					cancel_requested_at: null,
 					cancel_confirmed_at: null,
@@ -492,6 +531,7 @@ export async function executeWorkflow(
 						defaultModel,
 						attempts,
 						handoffToken,
+						runStartedAtMs: new Date(state.started_at).getTime(),
 						cronDeliveryMode,
 						cronDeliveryChannel,
 						cronDeliveryTo,

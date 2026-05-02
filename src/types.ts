@@ -129,6 +129,20 @@ export type StepState = {
 	error: string | null;
 	logs: string | null;
 	attempts: number;
+	/** Unix ms timestamp of the first time this step was launched in this run (set on attempt 1, preserved across retries). */
+	first_started_at_ms?: number;
+	/**
+	 * A stale-attempt handoff whose declared outputs already validated.
+	 * Stored by workflow_step_complete when the attempt token is stale but outputs pass.
+	 * The executor adopts this before spawning the next retry.
+	 */
+	late_success_candidate?: {
+		attempt: number;
+		handoff_token?: string | null;
+		checked_at: string;
+		output_check: OutputCheckResult;
+		reason: string;
+	} | null;
 };
 
 /**

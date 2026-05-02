@@ -525,6 +525,28 @@ function outputCheckHasCurrentAttemptProvenance(args: {
 }
 
 /**
+ * Returns true when every declared output exists and its mtime is >= the run/step
+ * start time, meaning it was (re)produced during this workflow run regardless of
+ * which attempt wrote it.  Used as a fallback acceptance path so the runner doesn't
+ * retry a step whose previous attempt already produced valid, fresh output files.
+ */
+function outputWasProducedDuringThisRun(args: {
+	outputCheck: OutputCheckResult;
+	runStartedAtMs?: number;
+	stepFirstStartedAtMs?: number;
+}): boolean {
+	const minTime = args.stepFirstStartedAtMs ?? args.runStartedAtMs;
+	if (!minTime) return false;
+
+	return (args.outputCheck.validations ?? []).every(
+		(v) =>
+			v.exists &&
+			typeof v.modified_at_ms === "number" &&
+			v.modified_at_ms >= minTime,
+	);
+}
+
+/**
  * Preamble injected at the start of every step task prompt.
  *
  * Addresses a known OpenClaw behavior: the exec tool backgrounds commands that
@@ -852,6 +874,8 @@ export async function runStep(step, runId, api, options) {
 		workflowDir = "",
 		attempts,
 		handoffToken,
+		runStartedAtMs,
+		acceptPreviousAttemptOutputs = true,
 	} = options;
 
 	if (cancelled) {
@@ -1005,15 +1029,24 @@ export async function runStep(step, runId, api, options) {
 				);
 
 				if (outputCheck.passed) {
-					if (
+					const hasCurrentAttemptProvenance =
 						outputCheckHasCurrentAttemptProvenance({
 							stepState: liveStepState,
 							outputCheck,
 							runId,
 							stepId: step.id,
 							attempt: attempts,
-						})
-					) {
+						});
+
+					const hasSameRunOutput =
+						acceptPreviousAttemptOutputs &&
+						outputWasProducedDuringThisRun({
+							outputCheck,
+							runStartedAtMs,
+							stepFirstStartedAtMs: liveStepState?.first_started_at_ms,
+						});
+
+					if (hasCurrentAttemptProvenance || hasSameRunOutput) {
 						const mapped = statusFromOutputDecision(outputCheck);
 						finalStatus = mapped.finalStatus;
 						retryable = mapped.retryable;
