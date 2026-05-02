@@ -30,9 +30,9 @@
  * const loaded = await readRunState('seo-pipeline-20260309T082000', '/home/user/.openclaw/workflow-runs');
  */
 
-import { readFile, writeFile, readdir, mkdir, rename } from 'node:fs/promises';
-import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { mkdir, readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { writeJsonAtomic } from "./json-io.js";
 
 /**
  * Returns a date as an ISO 8601 string in the system's local timezone.
@@ -40,8 +40,8 @@ import { randomBytes } from 'node:crypto';
  * @returns {string} Local ISO timestamp (e.g. "2026-04-30T15:30:00.123")
  */
 export function getLocalISOString(date = new Date()) {
-  const offset = date.getTimezoneOffset() * 60000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, -1);
+	const offset = date.getTimezoneOffset() * 60000;
+	return new Date(date.getTime() - offset).toISOString().slice(0, -1);
 }
 
 /**
@@ -103,19 +103,16 @@ export function getLocalISOString(date = new Date()) {
  * // → 'seo-pipeline-20260309T082000'
  */
 export function generateRunId(workflowName) {
-  // Slugify: lowercase, spaces/special chars → hyphens, trim hyphens
-  const slug = workflowName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+	// Slugify: lowercase, spaces/special chars → hyphens, trim hyphens
+	const slug = workflowName
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "");
 
-  // UTC compact datetime: YYYYMMDDTHHmmss (no colons — safe for filenames)
-  const now = new Date();
-  const ts = getLocalISOString()
-    .replace(/[-:]/g, '')
-    .split('.')[0]; // remove milliseconds → e.g. 20260309T082000
+	// UTC compact datetime: YYYYMMDDTHHmmss (no colons — safe for filenames)
+	const ts = getLocalISOString().replace(/[-:]/g, "").split(".")[0]; // remove milliseconds → e.g. 20260309T082000
 
-  return `${slug}-${ts}`;
+	return `${slug}-${ts}`;
 }
 
 /**
@@ -133,50 +130,51 @@ export function generateRunId(workflowName) {
  * const state = createRunState('seo-pipeline', 'seo-pipeline', ['tech-auditor', 'content-creator', 'standup'], 'seo-pipeline-20260309T082000');
  */
 export function createRunState(workflowName, workflowKey, stepIds, runId) {
-  /** @type {Object.<string, StepState>} */
-  const steps = {};
-  for (const id of stepIds) {
-    steps[id] = {
-      status: 'pending',
-      started_at: null,
-      completed_at: null,
-      duration_ms: null,
-      session_key: null,
-      session_id: null,
-      subagent_run_id: null,
-      session_adapter: null,
-      cancel_requested_at: null,
-      cancel_confirmed_at: null,
-      cancel_method: null,
-      cancel_error: null,
-      cancellation_reason: null,
-      retry_not_before: null,
-      output_check: null,
-      declared_outputs: null,
-      handoff: null,
-      cache: null,
-      counters: null,
-      reported_status: null,
-      last_update_at: null,
-      last_message: null,
-      handoff_token: null,
-      error: null,
-      logs: null,
-      attempts: 0,
-    };
-  }
+	/** @type {Object.<string, StepState>} */
+	const steps = {};
+	for (const id of stepIds) {
+		steps[id] = {
+			status: "pending",
+			started_at: null,
+			completed_at: null,
+			duration_ms: null,
+			session_key: null,
+			session_id: null,
+			subagent_run_id: null,
+			session_adapter: null,
+			cancel_requested_at: null,
+			cancel_confirmed_at: null,
+			cancel_method: null,
+			cancel_error: null,
+			cancellation_reason: null,
+			retry_not_before: null,
+			output_check: null,
+			declared_outputs: null,
+			handoff: null,
+			cache: null,
+			output_writes: null,
+			counters: null,
+			reported_status: null,
+			last_update_at: null,
+			last_message: null,
+			handoff_token: null,
+			error: null,
+			logs: null,
+			attempts: 0,
+		};
+	}
 
-  return {
-    run_id: runId,
-    workflow: workflowName,
-    workflow_key: workflowKey,
-    status: 'pending',
-    started_at: getLocalISOString(),
-    completed_at: null,
-    cancel_requested_at: null,
-    cancelled_at: null,
-    steps,
-  };
+	return {
+		run_id: runId,
+		workflow: workflowName,
+		workflow_key: workflowKey,
+		status: "pending",
+		started_at: getLocalISOString(),
+		completed_at: null,
+		cancel_requested_at: null,
+		cancelled_at: null,
+		steps,
+	};
 }
 
 /**
@@ -192,26 +190,13 @@ export function createRunState(workflowName, workflowKey, stepIds, runId) {
  * await saveRunState(state, '/home/user/.openclaw/workflow-runs');
  */
 export async function saveRunState(state, runsDir) {
-  // Ensure the directory exists (creates recursively if needed)
-  await mkdir(runsDir, { recursive: true });
+	// Ensure the directory exists (creates recursively if needed)
+	await mkdir(runsDir, { recursive: true });
 
-  const targetPath = join(runsDir, `${state.run_id}.json`);
-  const tempPath = join(runsDir, `.${state.run_id}.${randomBytes(6).toString('hex')}.tmp`);
+	const targetPath = join(runsDir, `${state.run_id}.json`);
+	await writeJsonAtomic(targetPath, state);
 
-  const json = JSON.stringify(state, null, 2);
-  await writeFile(tempPath, json, 'utf8');
-
-  // Atomic rename: on same-filesystem moves this is atomic.
-  // On cross-filesystem moves (e.g. /tmp on a ramdisk), it copies then unlinks.
-  // Either way, the target is never left in a partial state.
-  try {
-    await rename(tempPath, targetPath);
-  } catch (err) {
-    // rename() can fail cross-filesystem on some systems; fall back to direct write
-    await writeFile(targetPath, json, 'utf8');
-  }
-
-  return targetPath;
+	return targetPath;
 }
 
 /**
@@ -226,9 +211,9 @@ export async function saveRunState(state, runsDir) {
  * const state = await readRunState('seo-pipeline-20260309T082000', runsDir);
  */
 export async function readRunState(runId, runsDir) {
-  const filePath = join(runsDir, `${runId}.json`);
-  const raw = await readFile(filePath, 'utf8');
-  return JSON.parse(raw);
+	const filePath = join(runsDir, `${runId}.json`);
+	const raw = await readFile(filePath, "utf8");
+	return JSON.parse(raw);
 }
 
 /**
@@ -248,9 +233,9 @@ export async function readRunState(runId, runsDir) {
  * state = await updateRunState(state, { status: 'running' }, runsDir);
  */
 export async function updateRunState(state, updates, runsDir) {
-  const newState = { ...state, ...updates };
-  await saveRunState(newState, runsDir);
-  return newState;
+	const newState = { ...state, ...updates };
+	await saveRunState(newState, runsDir);
+	return newState;
 }
 
 /**
@@ -271,18 +256,18 @@ export async function updateRunState(state, updates, runsDir) {
  * }, runsDir);
  */
 export async function updateStepState(state, stepId, stepUpdates, runsDir) {
-  const newState = {
-    ...state,
-    steps: {
-      ...state.steps,
-      [stepId]: {
-        ...state.steps[stepId],
-        ...stepUpdates,
-      },
-    },
-  };
-  await saveRunState(newState, runsDir);
-  return newState;
+	const newState = {
+		...state,
+		steps: {
+			...state.steps,
+			[stepId]: {
+				...state.steps[stepId],
+				...stepUpdates,
+			},
+		},
+	};
+	await saveRunState(newState, runsDir);
+	return newState;
 }
 
 /**
@@ -298,35 +283,40 @@ export async function updateStepState(state, stepId, stepUpdates, runsDir) {
  * // [{ run_id: '...', status: 'ok', ... }, ...]
  */
 export async function listRuns(runsDir, filterWorkflow = null) {
-  try {
-    await mkdir(runsDir, { recursive: true });
-    const entries = await readdir(runsDir);
-    const runs = [];
+	try {
+		await mkdir(runsDir, { recursive: true });
+		const entries = await readdir(runsDir);
+		const runs = [];
 
-    for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue;
-      try {
-        const raw = await readFile(join(runsDir, entry), 'utf8');
-        const state = JSON.parse(raw);
-        if (filterWorkflow && state.workflow !== filterWorkflow && state.workflow_key !== filterWorkflow) continue;
-        runs.push(state);
-      } catch {
-        // Corrupted or non-run file — skip silently
-      }
-    }
+		for (const entry of entries) {
+			if (!entry.endsWith(".json")) continue;
+			try {
+				const raw = await readFile(join(runsDir, entry), "utf8");
+				const state = JSON.parse(raw);
+				if (
+					filterWorkflow &&
+					state.workflow !== filterWorkflow &&
+					state.workflow_key !== filterWorkflow
+				)
+					continue;
+				runs.push(state);
+			} catch {
+				// Corrupted or non-run file — skip silently
+			}
+		}
 
-    // Sort newest first by started_at
-    runs.sort((a, b) => {
-      const ta = a.started_at ? new Date(a.started_at).getTime() : 0;
-      const tb = b.started_at ? new Date(b.started_at).getTime() : 0;
-      return tb - ta;
-    });
+		// Sort newest first by started_at
+		runs.sort((a, b) => {
+			const ta = a.started_at ? new Date(a.started_at).getTime() : 0;
+			const tb = b.started_at ? new Date(b.started_at).getTime() : 0;
+			return tb - ta;
+		});
 
-    return runs;
-  } catch {
-    // Directory doesn't exist yet — no runs
-    return [];
-  }
+		return runs;
+	} catch {
+		// Directory doesn't exist yet — no runs
+		return [];
+	}
 }
 
 /**
@@ -337,6 +327,6 @@ export async function listRuns(runsDir, filterWorkflow = null) {
  * @returns {Promise<RunState|null>} Most recent run, or null if none exists
  */
 export async function findLatestRun(workflowName, runsDir) {
-  const runs = await listRuns(runsDir, workflowName);
-  return runs.length > 0 ? runs[0] : null;
+	const runs = await listRuns(runsDir, workflowName);
+	return runs.length > 0 ? runs[0] : null;
 }

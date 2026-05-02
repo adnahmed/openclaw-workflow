@@ -44,23 +44,24 @@
 import fs, { appendFile } from "node:fs/promises";
 import path, { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { writeJsonAtomic } from "./json-io.js";
 import {
 	resolveList,
 	resolvePathToList,
 	validateLoopItems,
 } from "./list-resolver.js";
-import { runStep, emptyOutputCheck } from "./step-runner.js";
 import {
 	adoptStepContract,
 	buildStepHandoffToken,
+	computeStepContractSignature,
 	decisionAcceptedForReuse,
 	evaluateCacheFreshness,
 	evaluateReuseCondition,
 	markCacheProbe,
 	validateStepContract,
 	writeStepCacheManifest,
-	computeStepContractSignature,
 } from "./step-contract.js";
+import { emptyOutputCheck, runStep } from "./step-runner.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import type { RunState, StepState, WorkflowStep } from "./types.js";
 import {
@@ -181,10 +182,7 @@ export async function executeWorkflow(
 	try {
 		await fs.mkdir(config.runsDir, { recursive: true });
 		const plan = await compileWorkflow(workflow, runId, config);
-		await fs.writeFile(
-			join(config.runsDir, `${runId}.plan.json`),
-			JSON.stringify(plan, null, 2),
-		);
+		await writeJsonAtomic(join(config.runsDir, `${runId}.plan.json`), plan);
 	} catch (err) {
 		const state =
 			initialState ??
@@ -317,17 +315,15 @@ export async function executeWorkflow(
 				return depState && isTerminalStatus(depState.status);
 			});
 
-
 			return {
 				ready: allDepsTerminal,
 				blocked: false,
 			};
 		}
 
-		for (const depId of (step.depends_on || [])) {
+		for (const depId of step.depends_on || []) {
 			const depState = state.steps[depId];
 			if (!depState) continue;
-
 
 			const depDef = stepMap.get(depId);
 			const depOptional = depDef?.optional === true;
@@ -467,6 +463,7 @@ export async function executeWorkflow(
 					session_adapter: sessionAdapter,
 					handoff_token: handoffToken,
 					handoff: null,
+					output_writes: null,
 
 					cancel_requested_at: null,
 					cancel_confirmed_at: null,
@@ -507,6 +504,7 @@ export async function executeWorkflow(
 						validators: workflow.validators || {},
 						workflowDir: workflow.__dir || workflowsDir,
 						workflow,
+						getStepState: () => state.steps[step.id],
 
 						onSpawn: async (spawn) => {
 							await mutateState((current) =>
@@ -646,9 +644,13 @@ export async function executeWorkflow(
 				} else {
 					// Failure path — check for retry
 					const maxAttempts = (step.retry || 0) + 1;
-					function retryKindMatches(policyKind: string, actualKind: string): boolean {
+					function retryKindMatches(
+						policyKind: string,
+						actualKind: string,
+					): boolean {
 						if (policyKind === actualKind) return true;
-						if (policyKind === "timeout" && actualKind.startsWith("timeout")) return true;
+						if (policyKind === "timeout" && actualKind.startsWith("timeout"))
+							return true;
 						return false;
 					}
 
@@ -658,7 +660,9 @@ export async function executeWorkflow(
 							.filter((kind): kind is string => Boolean(kind)) ?? [];
 
 					const resultFailureKind =
-						typeof result.failure_kind === "string" ? result.failure_kind : null;
+						typeof result.failure_kind === "string"
+							? result.failure_kind
+							: null;
 
 					const failureKinds = [
 						...(resultFailureKind ? [resultFailureKind] : []),
@@ -667,13 +671,18 @@ export async function executeWorkflow(
 
 					const isTimeout =
 						failureKinds.some((kind) => kind.startsWith("timeout")) ||
-						(typeof result.error === "string" && result.error.includes("timed out"));
+						(typeof result.error === "string" &&
+							result.error.includes("timed out"));
 
 					const stopUnconfirmed =
 						failureKinds.includes("timeout_stop_unconfirmed") ||
 						(typeof result.error === "string" &&
-							(result.error.includes("subagent stop after output completion was not confirmed") ||
-								result.error.includes("subagent stop after timeout was not confirmed")));
+							(result.error.includes(
+								"subagent stop after output completion was not confirmed",
+							) ||
+								result.error.includes(
+									"subagent stop after timeout was not confirmed",
+								)));
 
 					if (isTimeout && failureKinds.length === 0) {
 						failureKinds.push(
@@ -694,11 +703,9 @@ export async function executeWorkflow(
 
 					const retryableByPolicy =
 						!excludedByPolicy &&
-						(
-							result.retryable === true ||
+						(result.retryable === true ||
 							includedByPolicy ||
-							(retryOn.includes("timeout") && isTimeout)
-						);
+							(retryOn.includes("timeout") && isTimeout));
 
 					const shouldRetry =
 						result.status === "failed" &&
@@ -726,8 +733,12 @@ export async function executeWorkflow(
 									error: result.error,
 									logs: result.logs,
 									attempts,
-									cancel_requested_at: result.cancel_result?.requested ? completedAt : null,
-									cancel_confirmed_at: result.cancel_result?.confirmed ? completedAt : null,
+									cancel_requested_at: result.cancel_result?.requested
+										? completedAt
+										: null,
+									cancel_confirmed_at: result.cancel_result?.confirmed
+										? completedAt
+										: null,
 									cancel_method: result.cancel_result?.method ?? null,
 									cancel_error: result.cancel_result?.error ?? null,
 									cancellation_reason: result.cancel_result?.requested
@@ -754,8 +765,12 @@ export async function executeWorkflow(
 									error: result.error,
 									logs: result.logs,
 									attempts,
-									cancel_requested_at: result.cancel_result?.requested ? completedAt : null,
-									cancel_confirmed_at: result.cancel_result?.confirmed ? completedAt : null,
+									cancel_requested_at: result.cancel_result?.requested
+										? completedAt
+										: null,
+									cancel_confirmed_at: result.cancel_result?.confirmed
+										? completedAt
+										: null,
 									cancel_method: result.cancel_result?.method ?? null,
 									cancel_error: result.cancel_result?.error ?? null,
 									cancellation_reason: result.cancel_result?.requested
@@ -893,10 +908,7 @@ export async function executeWorkflow(
 
 			await notify(`♻️ Reused cached outputs for ${step.name}`);
 
-			if (
-				state.steps[step.id]?.status === "failed" &&
-				!step.optional
-			) {
+			if (state.steps[step.id]?.status === "failed" && !step.optional) {
 				await cascadeSkip(step.id);
 			}
 

@@ -1,14 +1,6 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizePluginConfig } from "./config.js";
-import { cancelStepSession, runStep } from "./step-runner.js";
-import {
-	WorkflowStepCompleteParameters,
-	WorkflowStepUpdateParameters,
-	WorkflowCancelParameters,
-	WorkflowListParameters,
-	WorkflowRunParameters,
-	WorkflowStatusParameters,
-} from "./tool-schemas.js";
+import { writeDeclaredOutput } from "./output-writer.js";
 import {
 	adoptStepContract,
 	computeStepContractSignature,
@@ -17,8 +9,24 @@ import {
 	validateStepContract,
 	writeStepCacheManifest,
 } from "./step-contract.js";
+import { cancelStepSession, runStep } from "./step-runner.js";
+import {
+	WorkflowCancelParameters,
+	WorkflowListParameters,
+	WorkflowRunParameters,
+	WorkflowStatusParameters,
+	WorkflowStepCompleteParameters,
+	WorkflowStepUpdateParameters,
+	WorkflowWriteOutputParameters,
+} from "./tool-schemas.js";
+import type {
+	CancelResult,
+	OutputSpec,
+	RunState,
+	StepState,
+	WorkflowStep,
+} from "./types.js";
 import { outputPathOf } from "./variable-substitution.js";
-import type { RunState, StepState } from "./types.js";
 import {
 	dryRun,
 	executeWorkflow,
@@ -292,6 +300,131 @@ export default definePluginEntry({
 		}
 
 		api.registerTool({
+			name: "write_output",
+			description:
+				"Safely write a declared workflow step output using the step's declared validator.",
+			parameters: WorkflowWriteOutputParameters,
+			optional: true,
+			async execute(first, second) {
+				const params = readParams(first, second);
+				const {
+					run_id,
+					step_id,
+					path,
+					data,
+					text,
+					attempt,
+					session_key,
+					subagent_run_id,
+					handoff_token,
+				} = params;
+
+				try {
+					if (
+						(typeof data === "undefined" && typeof text === "undefined") ||
+						(typeof data !== "undefined" && typeof text !== "undefined")
+					) {
+						return errorResult("Provide exactly one of 'data' or 'text'.");
+					}
+
+					let state = await readRunState(run_id, runsDir);
+					const step = (state as RunState).steps?.[step_id] as
+						| StepState
+						| undefined;
+
+					if (!step) {
+						return errorResult(
+							`Step "${step_id}" does not exist in run "${run_id}".`,
+						);
+					}
+
+					if (state.status !== "running") {
+						return errorResult(
+							`Run "${run_id}" is not active (status=${state.status}).`,
+						);
+					}
+
+					if (step.status !== "running") {
+						return errorResult(
+							`Step "${step_id}" is not currently running (status=${step.status}).`,
+						);
+					}
+
+					const attemptMatch = handoffMatchesCurrentAttempt({
+						stepState: step,
+						attempt,
+						session_key,
+						subagent_run_id,
+						handoff_token,
+					});
+
+					if (!attemptMatch.ok) {
+						return textResult({
+							ok: false,
+							committed: false,
+							decision: "fail",
+							message: `write_output rejected: ${attemptMatch.reason}`,
+						});
+					}
+
+					const workflow = await loadWorkflowForRun(state as RunState);
+
+					const result = await writeDeclaredOutput({
+						workflow,
+						state: state as RunState,
+						stepId: step_id,
+						path,
+						data,
+						text,
+						baseDir,
+						workflowsDir,
+						attempt,
+						session_key,
+						subagent_run_id,
+						handoff_token,
+					});
+
+					if (!result.ok || !result.committed) {
+						return textResult(result);
+					}
+
+					const now = getLocalISOString();
+					const outputWrites = {
+						...(step.output_writes || {}),
+						[path]: result.provenance,
+					};
+
+					state = await updateStepState(
+						state,
+						step_id,
+						{
+							output_writes: outputWrites,
+							last_update_at: now,
+							last_message: `Committed declared output: ${path}`,
+						},
+						runsDir,
+					);
+
+					return textResult({
+						ok: true,
+						committed: true,
+						path,
+						decision: result.decision,
+						validator: result.provenance.validator,
+						bytes: result.provenance.bytes,
+						sha256: result.provenance.sha256,
+						message: "Declared output committed.",
+					});
+				} catch (err) {
+					if (err?.code === "ENOENT") {
+						return errorResult(`Run not found: ${run_id}`);
+					}
+					return errorResult(err instanceof Error ? err.message : String(err));
+				}
+			},
+		});
+
+		api.registerTool({
 			name: "workflow_run",
 			description:
 				"Run a named workflow asynchronously. Supports dry_run validation and resume from the most recent run.",
@@ -418,7 +551,7 @@ export default definePluginEntry({
 			async execute(first, second) {
 				const { run_id, name } = readParams(first, second);
 				try {
-					let state;
+					let state: RunState | null = null;
 					if (run_id) {
 						state = await readRunState(run_id, runsDir);
 					} else if (name) {
@@ -429,10 +562,10 @@ export default definePluginEntry({
 						return errorResult("Provide either run_id or name");
 					}
 
+					const runState = state as RunState;
+
 					const stepSummary = {};
-					for (const [stepId, stepState] of Object.entries(
-						(state as RunState).steps,
-					)) {
+					for (const [stepId, stepState] of Object.entries(runState.steps)) {
 						const s = stepState as StepState;
 						stepSummary[stepId] = {
 							status: s.status,
@@ -447,20 +580,20 @@ export default definePluginEntry({
 						};
 					}
 
-					const s = state as RunState;
+					const s = runState;
 					const elapsedMs = s.started_at
 						? (s.completed_at
 								? new Date(s.completed_at).getTime()
 								: Date.now()) - new Date(s.started_at).getTime()
 						: null;
-					const steps = Object.values(state.steps);
+					const steps = Object.values(runState.steps);
 
 					return textResult({
-						run_id: state.run_id,
-						workflow: state.workflow,
-						status: state.status,
-						started_at: state.started_at,
-						completed_at: state.completed_at,
+						run_id: runState.run_id,
+						workflow: runState.workflow,
+						status: runState.status,
+						started_at: runState.started_at,
+						completed_at: runState.completed_at,
 						elapsed_s: elapsedMs ? Math.round(elapsedMs / 1000) : null,
 						steps_ok: steps.filter(
 							(step) => (step as StepState).status === "ok",
@@ -535,7 +668,9 @@ export default definePluginEntry({
 
 				try {
 					let state = await readRunState(run_id, runsDir);
-					const step = (state as RunState).steps?.[step_id] as StepState | undefined;
+					const step = (state as RunState).steps?.[step_id] as
+						| StepState
+						| undefined;
 
 					if (!step) {
 						return errorResult(
@@ -610,7 +745,9 @@ export default definePluginEntry({
 
 				try {
 					let state = await readRunState(run_id, runsDir);
-					const step = (state as RunState).steps?.[step_id] as StepState | undefined;
+					const step = (state as RunState).steps?.[step_id] as
+						| StepState
+						| undefined;
 
 					if (!step) {
 						return errorResult(
@@ -672,23 +809,39 @@ export default definePluginEntry({
 
 					const workflow = await loadWorkflowForRun(state as RunState);
 					const workflowStepDef = workflow.steps.find((s) => s.id === step_id);
+					const declaredOutputs = step.declared_outputs || [];
+					const contractStep: WorkflowStep = {
+						...(workflowStepDef || {
+							id: step_id,
+							name: step_id,
+							task: null,
+							depends_on: [],
+							outputs: declaredOutputs,
+							timeout: 60,
+							retry: 0,
+							retry_delay: 0,
+							optional: false,
+						}),
+						id: step_id,
+						outputs: declaredOutputs,
+					};
 
 					const outputCheck = await validateStepContract({
 						workflow,
-						step: {
-							id: step_id,
-							outputs:
-								(outputs && outputs.length > 0
-									? outputs
-									: step.declared_outputs || []),
-						} as any,
+						step: contractStep,
 						baseDir,
 						workflowsDir,
-						outputsOverride: outputs,
 					});
 
 					const decision = outputCheck.decision;
-					let freshness: any = {
+					let freshness: {
+						ok: boolean;
+						reason?: string;
+						current_signature: string;
+						previous_signature?: string;
+						producer_run_id?: string;
+						validator_hash?: string;
+					} = {
 						ok: true,
 						reason: "signature_match",
 						current_signature: "",
@@ -701,11 +854,7 @@ export default definePluginEntry({
 						freshness = await evaluateCacheFreshness({
 							workflow,
 							step: {
-								id: step_id,
-								task: workflowStepDef?.task || null,
-								outputs: (step.declared_outputs || []) as any,
-								output_contract_version:
-									workflowStepDef?.output_contract_version,
+								...contractStep,
 								reuse_outputs: {
 									enabled: true,
 									require_signature:
@@ -715,11 +864,10 @@ export default definePluginEntry({
 										"stale",
 									freshness: workflowStepDef?.reuse_outputs?.freshness,
 								},
-							} as any,
+							},
 							state,
 							baseDir,
 							workflowsDir,
-							outputsOverride: outputs,
 						});
 					}
 
@@ -765,10 +913,9 @@ export default definePluginEntry({
 							decision: freshness.ok ? decision : "stale",
 							missing_outputs: outputCheck.missing_files,
 							invalid_outputs: invalidOutputs,
-							message:
-								freshness.ok
-									? "Handoff received but step contract did not validate."
-									: "Cached outputs passed validators but were produced under an older output contract.",
+							message: freshness.ok
+								? "Handoff received but step contract did not validate."
+								: "Cached outputs passed validators but were produced under an older output contract.",
 							action: freshness.ok ? "fix_outputs" : "continue_running",
 						});
 					}
@@ -788,29 +935,21 @@ export default definePluginEntry({
 						const signature = await computeStepContractSignature({
 							workflow,
 							step: {
-								id: step_id,
-								task: workflowStepDef?.task || null,
-								outputs: (step.declared_outputs || []) as any,
-								output_contract_version:
-									workflowStepDef?.output_contract_version,
+								...contractStep,
 								reuse_outputs: {
 									enabled: true,
 									freshness: workflowStepDef?.reuse_outputs?.freshness,
 								},
-							} as any,
+							},
 							state,
 							baseDir,
 							workflowsDir,
-							outputsOverride: outputs,
 						});
 
 						await writeStepCacheManifest({
 							baseDir,
 							stepId: step_id,
-							outputs:
-								(outputs && outputs.length > 0
-									? outputs
-									: (step.declared_outputs || []).map((o) => outputPathOf(o as any))),
+							outputs: declaredOutputs.map((o: OutputSpec) => outputPathOf(o)),
 							producerRunId: run_id,
 							reason,
 							decision: outputCheck.decision,
@@ -926,7 +1065,7 @@ export default definePluginEntry({
 							continue;
 						}
 
-						let cancelResult;
+						let cancelResult: CancelResult;
 
 						try {
 							cancelResult = await cancelStepSession(api, {

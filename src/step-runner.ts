@@ -36,13 +36,27 @@
  */
 
 import { exec, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkOutputs } from "./output-checker.js";
+import {
+	type CancelResult,
+	type MockAdapterOptions,
+	type OutputCheckResult,
+	type OutputSpec,
+	type OutputValidationResult,
+	type SessionAdapter,
+	type SpawnOptions,
+	type StepFailureKind,
+	StepRunResult,
+	type StepState,
+	type ValidationDecision,
+	type ValidatorSpec,
+} from "./types.js";
 import { getLocalISOString } from "./workflow-state.js";
-import { OutputCheckResult, StepRunResult, SpawnOptions, CancelResult, MockAdapterOptions, SessionAdapter, StepFailureKind } from "./types.js";
 
 const execAsync = promisify(exec);
 let cachedOpenClawPath = null;
@@ -213,26 +227,300 @@ function statusFromOutputDecision(outputCheck) {
 }
 
 function outputFailureKinds(outputCheck: OutputCheckResult): string[] {
-  return (
-    outputCheck.validations
-      ?.map((v) => v.failure_kind)
-      .filter((kind): kind is StepFailureKind => Boolean(kind)) ?? []
-  );
-}
-
-function hasOnlyMissingOutputFiles(outputCheck: OutputCheckResult): boolean {
-
-	const validations = outputCheck.validations ?? [];
 	return (
-		validations.length > 0 &&
-		validations.every((v) => v.failure_kind === "missing_file")
+		outputCheck.validations
+			?.map((v) => v.failure_kind)
+			.filter((kind): kind is StepFailureKind => Boolean(kind)) ?? []
 	);
 }
 
-function hasHardOutputFailure(outputCheck: OutputCheckResult): boolean {
-	const validations = outputCheck.validations ?? [];
-	return validations.some(
-		(v) => v.failure_kind && v.failure_kind !== "missing_file",
+function readResolvedValidatorSchema(
+	validator: ValidatorSpec | undefined,
+	workflowDir = "",
+): unknown {
+	if (!validator?.schema) return null;
+	if (typeof validator.schema === "object") return validator.schema;
+
+	const trimmed = validator.schema.trim();
+	if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+		return JSON.parse(trimmed);
+	}
+
+	const schemaPath = path.isAbsolute(trimmed)
+		? trimmed
+		: path.resolve(workflowDir || process.cwd(), trimmed);
+	return JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+}
+
+function schemaTypeLabel(schema: Record<string, unknown> | null): string {
+	if (!schema || typeof schema !== "object") return "JSON value";
+	if (schema.type === "array") return "JSON array";
+	if (schema.type === "object") return "JSON object";
+	if (typeof schema.type === "string") return `JSON ${schema.type}`;
+	return "JSON value";
+}
+
+function propertyDescription(
+	name: string,
+	prop: Record<string, unknown> | undefined,
+	required: boolean,
+): string {
+	const type = typeof prop?.type === "string" ? prop.type : "value";
+	const pattern =
+		typeof prop?.pattern === "string" ? `, pattern ${prop.pattern}` : "";
+	return `- ${name}: ${type}${pattern}${required ? "" : " (optional)"}`;
+}
+
+function describeSchema(schema: unknown): string[] {
+	if (!schema || typeof schema !== "object") {
+		return ["Shape: any JSON value"];
+	}
+
+	const typed = schema as Record<string, unknown>;
+	const type = typed.type;
+
+	if (type === "array") {
+		const lines = ["Type: JSON array"];
+		const items = typed.items;
+		if (items && typeof items === "object") {
+			const itemSchema = items as Record<string, unknown>;
+			if (itemSchema.type === "object") {
+				lines.push("Each item must be an object with:");
+				const required = new Set(
+					Array.isArray(itemSchema.required)
+						? (itemSchema.required as string[])
+						: [],
+				);
+				const properties = (
+					itemSchema.properties && typeof itemSchema.properties === "object"
+						? itemSchema.properties
+						: {}
+				) as Record<string, Record<string, unknown>>;
+				for (const [name, prop] of Object.entries(properties)) {
+					lines.push(propertyDescription(name, prop, required.has(name)));
+				}
+			} else {
+				lines.push(`Items: ${schemaTypeLabel(itemSchema)}`);
+			}
+		}
+		return lines;
+	}
+
+	if (type === "object") {
+		const lines = ["Type: JSON object"];
+		const required = new Set(
+			Array.isArray(typed.required) ? (typed.required as string[]) : [],
+		);
+		const properties = (
+			typed.properties && typeof typed.properties === "object"
+				? typed.properties
+				: {}
+		) as Record<string, Record<string, unknown>>;
+		if (Object.keys(properties).length > 0) {
+			lines.push("Fields:");
+			for (const [name, prop] of Object.entries(properties)) {
+				lines.push(propertyDescription(name, prop, required.has(name)));
+			}
+		}
+		return lines;
+	}
+
+	return [`Type: ${schemaTypeLabel(typed)}`];
+}
+
+function sampleValueFromSchema(schema: unknown): unknown {
+	if (!schema || typeof schema !== "object") return "example";
+	const typed = schema as Record<string, unknown>;
+	if (typed.example !== undefined) return typed.example;
+	if (Array.isArray(typed.enum) && typed.enum.length > 0) return typed.enum[0];
+
+	if (typed.type === "string") {
+		if (typeof typed.pattern === "string") {
+			if (typed.pattern.includes("^alert_")) return "alert_123_example";
+		}
+		return "example";
+	}
+	if (typed.type === "number" || typed.type === "integer") return 1;
+	if (typed.type === "boolean") return true;
+	if (typed.type === "array") {
+		return [sampleValueFromSchema(typed.items ?? { type: "string" })];
+	}
+	if (typed.type === "object") {
+		const required = new Set(
+			Array.isArray(typed.required) ? (typed.required as string[]) : [],
+		);
+		const properties = (
+			typed.properties && typeof typed.properties === "object"
+				? typed.properties
+				: {}
+		) as Record<string, unknown>;
+		const obj: Record<string, unknown> = {};
+		for (const [key, prop] of Object.entries(properties)) {
+			if (required.has(key)) {
+				obj[key] = sampleValueFromSchema(prop);
+			}
+		}
+		return obj;
+	}
+
+	return "example";
+}
+
+function blockedExampleForValidator(schema: unknown): unknown {
+	if (!schema || typeof schema !== "object") return null;
+	const typed = schema as Record<string, unknown>;
+	if (typed.type !== "object") return null;
+	const properties = (
+		typed.properties && typeof typed.properties === "object"
+			? typed.properties
+			: {}
+	) as Record<string, unknown>;
+	if (!properties.status || !properties.workflow_result) return null;
+
+	return {
+		status: "blocked",
+		reason: "upstream_blocked",
+		workflow_result: {
+			ok: false,
+			retryable: false,
+			blocked: true,
+			failed: false,
+		},
+	};
+}
+
+function renderJsonExample(label: string, value: unknown): string {
+	return `${label}:\n${JSON.stringify(value, null, 2)}`;
+}
+
+function buildDeclaredOutputContractsPreamble(args: {
+	step: { outputs?: OutputSpec[] };
+	validators: Record<string, ValidatorSpec>;
+	workflowDir?: string;
+}): string {
+	const outputs = Array.isArray(args.step.outputs) ? args.step.outputs : [];
+	if (outputs.length === 0) {
+		return "";
+	}
+
+	const blocks = outputs.map((output, index) => {
+		const outputSpec = typeof output === "string" ? { path: output } : output;
+		const validatorId = outputSpec.validate;
+		const validator = validatorId ? args.validators?.[validatorId] : undefined;
+		const schema = readResolvedValidatorSchema(
+			validator,
+			args.workflowDir || "",
+		);
+		const lines = [
+			`Output contract ${index + 1}:`,
+			`Path: ${outputSpec.path}`,
+			`Validator: ${validatorId || "(none)"}`,
+		];
+
+		if (validator) {
+			lines.push(...describeSchema(schema));
+			lines.push("Semantic decision:");
+			lines.push(`- pass_when: ${validator.pass_when || "(none)"}`);
+			lines.push(`- retry_when: ${validator.retry_when || "(none)"}`);
+			lines.push(`- block_when: ${validator.block_when || "(none)"}`);
+			lines.push(`- fail_when: ${validator.fail_when || "(none)"}`);
+			lines.push(`- unknown_policy: ${validator.unknown_policy || "fail"}`);
+
+			const blockedExample = validator.block_when
+				? blockedExampleForValidator(schema)
+				: null;
+			if (blockedExample) {
+				lines.push(renderJsonExample("Blocked example", blockedExample));
+			}
+
+			if (
+				schema &&
+				typeof schema === "object" &&
+				(schema as Record<string, unknown>).type === "array"
+			) {
+				const exampleItem = sampleValueFromSchema(
+					(schema as Record<string, unknown>).items ?? { type: "string" },
+				);
+				lines.push(renderJsonExample("Valid item example", exampleItem));
+			}
+		}
+
+		return lines.join("\n");
+	});
+
+	return `
+IMPORTANT — Declared output handling is managed by the workflow plugin.
+
+You must commit declared outputs with the write_output tool. Do not manually
+write declared output files.
+
+The plugin has resolved this step's output validators. Produce outputs matching
+the concrete contracts below. write_output will validate them before committing.
+
+${blocks.join("\n\n")}
+`;
+}
+
+function sha256ForFile(filePath: string): string | null {
+	try {
+		const raw = fs.readFileSync(filePath);
+		return `sha256:${createHash("sha256").update(raw).digest("hex")}`;
+	} catch {
+		return null;
+	}
+}
+
+function hasMatchingProvenanceForValidation(args: {
+	stepState?: StepState | null;
+	validation: OutputValidationResult;
+	runId: string;
+	stepId: string;
+	attempt?: number;
+	decision?: ValidationDecision;
+}): boolean {
+	const provenanceEntries = Object.values(args.stepState?.output_writes || {});
+	if (provenanceEntries.length === 0 || !args.validation.exists) {
+		return false;
+	}
+
+	const currentHash = sha256ForFile(args.validation.path);
+	if (!currentHash) {
+		return false;
+	}
+
+	return provenanceEntries.some((entry) => {
+		if (entry.abs_path !== args.validation.path) return false;
+		if (entry.run_id !== args.runId) return false;
+		if (entry.step_id !== args.stepId) return false;
+		if (typeof args.attempt === "number" && entry.attempt !== args.attempt)
+			return false;
+		if (entry.sha256 !== currentHash) return false;
+		if (args.decision && entry.decision !== args.decision) return false;
+		return true;
+	});
+}
+
+function outputCheckHasCurrentAttemptProvenance(args: {
+	stepState?: StepState | null;
+	outputCheck: OutputCheckResult;
+	runId: string;
+	stepId: string;
+	attempt?: number;
+}): boolean {
+	const validations = args.outputCheck.validations ?? [];
+	if (validations.length === 0) {
+		return false;
+	}
+
+	return validations.every((validation) =>
+		hasMatchingProvenanceForValidation({
+			stepState: args.stepState,
+			validation,
+			runId: args.runId,
+			stepId: args.stepId,
+			attempt: args.attempt,
+			decision: validation.decision,
+		}),
 	);
 }
 
@@ -261,6 +549,22 @@ retrieve the full output before proceeding. Never interpret a backgrounded exec 
 a failure. Only report failure if the final exit code is non-zero or the output \
 explicitly indicates an error.
 `;
+
+function buildWriteOutputPreamble(args: {
+	step: { outputs?: OutputSpec[] } | null | undefined;
+	validators?: Record<string, ValidatorSpec>;
+	workflowDir?: string;
+}): string {
+	if (!Array.isArray(args.step?.outputs) || args.step.outputs.length === 0) {
+		return "";
+	}
+
+	return buildDeclaredOutputContractsPreamble({
+		step: args.step,
+		validators: args.validators || {},
+		workflowDir: args.workflowDir,
+	});
+}
 
 function signalingModeForStep(step: any): "auto" | "off" {
 	if (step?.signaling === "auto" || step?.signaling === "off") {
@@ -373,7 +677,7 @@ async function settleSessionAfterOutputPass(
 ) {
 	const cancelGraceMs = options.cancelGraceMs ?? 30000;
 
-	let statusResult = await adapter.getStatus(spawnResult.sessionId, options);
+	const statusResult = await adapter.getStatus(spawnResult.sessionId, options);
 
 	if (statusResult.status === "done" || statusResult.status === "error") {
 		return {
@@ -536,49 +840,54 @@ export async function runStep(step, runId, api, options) {
 	const adapter = selectAdapter(api, options.sessionAdapter || "auto");
 	let sessionKey = null;
 
- 	try {
- 		const model = step.model || defaultModel || null;
- 
+	try {
+		const model = step.model || defaultModel || null;
+
 		const workflow = options.workflow;
 		const combinedSkills = [
 			...(workflow?.required_skills ?? []),
 			...(step.required_skills ?? []),
 		];
- 		const uniqueRequiredSkills = [...new Set(combinedSkills)];
- 
- 		const combinedMcpServers = [
- 			...(workflow?.required_mcp_servers ?? []),
- 			...(step.required_mcp_servers ?? []),
- 		];
- 		const uniqueRequiredMcpServers = [...new Set(combinedMcpServers)];
- 
- 		// Only OpenClaw skills are checked against the agent skill allowlist.
- 		// MCP server names such as MCP_DOCKER are validated/used by the MCP layer,
- 		// not by the OpenClaw skill registry.
- 		assertSkillsNotConfigBlocked(api.config, uniqueRequiredSkills);
- 		assertMcpServersConfigured(api.config, uniqueRequiredMcpServers);
+		const uniqueRequiredSkills = [...new Set(combinedSkills)];
 
- 		const skillContract = uniqueRequiredSkills.length
- 			? `\nRequired skills for this step: ${uniqueRequiredSkills.join(", ")}.\n\nUse these skills directly when relevant.\nDo not substitute host shell commands for these skills.\nIf a required skill is unavailable, write the declared blocked/retryable output artifact explaining which skill was unavailable.\n`
- 			: "";
- 		const mcpContract = uniqueRequiredMcpServers.length
- 			? `\nRequired MCP servers for this step: ${uniqueRequiredMcpServers.join(", ")}.\n\nUse tools from these MCP servers directly when the task names them, for example MCP_DOCKER.hset or MCP_DOCKER.browser_snapshot.\nDo not list MCP server names under required_skills; they are not OpenClaw skills.\nIf a required MCP server/tool is unavailable, write the declared blocked/retryable output artifact explaining which MCP server/tool was unavailable.\n`
- 			: "";
+		const combinedMcpServers = [
+			...(workflow?.required_mcp_servers ?? []),
+			...(step.required_mcp_servers ?? []),
+		];
+		const uniqueRequiredMcpServers = [...new Set(combinedMcpServers)];
+
+		// Only OpenClaw skills are checked against the agent skill allowlist.
+		// MCP server names such as MCP_DOCKER are validated/used by the MCP layer,
+		// not by the OpenClaw skill registry.
+		assertSkillsNotConfigBlocked(api.config, uniqueRequiredSkills);
+		assertMcpServersConfigured(api.config, uniqueRequiredMcpServers);
+
+		const skillContract = uniqueRequiredSkills.length
+			? `\nRequired skills for this step: ${uniqueRequiredSkills.join(", ")}.\n\nUse these skills directly when relevant.\nDo not substitute host shell commands for these skills.\nIf a required skill is unavailable, write the declared blocked/retryable output artifact explaining which skill was unavailable.\n`
+			: "";
+		const mcpContract = uniqueRequiredMcpServers.length
+			? `\nRequired MCP servers for this step: ${uniqueRequiredMcpServers.join(", ")}.\n\nUse tools from these MCP servers directly when the task names them, for example MCP_DOCKER.hset or MCP_DOCKER.browser_snapshot.\nDo not list MCP server names under required_skills; they are not OpenClaw skills.\nIf a required MCP server/tool is unavailable, write the declared blocked/retryable output artifact explaining which MCP server/tool was unavailable.\n`
+			: "";
 		const signalingPreamble = buildWorkflowSignalingPreamble({
 			step,
 			runId,
 			attempts,
 			handoffToken,
 		});
+		const writeOutputPreamble = buildWriteOutputPreamble({
+			step,
+			validators,
+			workflowDir,
+		});
 		const taskWithPreamble =
 			EXEC_POLL_PREAMBLE +
+			writeOutputPreamble +
 			skillContract +
 			mcpContract +
 			signalingPreamble +
 			step.task;
- 
- 		const spawnResult = await adapter.spawn(taskWithPreamble, {
 
+		const spawnResult = await adapter.spawn(taskWithPreamble, {
 			model,
 			timeout: step.timeout,
 			sessionTarget: "isolated",
@@ -639,12 +948,15 @@ export async function runStep(step, runId, api, options) {
 			decision: "unknown" as any,
 			missing_files: [],
 			checked_files: [],
-			validations: []
+			validations: [],
 		};
-
 
 		while (Date.now() < deadline) {
 			await sleep(pollIntervalMs);
+			const liveStepState =
+				typeof options.getStepState === "function"
+					? options.getStepState()
+					: null;
 
 			if (
 				(step.complete_when === "outputs" ||
@@ -660,32 +972,47 @@ export async function runStep(step, runId, api, options) {
 				);
 
 				if (outputCheck.passed) {
-					const mapped = statusFromOutputDecision(outputCheck);
-					finalStatus = mapped.finalStatus;
-					retryable = mapped.retryable;
-					errorMsg = mapped.errorMsg;
-					break;
+					if (
+						outputCheckHasCurrentAttemptProvenance({
+							stepState: liveStepState,
+							outputCheck,
+							runId,
+							stepId: step.id,
+							attempt: attempts,
+						})
+					) {
+						const mapped = statusFromOutputDecision(outputCheck);
+						finalStatus = mapped.finalStatus;
+						retryable = mapped.retryable;
+						errorMsg = mapped.errorMsg;
+						break;
+					}
 				}
 
-				if (outputCheck.decision === "blocked" || outputCheck.decision === "retry") {
-					const mapped = statusFromOutputDecision(outputCheck);
-					finalStatus = mapped.finalStatus;
-					retryable = mapped.retryable;
-					errorMsg = mapped.errorMsg;
-					failureKind = outputFailureKinds(outputCheck)[0] ?? null;
-					break;
+				if (
+					outputCheck.decision === "blocked" ||
+					outputCheck.decision === "retry"
+				) {
+					if (
+						outputCheckHasCurrentAttemptProvenance({
+							stepState: liveStepState,
+							outputCheck,
+							runId,
+							stepId: step.id,
+							attempt: attempts,
+						})
+					) {
+						const mapped = statusFromOutputDecision(outputCheck);
+						finalStatus = mapped.finalStatus;
+						retryable = mapped.retryable;
+						errorMsg = mapped.errorMsg;
+						failureKind = outputFailureKinds(outputCheck)[0] ?? null;
+						break;
+					}
 				}
 
-				if (hasHardOutputFailure(outputCheck)) {
-					const mapped = statusFromOutputDecision(outputCheck);
-					finalStatus = mapped.finalStatus;
-					retryable = mapped.retryable;
-					errorMsg = mapped.errorMsg;
-					failureKind = outputFailureKinds(outputCheck)[0] ?? "other";
-					break;
-				}
-
-				// Missing output files are not terminal while the step is still running.
+				// Non-terminal while running: parse/schema/fail artifacts can be repaired,
+				// and valid direct writes without current-attempt provenance must not short-circuit.
 			}
 
 			const statusResult = await adapter.getStatus(
@@ -710,16 +1037,6 @@ export async function runStep(step, runId, api, options) {
 					retryable = mapped.retryable;
 					errorMsg = mapped.errorMsg;
 					break;
-				}
-
-				const transientOutputFailure =
-					outputCheck.validations?.length &&
-					outputCheck.validations.every(v =>
-						v.failure_kind === "missing_file" || v.failure_kind === "parse"
-					);
-
-				if (transientOutputFailure && Date.now() < deadline) {
-					continue;
 				}
 
 				finalStatus = mapped.finalStatus;
@@ -751,18 +1068,23 @@ export async function runStep(step, runId, api, options) {
 		}
 
 		if (finalStatus === null) {
-			cancelResult = await (adapter.cancel?.(spawnResult.sessionId, {
-				...options,
-				sessionKey: spawnResult.sessionKey,
-				runId: spawnResult.sessionId,
-				reason: `workflow_step_timeout:${step.id}`,
-				timeoutMs,
-				cancelGraceMs: options.cancelGraceMs ?? 30000,
-			}) ?? Promise.resolve(null)).catch((err): CancelResult => ({
-				requested: false,
-				confirmed: false,
-				error: err instanceof Error ? err.message : String(err),
-			} as CancelResult));
+			cancelResult = await (
+				adapter.cancel?.(spawnResult.sessionId, {
+					...options,
+					sessionKey: spawnResult.sessionKey,
+					runId: spawnResult.sessionId,
+					reason: `workflow_step_timeout:${step.id}`,
+					timeoutMs,
+					cancelGraceMs: options.cancelGraceMs ?? 30000,
+				}) ?? Promise.resolve(null)
+			).catch(
+				(err): CancelResult =>
+					({
+						requested: false,
+						confirmed: false,
+						error: err instanceof Error ? err.message : String(err),
+					}) as CancelResult,
+			);
 
 			const stopped = await waitForTerminalAfterCancel(
 				adapter,
@@ -808,7 +1130,6 @@ export async function runStep(step, runId, api, options) {
 			duration_ms: Date.now() - startTime,
 			cancel_result: cancelResult,
 		};
-
 	} catch (err) {
 		return {
 			status: "failed",
@@ -832,7 +1153,10 @@ function safeSessionKeyPart(value) {
 		.slice(0, 120);
 }
 
-function configuredSkillVisibility(cfg: any, agentId = "main"): string[] | null {
+function configuredSkillVisibility(
+	cfg: any,
+	agentId = "main",
+): string[] | null {
 	const agent = cfg?.agents?.list?.find((a: any) => a.id === agentId);
 
 	if (Array.isArray(agent?.skills)) {
@@ -846,11 +1170,15 @@ function configuredSkillVisibility(cfg: any, agentId = "main"): string[] | null 
 	return null; // unrestricted by config
 }
 
-function assertSkillsNotConfigBlocked(cfg: any, required: string[], agentId = "main") {
+function assertSkillsNotConfigBlocked(
+	cfg: any,
+	required: string[],
+	agentId = "main",
+) {
 	const visible = configuredSkillVisibility(cfg, agentId);
- 
+
 	if (visible === null) return; // unrestricted by config
- 
+
 	for (const skill of required) {
 		if (!visible.includes(skill)) {
 			throw new Error(
@@ -859,15 +1187,15 @@ function assertSkillsNotConfigBlocked(cfg: any, required: string[], agentId = "m
 		}
 	}
 }
- 
+
 function assertMcpServersConfigured(cfg: any, requiredMcpServers: string[]) {
 	if (!requiredMcpServers.length) return;
- 
+
 	const configuredServers = cfg?.mcp?.servers ?? {};
 	const missing = requiredMcpServers.filter(
-		(name) => !Object.prototype.hasOwnProperty.call(configuredServers, name),
+		(name) => !Object.hasOwn(configuredServers, name),
 	);
- 
+
 	if (missing.length) {
 		throw new Error(
 			`Required MCP server(s) not configured under mcp.servers: ${missing.join(", ")}`,
@@ -985,7 +1313,8 @@ class RuntimeSubagentAdapter implements SessionAdapter {
 			) {
 				return {
 					status: "error",
-					error: result?.error || result?.message || "Subagent run was cancelled",
+					error:
+						result?.error || result?.message || "Subagent run was cancelled",
 					logs: result?.logs || result?.summary || null,
 				};
 			}
@@ -1603,7 +1932,9 @@ export class MockAdapter implements SessionAdapter {
 		const sessionKey = `agent:mock:subagent:${sessionId}`;
 
 		// Schedule completion after resolveIn ms
-		const result: { status: string; error?: string } = { status: this.shouldFail ? "error" : "done" };
+		const result: { status: string; error?: string } = {
+			status: this.shouldFail ? "error" : "done",
+		};
 		if (this.shouldFail) result.error = this.failMessage;
 
 		setTimeout(() => {
@@ -1660,7 +1991,16 @@ export function createStepRunner(adapter) {
 				attempts: options.attempts,
 				handoffToken: options.handoffToken,
 			});
-			const taskWithPreamble = EXEC_POLL_PREAMBLE + signalingPreamble + step.task;
+			const writeOutputPreamble = buildWriteOutputPreamble({
+				step,
+				validators,
+				workflowDir,
+			});
+			const taskWithPreamble =
+				EXEC_POLL_PREAMBLE +
+				writeOutputPreamble +
+				signalingPreamble +
+				step.task;
 			const spawnResult = await adapter.spawn(taskWithPreamble, {
 				model,
 				timeout: step.timeout,
@@ -1675,45 +2015,75 @@ export function createStepRunner(adapter) {
 			let retryable = false;
 			let errorMsg = null;
 			let logs = null;
-			let outputCheck: OutputCheckResult = { passed: false, decision: "unknown" as any, missing_files: [], checked_files: [], validations: [] };
+			let outputCheck: OutputCheckResult = {
+				passed: false,
+				decision: "unknown" as any,
+				missing_files: [],
+				checked_files: [],
+				validations: [],
+			};
 			let cancelResult: CancelResult | null = null;
 
 			while (Date.now() < deadline) {
-
 				await sleep(pollIntervalMs);
+				const liveStepState =
+					typeof options.getStepState === "function"
+						? options.getStepState()
+						: null;
 
 				if (
 					(step.complete_when === "outputs" ||
 						step.complete_when === "handoff_or_outputs") &&
 					step.outputs?.length
 				) {
-					outputCheck = await checkOutputs(step.outputs, baseDir, validators, workflowDir);
+					outputCheck = await checkOutputs(
+						step.outputs,
+						baseDir,
+						validators,
+						workflowDir,
+					);
 
 					if (outputCheck.passed) {
-						const mapped = statusFromOutputDecision(outputCheck);
-						finalStatus = mapped.finalStatus;
-						retryable = mapped.retryable;
-						errorMsg = mapped.errorMsg;
-						break;
+						if (
+							outputCheckHasCurrentAttemptProvenance({
+								stepState: liveStepState,
+								outputCheck,
+								runId,
+								stepId: step.id,
+								attempt: options.attempts,
+							})
+						) {
+							const mapped = statusFromOutputDecision(outputCheck);
+							finalStatus = mapped.finalStatus;
+							retryable = mapped.retryable;
+							errorMsg = mapped.errorMsg;
+							break;
+						}
 					}
 
-					if (outputCheck.decision === "blocked" || outputCheck.decision === "retry") {
-						const mapped = statusFromOutputDecision(outputCheck);
-						finalStatus = mapped.finalStatus;
-						retryable = mapped.retryable;
-						errorMsg = mapped.errorMsg;
-						break;
+					if (
+						outputCheck.decision === "blocked" ||
+						outputCheck.decision === "retry"
+					) {
+						if (
+							outputCheckHasCurrentAttemptProvenance({
+								stepState: liveStepState,
+								outputCheck,
+								runId,
+								stepId: step.id,
+								attempt: options.attempts,
+							})
+						) {
+							const mapped = statusFromOutputDecision(outputCheck);
+							finalStatus = mapped.finalStatus;
+							retryable = mapped.retryable;
+							errorMsg = mapped.errorMsg;
+							break;
+						}
 					}
 
-					if (hasHardOutputFailure(outputCheck) && !hasOnlyMissingOutputFiles(outputCheck)) {
-						const mapped = statusFromOutputDecision(outputCheck);
-						finalStatus = mapped.finalStatus;
-						retryable = mapped.retryable;
-						errorMsg = mapped.errorMsg;
-						break;
-					}
-
-					// Missing output files are not terminal while the session is still within timeout.
+					// Non-terminal while running: parse/schema/fail artifacts can be repaired,
+					// and valid direct writes without current-attempt provenance must not short-circuit.
 				}
 
 				const statusResult = await adapter.getStatus(
@@ -1737,16 +2107,6 @@ export function createStepRunner(adapter) {
 						retryable = mapped.retryable;
 						errorMsg = mapped.errorMsg;
 						break;
-					}
-
-					const transientOutputFailure =
-						outputCheck.validations?.length &&
-						outputCheck.validations.every(v =>
-							v.failure_kind === "missing_file" || v.failure_kind === "parse"
-						);
-
-					if (transientOutputFailure && Date.now() < deadline) {
-						continue;
 					}
 
 					finalStatus = mapped.finalStatus;
@@ -1786,20 +2146,24 @@ export function createStepRunner(adapter) {
 				);
 			}
 
-		if (finalStatus === null) {
-			cancelResult = await (adapter.cancel?.(spawnResult.sessionId, {
-				...options,
-				sessionKey: spawnResult.sessionKey,
-				runId: spawnResult.sessionId,
-				reason: `workflow_step_timeout:${step.id}`,
-				timeoutMs,
-				cancelGraceMs: options.cancelGraceMs ?? 30000,
-			}) ?? Promise.resolve(null)).catch((err): CancelResult => ({
-				requested: false,
-				confirmed: false,
-				error: err instanceof Error ? err.message : String(err),
-			} as CancelResult));
-
+			if (finalStatus === null) {
+				cancelResult = await (
+					adapter.cancel?.(spawnResult.sessionId, {
+						...options,
+						sessionKey: spawnResult.sessionKey,
+						runId: spawnResult.sessionId,
+						reason: `workflow_step_timeout:${step.id}`,
+						timeoutMs,
+						cancelGraceMs: options.cancelGraceMs ?? 30000,
+					}) ?? Promise.resolve(null)
+				).catch(
+					(err): CancelResult =>
+						({
+							requested: false,
+							confirmed: false,
+							error: err instanceof Error ? err.message : String(err),
+						}) as CancelResult,
+				);
 
 				const stopped = await waitForTerminalAfterCancel(
 					adapter,

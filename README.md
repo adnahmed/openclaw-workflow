@@ -196,6 +196,8 @@ Injected guidance includes:
 - final `workflow_step_complete` handoff request
 - current `run_id` and `step_id`
 - current `attempt` and `handoff_token` when available
+- declared-output contracts derived from `outputs[].validate` and `workflow.validators`
+- `write_output` commit instructions for declared outputs
 - repair-and-retry behavior when completion is rejected due to invalid outputs
 
 Default behavior:
@@ -221,6 +223,56 @@ You can override per-step:
 Migration note:
 - Existing workflows that already include manual “Workflow signaling protocol” text in `task` will continue to work.
 - You can safely remove most of that repeated text and rely on `signaling: auto` for cleaner workflow files.
+
+### Automatic Declared Output Handling
+
+If a step has declared `outputs`, the plugin now injects a second runtime contract automatically.
+You do **not** need any new YAML fields for this behavior.
+
+What the injected contract tells the worker:
+- declared outputs are owned by the workflow plugin
+- declared output files must be committed with `write_output`
+- the prompt includes the **resolved validator contract**, not just a validator name
+- when a validator has a useful schema shape, the prompt includes the expected object/array structure and examples
+
+That means a step like this:
+
+```yaml
+- id: build_manifest
+  complete_when: outputs
+  task: Build today's alert manifest.
+  outputs:
+    - path: data/alerts-execution-manifest-{date}.json
+      validate: alert_manifest_array
+```
+
+causes the runtime prompt to include guidance such as:
+- exact declared output path
+- validator ID (`alert_manifest_array`)
+- resolved schema shape (for example, `JSON array` with item fields)
+- semantic rules (`pass_when`, `retry_when`, `block_when`, `fail_when`, `unknown_policy`)
+- an example item or blocked artifact when the validator shape makes that useful
+
+### Safe Output Commit and Provenance
+
+The new `write_output` tool is the authoritative path for declared outputs.
+
+For declared outputs it performs all of the following:
+- resolves the declared output path and confirms it belongs to the current step
+- resolves the validator from the existing `workflow.validators` map
+- validates the candidate value with the same validator engine used by output gating
+- writes through a same-directory temp file
+- re-validates the staged file from disk
+- atomically renames the staged file into place
+- records provenance in run state, including `run_id`, `step_id`, `attempt`, path, bytes, decision, and SHA-256
+
+Important consequences:
+- malformed JSON from an older attempt no longer poisons a still-running retry forever; the worker can repair it and commit a fresh artifact atomically
+- manual/direct writes to declared output files are still visible to final validation, but they do **not** cause early completion while the session is still running
+- early `pass`, `blocked`, or `retry` output decisions now require matching current-attempt provenance
+- once the session itself ends, the orchestrator still performs the normal final output validation before accepting completion
+
+This keeps YAML stable while making runtime behavior much stricter and safer.
 
 ### `reuse_outputs` fields
 
@@ -493,6 +545,33 @@ Authoritative handoff request from a running worker/step. The orchestrator still
 
 If validation fails, the response returns structured details (missing/invalid outputs) so the worker can repair and continue.
 
+### `write_output`
+
+Authoritative declared-output writer for running workers. Use this for any file listed under the step's `outputs` contract.
+
+**Input:**
+```json
+{
+  "run_id": "seo-pipeline-20260309T082000",
+  "step_id": "content-creator",
+  "path": "data/seo-state/cc-manifest-2026-03-09.json",
+  "data": [{ "slug": "post-1", "status": "ready" }]
+}
+```
+
+You may provide either:
+- `data`: structured JSON value to serialize
+- `text`: raw text content
+
+Behavior:
+- only allows writes to outputs declared for the current step
+- reuses the existing validator layer; there are no extra YAML schema keys for writers
+- rejects non-committable results such as validator `fail`
+- allows committable non-pass results such as `blocked` or `retry` when that is what the validator contract declares
+- persists provenance used by running-step early completion checks
+
+If a worker manually writes a declared output instead of using `write_output`, the orchestrator may still validate it at final completion, but it will not trust that file for early completion while the worker session is still active.
+
 ---
 
 ## Cache Reuse and Contract Freshness
@@ -547,6 +626,19 @@ Each workflow run writes state to `{runsDir}/{run_id}.json`:
         "completed_at": "2026-03-09T08:23:15.000Z",
         "reason": "generated"
       },
+      "output_writes": {
+        "data/seo-state/ta-handoff-2026-03-09.json": {
+          "path": "data/seo-state/ta-handoff-2026-03-09.json",
+          "abs_path": "/home/user/project/data/seo-state/ta-handoff-2026-03-09.json",
+          "decision": "pass",
+          "run_id": "seo-pipeline-20260309T082000",
+          "step_id": "tech-auditor",
+          "attempt": 1,
+          "bytes": 824,
+          "sha256": "sha256:...",
+          "committed_at": "2026-03-09T08:23:11.000Z"
+        }
+      },
       "error": null,
       "attempts": 1
     }
@@ -561,6 +653,8 @@ Each workflow run writes state to `{runsDir}/{run_id}.json`:
 - `skipped`: Step was never run because a non-optional dependency failed
 - `failed`: Step ran but failed (either session error or output gate failed)
 - `ok`: Step ran successfully and output gate passed (or no outputs defined)
+
+`output_writes` is internal provenance recorded by `write_output`. It is used to verify that early output-based completion came from the **current attempt** rather than a stale artifact or a direct manual file write.
 
 ---
 
