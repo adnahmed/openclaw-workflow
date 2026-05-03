@@ -609,8 +609,10 @@ function normalizeAndValidate(raw, filePath) {
 								provider: (
 									raw.state.redis.provider === "native"
 										? "native"
-										: "auto"
-								) as "auto" | "native",
+										: raw.state.redis.provider === "mcp"
+											? "mcp"
+											: "auto"
+								) as "auto" | "native" | "mcp",
 								tool_prefix: raw.state.redis.tool_prefix || "MCP_DOCKER",
 							}
 							: undefined,

@@ -160,10 +160,14 @@ export default definePluginEntry({
 		async function resolveRedisHandle() {
 			const redisUrl =
 				config.redisUrl || process.env.OPENCLAW_WORKFLOW_REDIS_URL || null;
-			if (!redisUrl) return null;
+			const redisMcpToolPrefix =
+				config.redisMcpToolPrefix || process.env.OPENCLAW_WORKFLOW_REDIS_MCP_TOOL_PREFIX || null;
+			if (!redisUrl && !redisMcpToolPrefix) return null;
 			if (!redisClientPromise) {
 				redisClientPromise = resolveRedisClient({
 					url: redisUrl,
+					mcpToolPrefix: redisMcpToolPrefix || undefined,
+					api,
 					keyPrefix: undefined,
 					filesystemFallback: config.filesystemFallback !== false,
 				}).catch((err) => {
@@ -204,10 +208,11 @@ export default definePluginEntry({
 				),
 				stateBackendResolution: {
 					requested: "redis",
-					resolved: "redis-native",
+					resolved: redis.kind === "mcp" ? "redis-mcp" : "redis-native",
 					reason: "redis runtime",
 					checked_at: getLocalISOString(),
 					fallback: "filesystem",
+					provider: redis.kind === "mcp" ? (config.redisMcpToolPrefix || "MCP_DOCKER") : undefined,
 				},
 				redis,
 			};
@@ -234,7 +239,11 @@ export default definePluginEntry({
 
 				try {
 					const fsState = await fsRuntime.stateStore.loadRun(runId);
-					if (fsState?.state_backend?.resolved === "redis-native" && redisRt) {
+					if (
+						(fsState?.state_backend?.resolved === "redis-native" ||
+							fsState?.state_backend?.resolved === "redis-mcp") &&
+						redisRt
+					) {
 						return redisRt;
 					}
 					return fsRuntime;
@@ -254,11 +263,18 @@ export default definePluginEntry({
 							config.redisUrl ||
 							process.env.OPENCLAW_WORKFLOW_REDIS_URL ||
 							null,
+						redisMcpToolPrefix:
+							config.redisMcpToolPrefix ||
+							process.env.OPENCLAW_WORKFLOW_REDIS_MCP_TOOL_PREFIX ||
+							null,
 						filesystemFallback: config.filesystemFallback,
 					},
 				});
 
-			if (backendResolution?.resolved === "redis-native") {
+			if (
+				backendResolution?.resolved === "redis-native" ||
+				backendResolution?.resolved === "redis-mcp"
+			) {
 				const redisRt = await redisRuntime();
 				if (redisRt) {
 					return {

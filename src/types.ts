@@ -68,14 +68,14 @@ export type WorkflowStateConfig = {
 	ttl?: string;
 	materialize_outputs?: MaterializeOutputsMode;
 	redis?: {
-		provider?: "auto" | "native";
+		provider?: "auto" | "native" | "mcp";
 		tool_prefix?: string;
 	};
 };
 
 export type StateBackendResolution = {
 	requested: StateBackendKind;
-	resolved: "filesystem" | "redis-native";
+	resolved: "filesystem" | "redis-native" | "redis-mcp";
 	provider?: string;
 	reason: string;
 	checked_at: string;

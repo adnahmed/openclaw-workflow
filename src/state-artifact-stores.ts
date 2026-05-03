@@ -743,11 +743,12 @@ export function resolveStateBackend(args: {
 	workflowState?: {
 		backend?: "filesystem" | "redis" | "auto" | "dual";
 		fallback?: "filesystem" | "none";
-		redis?: { provider?: "auto" | "native"; tool_prefix?: string };
+		redis?: { provider?: "auto" | "native" | "mcp"; tool_prefix?: string };
 	};
 	pluginConfig?: {
 		stateBackend?: "filesystem" | "redis" | "auto" | "dual";
 		redisUrl?: string | null;
+		redisMcpToolPrefix?: string | null;
 		filesystemFallback?: boolean;
 	};
 }): StateBackendResolution {
@@ -776,6 +777,25 @@ export function resolveStateBackend(args: {
 		};
 	}
 
+	const mcpProvider =
+		args.workflowState?.redis?.provider === "mcp" ||
+		args.workflowState?.redis?.provider === "auto" ||
+		!!args.pluginConfig?.redisMcpToolPrefix;
+
+	if (mcpProvider) {
+		return {
+			requested,
+			resolved: "redis-mcp",
+			provider:
+				args.workflowState?.redis?.tool_prefix ||
+				args.pluginConfig?.redisMcpToolPrefix ||
+				"MCP_DOCKER",
+			reason: "mcp redis tool prefix configured",
+			checked_at,
+			fallback: args.workflowState?.fallback || "filesystem",
+		};
+	}
+
 	if (
 		args.workflowState?.fallback === "filesystem" ||
 		args.pluginConfig?.filesystemFallback !== false
@@ -790,6 +810,6 @@ export function resolveStateBackend(args: {
 	}
 
 	throw new Error(
-		"Workflow requested Redis state, but no Redis URL was configured and filesystem fallback is disabled.",
+		"Workflow requested Redis state, but no Redis URL or MCP Redis tool prefix was configured and filesystem fallback is disabled.",
 	);
 }

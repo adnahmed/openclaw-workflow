@@ -328,10 +328,97 @@ class McpRedisClient implements RedisClient {
 	}
 
 	async multi(commands: Array<[string, ...unknown[]]>): Promise<unknown[]> {
-		// MCP doesn't support MULTI natively — execute sequentially
+		// MCP doesn't support MULTI natively — execute sequentially with
+		// command-specific argument translation.
 		const results: unknown[] = [];
-		for (const [cmd, ...args] of commands) {
-			results.push(await this.callTool(cmd.toLowerCase(), { args }));
+		for (const [rawCmd, ...args] of commands) {
+			const cmd = rawCmd.toLowerCase();
+
+			switch (cmd) {
+				case "get": {
+					const [key] = args;
+					results.push(await this.callTool("get", { key }));
+					break;
+				}
+				case "set": {
+					const [key, value, ...rest] = args;
+					const payload: Record<string, unknown> = { key, value };
+					for (let i = 0; i < rest.length; i += 2) {
+						const token = String(rest[i] ?? "").toUpperCase();
+						const next = rest[i + 1];
+						if (token === "EX") payload.ex = next;
+						if (token === "PX") payload.px = next;
+						if (token === "NX") payload.nx = true;
+					}
+					results.push(await this.callTool("set", payload));
+					break;
+				}
+				case "del": {
+					results.push(await this.callTool("del", { keys: args }));
+					break;
+				}
+				case "hset": {
+					const [key, fieldsOrFirstField, ...rest] = args;
+					let fields: Record<string, unknown> = {};
+					if (
+						fieldsOrFirstField &&
+						typeof fieldsOrFirstField === "object" &&
+						!Array.isArray(fieldsOrFirstField)
+					) {
+						fields = fieldsOrFirstField as Record<string, unknown>;
+					} else if (typeof fieldsOrFirstField !== "undefined") {
+						fields[String(fieldsOrFirstField)] =
+							rest.length > 0 ? String(rest[0]) : "";
+						for (let i = 1; i < rest.length; i += 2) {
+							const k = rest[i];
+							const v = rest[i + 1];
+							if (typeof k !== "undefined") fields[String(k)] = String(v ?? "");
+						}
+					}
+					results.push(await this.callTool("hset", { key, fields }));
+					break;
+				}
+				case "hgetall": {
+					const [key] = args;
+					results.push(await this.callTool("hgetall", { key }));
+					break;
+				}
+				case "exists": {
+					results.push(await this.callTool("exists", { keys: args }));
+					break;
+				}
+				case "expire": {
+					const [key, seconds] = args;
+					results.push(await this.callTool("expire", { key, seconds }));
+					break;
+				}
+				case "incr": {
+					const [key] = args;
+					results.push(await this.callTool("incr", { key }));
+					break;
+				}
+				case "xadd": {
+					const [key, id, fields] = args;
+					results.push(await this.callTool("xadd", { key, id, fields }));
+					break;
+				}
+				case "xgroup":
+				case "xgroup_create": {
+					const [command, key, group, id, options] = args;
+					results.push(
+						await this.callTool("xgroup_create", {
+							command,
+							key,
+							group,
+							id,
+							mkstream: Boolean((options as { MKSTREAM?: boolean } | undefined)?.MKSTREAM),
+						}),
+					);
+					break;
+				}
+				default:
+					throw new Error(`MCP Redis multi() does not support command: ${rawCmd}`);
+			}
 		}
 		return results;
 	}
