@@ -63,6 +63,7 @@ import {
 } from "./step-contract.js";
 import { emptyOutputCheck, runStep } from "./step-runner.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
+import type { PluginOperationRegistry } from "./plugin-operations.js";
 import type { RunState, StepState, WorkflowStep } from "./types.js";
 import {
 	assertSafeOutputPath,
@@ -224,6 +225,8 @@ export async function executeWorkflow(
 		cancelGraceMs,
 		workflowsDir,
 		artifactStore,
+		pluginRegistry,
+		redis = null,
 	} = config;
 
 	// Build substitution context once for the entire run
@@ -428,6 +431,125 @@ export async function executeWorkflow(
 	}
 
 	/**
+	 * Execute a plugin step (kind: plugin) synchronously within the engine process.
+	 * No agent session is allocated. The registered operation runs directly and returns
+	 * a StepRunResult-compatible object.
+	 */
+	async function runPluginStep(
+		step,
+		ctx: {
+			workflow: any;
+			runId: string;
+			varCtx: any;
+			baseDir: string;
+			artifactStore: any;
+			pluginRegistry: PluginOperationRegistry | null | undefined;
+			redis: any;
+		},
+	) {
+		const start = Date.now();
+		const usesId = step.uses;
+
+		if (!usesId) {
+			return {
+				status: "failed" as const,
+				retryable: false,
+				output_check: {
+					passed: false,
+					decision: "fail" as const,
+					missing_files: [],
+					checked_files: [],
+					validations: [{
+						path: "",
+						exists: false,
+						decision: "fail" as const,
+						errors: [`Plugin step "${step.id}" is missing the "uses" field.`],
+					}],
+				},
+				error: `Plugin step "${step.id}" is missing the "uses" field.`,
+				logs: null,
+				duration_ms: Date.now() - start,
+			};
+		}
+
+		const operation = ctx.pluginRegistry?.get(usesId);
+		if (!operation) {
+			const available = ctx.pluginRegistry ? ctx.pluginRegistry.list().map(o => o.id).join(", ") : "(no registry)";
+			const msg = `Plugin step "${step.id}" uses unknown operation "${usesId}". Available: ${available}`;
+			return {
+				status: "failed" as const,
+				retryable: false,
+				output_check: {
+					passed: false,
+					decision: "fail" as const,
+					missing_files: [],
+					checked_files: [],
+					validations: [{
+						path: "",
+						exists: false,
+						decision: "fail" as const,
+						errors: [msg],
+					}],
+				},
+				error: msg,
+				logs: null,
+				duration_ms: Date.now() - start,
+			};
+		}
+
+		const opCtx = {
+			workflow: ctx.workflow,
+			step,
+			config: ctx.workflow.config || {},
+			runId: ctx.runId,
+			date: ctx.varCtx?.date ?? new Date().toISOString().slice(0, 10),
+			stateStore: config.stateStore ?? null,
+			artifactStore: ctx.artifactStore ?? null,
+			redis: ctx.redis ?? null,
+			validators: ctx.workflow.validators || {},
+		};
+
+		let opResult;
+		try {
+			opResult = await operation.run(opCtx);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			return {
+				status: "failed" as const,
+				retryable: true,
+				output_check: {
+					passed: false,
+					decision: "fail" as const,
+					missing_files: [],
+					checked_files: [],
+					validations: [{
+						path: "",
+						exists: false,
+						decision: "fail" as const,
+						errors: [msg],
+					}],
+				},
+				error: msg,
+				logs: null,
+				duration_ms: Date.now() - start,
+			};
+		}
+
+		// Map to StepRunResult shape
+		return {
+			status: opResult.status,
+			retryable: opResult.retryable,
+			failure_kind: opResult.failure_kind ?? null,
+			session_key: null,
+			output_check: opResult.output_check,
+			error: opResult.error,
+			logs: opResult.logs,
+			duration_ms: opResult.duration_ms || (Date.now() - start),
+			output_writes: opResult.output_writes,
+		};
+	}
+
+	/**
 	 * Launch a single step as a background Promise.
 	 * Updates state to 'running', runs the step, then handles the result.
 	 *
@@ -519,17 +641,30 @@ export async function executeWorkflow(
 			),
 		);
 
-		const promise = (async () => {
-			try {
-				// Path safety gate: ensure substituted output paths are safe before execution
-				if (step.outputs) {
-					for (const outPath of step.outputs) {
-						assertSafeOutputPath(outputPathOf(outPath));
-					}
-				}
-
-				let result;
+			const promise = (async () => {
 				try {
+					// Path safety gate: ensure substituted output paths are safe before execution
+					if (step.outputs) {
+						for (const outPath of step.outputs) {
+							assertSafeOutputPath(outputPathOf(outPath));
+						}
+					}
+
+					let result;
+
+					// ── Plugin step path ──────────────────────────────────────────────────────
+					if (step.kind === "plugin") {
+						result = await runPluginStep(step, {
+							workflow,
+							runId,
+							varCtx,
+							baseDir,
+							artifactStore,
+							pluginRegistry,
+							redis,
+						});
+					} else {
+					try {
 					result = await stepRunner(step, runId, api, {
 						pollIntervalMs,
 						baseDir,
@@ -579,6 +714,17 @@ export async function executeWorkflow(
 						error: err.message,
 						duration_ms: 0,
 					};
+				}
+				} // end else (subagent path)
+
+				// Merge plugin output_writes back into run state
+				if (step.kind === "plugin" && result.output_writes) {
+					await mutateState((current) => {
+						const existing = current.steps[step.id]?.output_writes ?? {};
+						return updateStepState(current, step.id, {
+							output_writes: { ...existing, ...result.output_writes },
+						}, runsDir);
+					});
 				}
 
 				const completedAt = getLocalISOString();

@@ -42,6 +42,8 @@ import {
 	resumeWorkflow,
 } from "./workflow-executor.js";
 import { listWorkflows, loadWorkflow } from "./workflow-loader.js";
+import { createDefaultRegistry } from "./plugin-operations.js";
+import { resolveRedisClient } from "./redis-client.js";
 import {
 	createRunState,
 	findLatestRun,
@@ -147,7 +149,10 @@ export default definePluginEntry({
 			config.materializeOutputs || "on_demand",
 		);
 
-		function buildExecutorConfig(workflow, notify) {
+		// Plugin registry — always created with default built-ins
+		const pluginRegistry = createDefaultRegistry();
+
+		async function buildExecutorConfig(workflow, notify) {
 			const backendResolution = resolveStateBackend({
 				workflowState: workflow?.state,
 				pluginConfig: {
@@ -157,6 +162,21 @@ export default definePluginEntry({
 					filesystemFallback: config.filesystemFallback,
 				},
 			});
+
+			// Resolve Redis client per call (graceful fallback to null)
+			let redis = null;
+			if (config.redisUrl || config.redisMcpToolPrefix) {
+				try {
+					redis = await resolveRedisClient({
+						url: config.redisUrl,
+						mcpToolPrefix: config.redisMcpToolPrefix,
+						api,
+						filesystemFallback: config.filesystemFallback !== false,
+					});
+				} catch (redisErr) {
+					logger.warn(`[workflow] Redis client init failed: ${redisErr?.message ?? redisErr}`);
+				}
+			}
 
 			return {
 				runsDir,
@@ -178,6 +198,8 @@ export default definePluginEntry({
 				cronPollTimeoutMs,
 				cancelGraceMs,
 				workflowsDir,
+				pluginRegistry,
+				redis,
 			};
 		}
 
@@ -292,7 +314,7 @@ export default definePluginEntry({
 					);
 
 					const notify = buildNotifier();
-					const execConfig = buildExecutorConfig(workflow, notify);
+					const execConfig = await buildExecutorConfig(workflow, notify);
 
 					runInBackground(
 						newRunId,
@@ -506,7 +528,7 @@ export default definePluginEntry({
 					}
 
 					const notify = buildNotifier();
-					const execConfig = buildExecutorConfig(workflow, notify);
+					const execConfig = await buildExecutorConfig(workflow, notify);
 
 					if (resume) {
 						const lastRun = await findLatestRun(name, runsDir);

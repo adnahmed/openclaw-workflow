@@ -383,10 +383,15 @@ export type StepFailureKind =
 	| "parse"
 	| "other";
 
+export type StepExecutorKind = "subagent" | "loop_subagent" | "plugin";
+
 export type WorkflowStep = {
 	id: string;
 	name: string;
 	task: string | null;
+	kind?: StepExecutorKind;
+	uses?: string;
+	with?: Record<string, unknown>;
 	depends_on: string[];
 	outputs: OutputSpec[];
 	for_each?: string;
@@ -413,6 +418,67 @@ export type WorkflowStep = {
 	signaling?: StepSignalingMode;
 	original_id?: string;
 };
+
+/**
+ * Context passed to a plugin operation when executing a kind:plugin step.
+ */
+export type PluginOperationContext = {
+	workflow: WorkflowDefinition;
+	step: WorkflowStep;
+	config: Record<string, unknown>;
+	runId: string;
+	date: string;
+	stateStore: WorkflowStateStore;
+	artifactStore: WorkflowArtifactStore;
+	redis: RedisClient | null;
+	validators: Record<string, ValidatorSpec>;
+};
+
+/**
+ * Result returned by a plugin operation.
+ * Maps to the same shape as StepRunResult for executor compatibility.
+ */
+export type PluginOperationResult = {
+	status: "ok" | "failed" | "blocked";
+	retryable?: boolean;
+	failure_kind?: StepFailureKind | string | null;
+	output_check: OutputCheckResult;
+	error: string | null;
+	logs: string | null;
+	duration_ms: number;
+	/** Optional provenance records keyed by output_id */
+	output_writes?: Record<string, OutputWriteProvenance>;
+};
+
+/**
+ * A registered plugin operation (workflow.xxx built-in or user-defined).
+ */
+export interface WorkflowPluginOperation {
+	id: string;
+	description?: string;
+	run(ctx: PluginOperationContext): Promise<PluginOperationResult>;
+}
+
+/**
+ * Minimal Redis client interface used by plugin operations.
+ * Backed by ioredis natively or an MCP Redis adapter.
+ */
+export interface RedisClient {
+	readonly kind: "native" | "mcp";
+	get(key: string): Promise<string | null>;
+	set(key: string, value: string, options?: { ex?: number; px?: number; nx?: boolean }): Promise<"OK" | null>;
+	del(...keys: string[]): Promise<number>;
+	hset(key: string, fields: Record<string, string>): Promise<number>;
+	hgetall(key: string): Promise<Record<string, string> | null>;
+	exists(...keys: string[]): Promise<number>;
+	expire(key: string, seconds: number): Promise<number>;
+	incr(key: string): Promise<number>;
+	xadd(key: string, id: string, fields: Record<string, string>): Promise<string | null>;
+	xgroup(command: "CREATE", key: string, group: string, id: string, options?: { MKSTREAM?: boolean }): Promise<"OK">;
+	/** Execute multiple commands atomically. Returns array of results. */
+	multi(commands: Array<[string, ...unknown[]]>): Promise<unknown[]>;
+	disconnect(): Promise<void>;
+}
 
 /**
  * Decision returned by the output validator.

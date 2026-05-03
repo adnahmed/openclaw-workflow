@@ -366,7 +366,30 @@ function normalizeAndValidate(raw, filePath) {
 			}
 			seenIds.add(step.id);
 
-			if (!step.task || typeof step.task !== "string") {
+			// Validate kind
+			const validKinds = new Set(["subagent", "loop_subagent", "plugin"]);
+			const stepKind = step.kind || (step.for_each ? "loop_subagent" : "subagent");
+			if (step.kind !== undefined && !validKinds.has(step.kind)) {
+				throw new Error(
+					`Step "${step.id}" in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+						`has invalid kind "${step.kind}". Expected: subagent, loop_subagent, plugin.`,
+				);
+			}
+
+			if (stepKind === "plugin") {
+				if (!step.uses || typeof step.uses !== "string") {
+					throw new Error(
+						`Step "${step.id}" (kind: plugin) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+							`is missing required field "uses" (e.g. "workflow.cache_json_document").`,
+					);
+				}
+				if (step.for_each) {
+					throw new Error(
+						`Step "${step.id}" (kind: plugin) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+							`cannot use "for_each". Loop expansion is only supported for subagent steps.`,
+					);
+				}
+			} else if (!step.task || typeof step.task !== "string") {
 				if (!step.for_each) {
 					throw new Error(
 						`Step "${step.id}" in ${isInner ? "loop" : "workflow"} "${parentName}" is missing required field "task" (string)`,
@@ -473,6 +496,11 @@ function normalizeAndValidate(raw, filePath) {
 			return {
 				id: step.id,
 				name: step.name || step.id,
+				kind: (step.kind || (step.for_each ? "loop_subagent" : "subagent")) as "subagent" | "loop_subagent" | "plugin",
+				uses: typeof step.uses === "string" ? step.uses : undefined,
+				with: step.with && typeof step.with === "object" && !Array.isArray(step.with)
+					? (step.with as Record<string, unknown>)
+					: undefined,
 				task: step.task || null,
 				depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
 				outputs: normalizeOutputs(step.id, step.outputs),

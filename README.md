@@ -175,7 +175,10 @@ workflow_status({ name: "hello" })
 |----------------|-----------|----------|---------|-------------|
 | `id`           | string    | ✅       | —       | Unique step identifier. Must match `[a-zA-Z0-9_-]+`. Used in `depends_on` references and state files. |
 | `name`         | string    | ❌       | Same as `id` | Human display name for notifications. |
-| `task`         | string    | ✅*      | —       | The agent prompt / task description. Supports [variable substitution](#variable-substitution). (*Not required if `for_each` is used) |
+| `kind`         | string    | ❌       | inferred | Step execution kind: `subagent`, `loop_subagent`, or `plugin`. If omitted, loop steps infer `loop_subagent`, otherwise `subagent`. |
+| `task`         | string    | ✅*      | —       | The agent prompt / task description. Supports [variable substitution](#variable-substitution). (*Not required for `kind: plugin` steps or loop containers using `for_each`) |
+| `uses`         | string    | ✅**     | —       | Plugin operation ID for `kind: plugin` steps (for example, `workflow.cache_json_document`). |
+| `with`         | object    | ❌       | `{}`    | Parameter map passed to a `kind: plugin` operation. Supports [variable substitution](#variable-substitution). |
 | `depends_on`   | string[]  | ❌       | `[]`    | IDs of steps that must complete (`ok`) before this step runs. |
 | `outputs`      | array     | ❌       | `[]`    | Output validation rules. Supports simple file existence checks or detailed objects with custom validators and schemas. Supports [variable substitution](#variable-substitution). |
 | `for_each`     | string    | ❌       | —       | Variable containing a list to iterate over (e.g., `"{songs}"`). |
@@ -199,6 +202,78 @@ workflow_status({ name: "hello" })
 | `signaling` | string | ❌ | auto for `handoff`/`handoff_or_outputs`, otherwise `off` | Controls plugin-injected signaling instructions. `"auto"` injects `workflow_step_update` + `workflow_step_complete` protocol into the runtime prompt so authors don't need to repeat this boilerplate in every step task. `"off"` disables injection for that step. |
 | `output_contract_version` | number | ❌ | `null` | Optional explicit contract version for cache freshness signatures. Increment to invalidate older cache artifacts even when files are structurally valid. |
 | `reuse_outputs` | object | ❌ | — | Structured cache adoption policy. Supports pre-launch reuse checks with validator + signature freshness gates. |
+
+`**` `uses` is required when `kind: plugin`.
+
+### Plugin Steps (`kind: plugin`)
+
+Plugin steps execute built-in workflow operations directly in the orchestrator (no spawned subagent session).
+
+Rules:
+- must declare `kind: plugin`
+- must include `uses: <operation_id>`
+- may include `with: { ... }` operation arguments
+- cannot use `for_each`
+- may still use `depends_on`, `outputs`, retry policy, and variable substitution
+
+Built-in operation IDs:
+- `workflow.cache_json_document`
+- `workflow.redis_run_initializer`
+
+#### `workflow.cache_json_document`
+
+Reads a JSON file, commits it as a declared artifact output, and (when Redis is available) mirrors it into Redis.
+
+`with` fields:
+- required: `source_path`, `json_key`
+- conditionally required: `hash_key` (required when Redis is configured)
+- optional: `allowed_hash_fields`, `ttl_seconds`, `base_dir`, `output_id`
+
+Example:
+
+```yaml
+- id: cache_profile
+  kind: plugin
+  uses: workflow.cache_json_document
+  with:
+    source_path: data/profile-{date}.json
+    json_key: cache:profile:{run_id}
+    hash_key: cache:profile_hash:{run_id}
+    allowed_hash_fields: [profile_id, status]
+    output_id: profile_cache
+  outputs:
+    - id: profile_cache
+      validate: profile_schema
+```
+
+#### `workflow.redis_run_initializer`
+
+Initializes run metadata/counters/stream-group idempotently, and commits an initialization artifact even when Redis is unavailable.
+
+`with` fields:
+- required: `run_key`
+- optional: `stream_key`, `stream_group` (default `workers`), `counter_keys`, `metadata`, `ttl_seconds`, `output_id`
+
+Example:
+
+```yaml
+- id: init_run_state
+  kind: plugin
+  uses: workflow.redis_run_initializer
+  with:
+    run_key: runs:{run_id}
+    stream_key: events:{run_id}
+    stream_group: workers
+    counter_keys:
+      processed:{run_id}: 0
+      failed:{run_id}: 0
+    metadata:
+      workflow: "{workflow_name}"
+      run_id: "{run_id}"
+    output_id: run_config
+  outputs:
+    - id: run_config
+```
 
 ### Automatic Step Signaling (Prompt Injection)
 
