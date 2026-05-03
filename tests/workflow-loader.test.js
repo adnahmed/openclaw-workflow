@@ -604,3 +604,25 @@ steps:
 		);
 	});
 });
+
+test("accepts logical id-only outputs", async () => {
+	await withTempDir("wf-test", async (dir) => {
+		await writeFile(
+			join(dir, "id-outputs.yml"),
+			`
+name: ID Outputs
+steps:
+  - id: collect
+    task: collect
+    outputs:
+      - id: alerts_raw
+        validate: linkedin_alerts_raw
+`,
+		);
+
+		const wf = await loadWorkflow("id-outputs", dir);
+		assert.equal(wf.steps[0].outputs.length, 1);
+		assert.equal(wf.steps[0].outputs[0].id, "alerts_raw");
+		assert.equal(wf.steps[0].outputs[0].path, undefined);
+	});
+});

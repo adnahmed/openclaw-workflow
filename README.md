@@ -50,13 +50,25 @@ Configure the plugin in your OpenClaw settings:
           "notifyChannel": "telegram",
           "sessionModel": "anthropic/claude-sonnet-4-6",
           "sessionAdapter": "auto",
-          "pollIntervalMs": 5000
+          "pollIntervalMs": 5000,
+          "stateBackend": "auto",
+          "redisUrl": "redis://localhost:6379",
+          "redisMcpToolPrefix": "MCP_DOCKER",
+          "filesystemFallback": true,
+          "materializeOutputs": "on_demand"
         }
       }
     }
   }
 }
 ```
+
+State/artifact backend config notes:
+- `stateBackend`: `filesystem` \| `redis` \| `auto` \| `dual` (default `filesystem`)
+- `redisUrl`: enables native Redis backend resolution when configured
+- `redisMcpToolPrefix`: MCP Redis adapter prefix (default `MCP_DOCKER`)
+- `filesystemFallback`: fallback to file-backed state/artifacts when Redis is unavailable
+- `materializeOutputs`: `never` \| `on_demand` \| `always`
 
 Create your workflows directory and restart/verify the gateway:
 
@@ -150,6 +162,7 @@ workflow_status({ name: "hello" })
 | `description` | string   | ❌       | `""`    | Human description shown in `workflow_list`. |
 | `steps`       | array    | ✅       | —       | Ordered list of step definitions. |
 | `concurrency` | number   | ❌       | `3`     | Max steps that run in parallel. |
+| `state`       | object    | ❌       | —        | Storage backend declaration for state and artifacts. See [Artifact-Backed Declared Outputs](#artifact-backed-declared-outputs). |
 | `config`       | object    | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
 | `validators`    | object    | ❌       | `{}`     | Custom validation rules for output checks, supporting schemas and conditional outcomes (`pass_when`, `retry_when`, `block_when`, `fail_when`). |
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for the entire workflow. Steps without their own `required_skills` inherit these. Injected as instructions into step prompts and verified against agent config. |
@@ -563,6 +576,58 @@ You may provide either:
 - `data`: structured JSON value to serialize
 - `text`: raw text content
 
+Migration note:
+- `write_output` accepts either `path` (legacy) or `output_id` (preferred).
+- For new workflows, prefer `output_id` to keep contracts path-independent.
+
+---
+
+## Artifact-Backed Declared Outputs
+
+Outputs can be declared with a logical `id` instead of (or in addition to) a filesystem `path`. Artifact-backed outputs are stored in the run artifact store and can be read, listed, and materialized via the `read_output`, `list_outputs`, and `materialize_output` tools.
+
+### Declaring logical outputs in YAML
+
+```yaml
+name: My Pipeline
+state:
+  backend: filesystem          # filesystem | redis | auto | dual
+  materialize_outputs: on_demand   # never | on_demand | always
+  redis:
+    provider: auto             # auto | mcp | native
+    tool_prefix: MCP_DOCKER
+steps:
+  - id: build_report
+    task: "Build and commit the daily report."
+    outputs:
+      # Path-only (legacy, unchanged):
+      - path: data/report-{date}.json
+        validate: report_schema
+
+      # ID-only (artifact-backed, no filesystem path):
+      - id: daily-summary
+        validate: summary_schema
+
+      # Both (artifact-backed + auto-materialized to path):
+      - id: alert-manifest
+        path: data/alerts-{date}.json
+        materialize:
+          mode: always
+```
+
+When a step output has only an `id`, workers use `write_output` with `output_id` instead of `path`:
+
+```json
+{
+  "run_id": "my-pipeline-20260503T090000",
+  "step_id": "build_report",
+  "output_id": "daily-summary",
+  "data": { "items": 42, "status": "ok" }
+}
+```
+
+The artifact is stored in `{runsDir}/.artifacts/{runId}/{stepId}/{outputId}.json` and is accessible via `read_output` without materializing to disk.
+
 Behavior:
 - only allows writes to outputs declared for the current step
 - reuses the existing validator layer; there are no extra YAML schema keys for writers
@@ -571,6 +636,47 @@ Behavior:
 - persists provenance used by running-step early completion checks
 
 If a worker manually writes a declared output instead of using `write_output`, the orchestrator may still validate it at final completion, but it will not trust that file for early completion while the worker session is still active.
+
+### `read_output`
+
+Read one declared artifact by `run_id`, `step_id`, and `output_id`.
+
+| Parameter   | Type     | Required | Description |
+|-------------|----------|----------|-------------|
+| `run_id`    | string   | ✅       | Workflow run ID |
+| `step_id`   | string   | ✅       | Producing step ID |
+| `output_id` | string   | ✅       | Declared output `id` |
+| `fields`    | string[] | ❌       | Restrict which keys are returned from the artifact (projection) |
+| `limit`     | number   | ❌       | For array artifacts, return only the first N items |
+
+### `list_outputs`
+
+List committed declared artifacts for a run.
+
+| Parameter | Type   | Required | Description |
+|-----------|--------|----------|-------------|
+| `run_id`  | string | ✅       | Workflow run ID |
+| `step_id` | string | ❌       | Filter to a specific step |
+
+### `materialize_output`
+
+Materialize a stored artifact to the filesystem on demand.
+
+| Parameter   | Type   | Required | Description |
+|-------------|--------|----------|-------------|
+| `run_id`    | string | ✅       | Workflow run ID |
+| `step_id`   | string | ✅       | Producing step ID |
+| `output_id` | string | ✅       | Declared output `id` |
+| `path`      | string | ❌       | Target filesystem path (overrides the output's declared `materialize.path`) |
+
+### `workflow_state_get`
+
+Debug/admin tool that returns raw run state including backend resolution metadata.
+
+| Parameter       | Type    | Required | Description |
+|-----------------|---------|----------|-------------|
+| `run_id`        | string  | ✅       | Workflow run ID |
+| `include_steps` | boolean | ❌       | Include full per-step state (default `true`). Set `false` for a compact summary. |
 
 ---
 
@@ -865,6 +971,7 @@ interface PluginApi {
 | `src/workflow-loader.ts` | YAML/JSON parsing, validation, cycle detection |
 | `src/workflow-executor.ts` | Core execution engine: scheduling, deps, retry, resume, dry run |
 | `src/workflow-state.ts` | Atomic state file R/W, run listing |
+| `src/state-artifact-stores.ts` | Filesystem-backed `WorkflowStateStore` / `WorkflowArtifactStore` implementations + `resolveStateBackend()` resolver |
 | `src/step-runner.ts` | Session lifecycle: spawn, poll, output check. Includes MockAdapter |
 | `src/output-checker.ts` | File existence validation for output gates |
 | `src/output-validator.ts` | Advanced output content validation |

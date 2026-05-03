@@ -13,8 +13,12 @@ import { cancelStepSession, runStep } from "./step-runner.js";
 import {
 	WorkflowCancelParameters,
 	WorkflowListParameters,
+	WorkflowListOutputsParameters,
+	WorkflowMaterializeOutputParameters,
+	WorkflowReadOutputParameters,
 	WorkflowRunParameters,
 	WorkflowStatusParameters,
+	WorkflowStateGetParameters,
 	WorkflowStepCompleteParameters,
 	WorkflowStepUpdateParameters,
 	WorkflowWriteOutputParameters,
@@ -26,7 +30,12 @@ import type {
 	StepState,
 	WorkflowStep,
 } from "./types.js";
-import { outputPathOf } from "./variable-substitution.js";
+import { outputIdOf, outputPathOf } from "./variable-substitution.js";
+import {
+	FilesystemArtifactStore,
+	FilesystemStateStore,
+	resolveStateBackend,
+} from "./state-artifact-stores.js";
 import {
 	dryRun,
 	executeWorkflow,
@@ -131,11 +140,32 @@ export default definePluginEntry({
 			cancelGraceMs,
 		} = config;
 
+		const stateStore = new FilesystemStateStore(runsDir);
+		const artifactStore = new FilesystemArtifactStore(
+			runsDir,
+			baseDir,
+			config.materializeOutputs || "on_demand",
+		);
+
 		function buildExecutorConfig(workflow, notify) {
+			const backendResolution = resolveStateBackend({
+				workflowState: workflow?.state,
+				pluginConfig: {
+					stateBackend: config.stateBackend,
+					redisUrl: config.redisUrl,
+					redisMcpToolPrefix: config.redisMcpToolPrefix,
+					filesystemFallback: config.filesystemFallback,
+				},
+			});
+
 			return {
 				runsDir,
 				baseDir,
 				concurrency: workflow.concurrency ?? concurrencyDefault,
+				stateStore,
+				artifactStore,
+				stateBackendResolution: backendResolution,
+				filesystemFallback: config.filesystemFallback,
 				notify,
 				pollIntervalMs,
 				defaultModel,
@@ -311,6 +341,7 @@ export default definePluginEntry({
 					run_id,
 					step_id,
 					path,
+					output_id,
 					data,
 					text,
 					attempt,
@@ -333,7 +364,11 @@ export default definePluginEntry({
 						return errorResult("Provide exactly one of 'data' or 'text'.");
 					}
 
-					let state = await readRunState(run_id, runsDir);
+					if (!path && !output_id) {
+						return errorResult("Provide one of: path or output_id.");
+					}
+
+					let state = await stateStore.loadRun(run_id);
 					const step = (state as RunState).steps?.[step_id] as
 						| StepState
 						| undefined;
@@ -380,10 +415,13 @@ export default definePluginEntry({
 						state: state as RunState,
 						stepId: step_id,
 						path,
+						output_id,
 						data,
 						text,
 						baseDir,
 						workflowsDir,
+						artifactStore,
+						materializeMode: config.materializeOutputs,
 						attempt,
 						session_key,
 						subagent_run_id,
@@ -395,26 +433,29 @@ export default definePluginEntry({
 					}
 
 					const now = getLocalISOString();
+					const outputKey =
+						result.provenance.output_id || output_id || path || "(unknown)";
 					const outputWrites = {
 						...(step.output_writes || {}),
-						[path]: result.provenance,
+						[outputKey]: result.provenance,
 					};
 
-					state = await updateStepState(
-						state,
+					state = await stateStore.updateStep(
+						run_id,
 						step_id,
 						{
 							output_writes: outputWrites,
 							last_update_at: now,
-							last_message: `Committed declared output: ${path}`,
+							last_message: `Committed declared output: ${outputKey}`,
 						},
-						runsDir,
 					);
 
 					return textResult({
 						ok: true,
 						committed: true,
-						path,
+						path: result.provenance.path || path,
+						output_id: result.provenance.output_id || output_id,
+						stored: result.provenance.storage_backend || "filesystem",
 						decision: result.decision,
 						validator: result.provenance.validator,
 						bytes: result.provenance.bytes,
@@ -444,6 +485,15 @@ export default definePluginEntry({
 				} = readParams(first, second);
 				try {
 					const workflow = await loadWorkflow(name, workflowsDir);
+					const backendResolution = resolveStateBackend({
+						workflowState: workflow.state,
+						pluginConfig: {
+							stateBackend: config.stateBackend,
+							redisUrl: config.redisUrl,
+							redisMcpToolPrefix: config.redisMcpToolPrefix,
+							filesystemFallback: config.filesystemFallback,
+						},
+					});
 					const runId = generateRunId(workflow.name);
 
 					if (dry_run) {
@@ -507,6 +557,7 @@ export default definePluginEntry({
 						{
 							status: "running",
 							completed_at: null,
+							state_backend: backendResolution,
 						},
 						runsDir,
 					);
@@ -539,9 +590,123 @@ export default definePluginEntry({
 						run_id: runId,
 						workflow: workflow.name,
 						status: "running",
+						state_backend: backendResolution,
 						total_steps: workflow.steps.length,
 						steps: stepSummary,
 						message: `Workflow "${workflow.name}" started. Use workflow_status with run_id "${runId}" to track progress.`,
+					});
+				} catch (err) {
+					return errorResult(err instanceof Error ? err.message : String(err));
+				}
+			},
+		});
+
+		api.registerTool({
+			name: "read_output",
+			description: "Read one committed declared output artifact by output_id.",
+			parameters: WorkflowReadOutputParameters,
+			optional: true,
+			async execute(first, second) {
+				const { run_id, step_id, output_id, limit, fields } = readParams(
+					first,
+					second,
+				);
+
+				try {
+					const artifact = await artifactStore.readArtifact(
+						run_id,
+						step_id,
+						output_id,
+					);
+					if (!artifact) {
+						return errorResult(
+							`Output not found: run=${run_id} step=${step_id} output_id=${output_id}`,
+						);
+					}
+
+					let payload = artifact.data;
+					if (Array.isArray(payload) && typeof limit === "number") {
+						payload = payload.slice(0, Math.max(1, limit));
+					}
+
+					if (
+						Array.isArray(payload) &&
+						Array.isArray(fields) &&
+						fields.length > 0
+					) {
+						payload = payload.map((item) => {
+							if (!item || typeof item !== "object") return item;
+							const picked = {};
+							for (const key of fields) {
+								if (Object.prototype.hasOwnProperty.call(item, key)) {
+									picked[key] = item[key];
+								}
+							}
+							return picked;
+						});
+					}
+
+					return textResult({
+						run_id,
+						step_id,
+						output_id,
+						validator: artifact.validator,
+						decision: artifact.decision,
+						bytes: artifact.bytes,
+						sha256: artifact.sha256,
+						stored: artifact.storage_backend,
+						materialized_path: artifact.materialized_path || null,
+						data: payload,
+					});
+				} catch (err) {
+					return errorResult(err instanceof Error ? err.message : String(err));
+				}
+			},
+		});
+
+		api.registerTool({
+			name: "list_outputs",
+			description: "List committed output artifacts for a run (optionally scoped to one step).",
+			parameters: WorkflowListOutputsParameters,
+			optional: true,
+			async execute(first, second) {
+				const { run_id, step_id } = readParams(first, second);
+				try {
+					const artifacts = await artifactStore.listArtifacts(run_id, step_id);
+					return textResult({
+						run_id,
+						step_id: step_id || null,
+						count: artifacts.length,
+						artifacts,
+					});
+				} catch (err) {
+					return errorResult(err instanceof Error ? err.message : String(err));
+				}
+			},
+		});
+
+		api.registerTool({
+			name: "materialize_output",
+			description: "Materialize a stored output artifact to a file path on demand.",
+			parameters: WorkflowMaterializeOutputParameters,
+			optional: true,
+			async execute(first, second) {
+				const { run_id, step_id, output_id, path } = readParams(first, second);
+				try {
+					const materializedPath = await artifactStore.materializeArtifact({
+						runId: run_id,
+						stepId: step_id,
+						outputId: output_id,
+						targetPath: path,
+						baseDir,
+					});
+
+					return textResult({
+						ok: true,
+						run_id,
+						step_id,
+						output_id,
+						path: materializedPath,
 					});
 				} catch (err) {
 					return errorResult(err instanceof Error ? err.message : String(err));
@@ -616,6 +781,39 @@ export default definePluginEntry({
 				} catch (err) {
 					if (err?.code === "ENOENT")
 						return errorResult(`Run not found: ${run_id || name}`);
+					return errorResult(err instanceof Error ? err.message : String(err));
+				}
+			},
+		});
+
+		api.registerTool({
+			name: "workflow_state_get",
+			description: "Read raw run state (including backend resolution) for debugging/admin.",
+			parameters: WorkflowStateGetParameters,
+			optional: true,
+			async execute(first, second) {
+				const { run_id, include_steps = true } = readParams(first, second);
+				try {
+					const state = await stateStore.loadRun(run_id);
+					const snapshot = include_steps
+						? state
+						: {
+							run_id: state.run_id,
+							workflow: state.workflow,
+							workflow_key: state.workflow_key,
+							status: state.status,
+							started_at: state.started_at,
+							completed_at: state.completed_at,
+							cancel_requested_at: state.cancel_requested_at,
+							cancelled_at: state.cancelled_at,
+							state_backend: (state as any).state_backend || null,
+						};
+
+					return textResult(snapshot);
+				} catch (err) {
+					if (err?.code === "ENOENT") {
+						return errorResult(`Run not found: ${run_id}`);
+					}
 					return errorResult(err instanceof Error ? err.message : String(err));
 				}
 			},
@@ -812,6 +1010,9 @@ export default definePluginEntry({
 								step: contractStep,
 								baseDir,
 								workflowsDir,
+								runId: run_id,
+								stepId: step_id,
+								artifactStore,
 							});
 
 							if (lateOutputCheck.passed) {
@@ -895,6 +1096,9 @@ export default definePluginEntry({
 						step: contractStep,
 						baseDir,
 						workflowsDir,
+						runId: run_id,
+						stepId: step_id,
+						artifactStore,
 					});
 
 					const decision = outputCheck.decision;
@@ -1013,7 +1217,7 @@ export default definePluginEntry({
 						await writeStepCacheManifest({
 							baseDir,
 							stepId: step_id,
-							outputs: declaredOutputs.map((o: OutputSpec) => outputPathOf(o)),
+							outputs: declaredOutputs.map((o: OutputSpec) => outputIdOf(o)),
 							producerRunId: run_id,
 							reason,
 							decision: outputCheck.decision,

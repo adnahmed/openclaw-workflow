@@ -423,13 +423,59 @@ function normalizeAndValidate(raw, filePath) {
 				);
 			}
 
+			const normalizeOutputs = (stepId, outputsRaw) => {
+				if (!Array.isArray(outputsRaw)) return [];
+
+				return outputsRaw.map((out, outIndex) => {
+					if (typeof out === "string") {
+						return out;
+					}
+
+					if (!out || typeof out !== "object") {
+						throw new Error(
+							`Step "${stepId}" output at index ${outIndex} must be a string or object.`,
+						);
+					}
+
+					const hasPath =
+						typeof out.path === "string" && out.path.trim().length > 0;
+					const hasId = typeof out.id === "string" && out.id.trim().length > 0;
+					if (!hasPath && !hasId) {
+						throw new Error(
+							`Step "${stepId}" output at index ${outIndex} must declare at least one of: path or id.`,
+						);
+					}
+
+					return {
+						id: hasId ? out.id : undefined,
+						path: hasPath ? out.path : undefined,
+						validate:
+							typeof out.validate === "string" ? out.validate : undefined,
+						optional: out.optional === true,
+						materialize:
+							out.materialize && typeof out.materialize === "object"
+								? {
+									path:
+										typeof out.materialize.path === "string"
+											? out.materialize.path
+											: undefined,
+									mode:
+										typeof out.materialize.mode === "string"
+											? out.materialize.mode
+											: undefined,
+								}
+								: undefined,
+					};
+				});
+			};
+
 			// Normalize with defaults
 			return {
 				id: step.id,
 				name: step.name || step.id,
 				task: step.task || null,
 				depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
-				outputs: Array.isArray(step.outputs) ? step.outputs : [],
+				outputs: normalizeOutputs(step.id, step.outputs),
 				for_each: step.for_each || null,
 				skip_if_empty: step.skip_if_empty || null,
 				parser: step.parser || "auto",
@@ -520,6 +566,24 @@ function normalizeAndValidate(raw, filePath) {
 		version: raw.version ? String(raw.version) : "1.0",
 		description: raw.description || "",
 		config: raw.config || {},
+		state:
+			raw.state && typeof raw.state === "object"
+				? {
+					backend: raw.state.backend || "filesystem",
+					key: raw.state.key,
+					fallback: raw.state.fallback || "filesystem",
+					ttl: raw.state.ttl,
+					materialize_outputs:
+						raw.state.materialize_outputs || "on_demand",
+					redis:
+						raw.state.redis && typeof raw.state.redis === "object"
+							? {
+								provider: raw.state.redis.provider || "auto",
+								tool_prefix: raw.state.redis.tool_prefix || "MCP_DOCKER",
+							}
+							: undefined,
+				}
+				: undefined,
  		validators: raw.validators || {},
  		required_skills: Array.isArray(raw.required_skills) ? raw.required_skills : [],
  		required_mcp_servers: Array.isArray(raw.required_mcp_servers) ? raw.required_mcp_servers : [],

@@ -14,6 +14,11 @@ test("manifest exposes only the workflow tool contract and strict config schema"
 		"workflow_status",
 		"workflow_list",
 		"workflow_cancel",
+		"write_output",
+		"read_output",
+		"list_outputs",
+		"materialize_output",
+		"workflow_state_get",
 	]);
 
 	assert.equal(manifest.configSchema.type, "object");
@@ -31,6 +36,9 @@ test("manifest exposes only the workflow tool contract and strict config schema"
 		"notifyChannel",
 		"sessionModel",
 		"pollIntervalMs",
+		"stateBackend",
+		"redisUrl",
+		"filesystemFallback",
 	]) {
 		assert.ok(manifest.uiHints[key], `missing uiHints.${key}`);
 	}

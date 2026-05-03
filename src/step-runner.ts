@@ -41,7 +41,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
-import { checkOutputs } from "./output-checker.js";
+import { checkOutputs, checkStepContract } from "./output-checker.js";
 import {
 	type CancelResult,
 	type MockAdapterOptions,
@@ -404,7 +404,8 @@ function buildDeclaredOutputContractsPreamble(args: {
 	}
 
 	const blocks = outputs.map((output, index) => {
-		const outputSpec = typeof output === "string" ? { path: output } : output;
+		const outputSpec =
+			typeof output === "string" ? { path: output, id: output } : output;
 		const validatorId = outputSpec.validate;
 		const validator = validatorId ? args.validators?.[validatorId] : undefined;
 		const schema = readResolvedValidatorSchema(
@@ -413,7 +414,8 @@ function buildDeclaredOutputContractsPreamble(args: {
 		);
 		const lines = [
 			`Output contract ${index + 1}:`,
-			`Path: ${outputSpec.path}`,
+			`Output ID: ${outputSpec.id || outputSpec.path || `(auto:${index + 1})`}`,
+			`Path: ${outputSpec.path || "(logical artifact only)"}`,
 			`Validator: ${validatorId || "(none)"}`,
 		];
 
@@ -608,9 +610,12 @@ Example JSON output write:
 {
   "run_id": "${args.runId}",
   "step_id": "${args.stepId}",
-  "path": "<declared output path>",
+	"output_id": "<declared output id>",
   "data": <JSON value matching the validator>
 }
+
+Legacy migration option:
+- You may use "path" instead of "output_id" for older workflows.
 
 For text outputs, use "text" instead of "data".
 Provide exactly one of "data" or "text".
@@ -872,11 +877,30 @@ export async function runStep(step, runId, api, options) {
 		cronPollTimeoutMs,
 		validators = {},
 		workflowDir = "",
+		artifactStore = null,
+		filesystemFallback = true,
 		attempts,
 		handoffToken,
 		runStartedAtMs,
 		acceptPreviousAttemptOutputs = true,
 	} = options;
+
+	const runOutputCheck = async () => {
+		if (artifactStore && runId && step?.id) {
+			return checkStepContract({
+				outputs: step.outputs,
+				validators,
+				artifactStore,
+				runId,
+				stepId: step.id,
+				baseDir,
+				workflowDir,
+				filesystemFallback,
+			});
+		}
+
+		return checkOutputs(step.outputs, baseDir, validators, workflowDir);
+	};
 
 	if (cancelled) {
 		return {
@@ -1021,12 +1045,7 @@ export async function runStep(step, runId, api, options) {
 				step.outputs &&
 				step.outputs.length > 0
 			) {
-				outputCheck = await checkOutputs(
-					step.outputs,
-					baseDir,
-					validators,
-					workflowDir,
-				);
+				outputCheck = await runOutputCheck();
 
 				if (outputCheck.passed) {
 					const hasCurrentAttemptProvenance =
@@ -1089,12 +1108,7 @@ export async function runStep(step, runId, api, options) {
 			if (statusResult.status === "done") {
 				logs = statusResult.logs;
 
-				outputCheck = await checkOutputs(
-					step.outputs,
-					baseDir,
-					validators,
-					workflowDir,
-				);
+				outputCheck = await runOutputCheck();
 
 				const mapped = statusFromOutputDecision(outputCheck);
 
@@ -1111,12 +1125,7 @@ export async function runStep(step, runId, api, options) {
 				break;
 			}
 			if (statusResult.status === "error") {
-				outputCheck = await checkOutputs(
-					step.outputs,
-					baseDir,
-					validators,
-					workflowDir,
-				);
+				outputCheck = await runOutputCheck();
 				finalStatus = "failed";
 				errorMsg = statusResult.error || "Step session exited with error";
 				logs = statusResult.logs;
@@ -1125,12 +1134,7 @@ export async function runStep(step, runId, api, options) {
 		}
 
 		if (finalStatus === "ok" || finalStatus === null) {
-			outputCheck = await checkOutputs(
-				step.outputs,
-				baseDir,
-				validators,
-				workflowDir,
-			);
+			outputCheck = await runOutputCheck();
 		}
 
 		if (finalStatus === null) {
@@ -2093,6 +2097,22 @@ export function createStepRunner(adapter) {
 				validations: [],
 			};
 			let cancelResult: CancelResult | null = null;
+			const runOutputCheck = async () => {
+				if (options.artifactStore && runId && step?.id) {
+					return checkStepContract({
+						outputs: step.outputs,
+						validators,
+						artifactStore: options.artifactStore,
+						runId,
+						stepId: step.id,
+						baseDir,
+						workflowDir,
+						filesystemFallback: options.filesystemFallback !== false,
+					});
+				}
+
+				return checkOutputs(step.outputs, baseDir, validators, workflowDir);
+			};
 
 			while (Date.now() < deadline) {
 				await sleep(pollIntervalMs);
@@ -2106,12 +2126,7 @@ export function createStepRunner(adapter) {
 						step.complete_when === "handoff_or_outputs") &&
 					step.outputs?.length
 				) {
-					outputCheck = await checkOutputs(
-						step.outputs,
-						baseDir,
-						validators,
-						workflowDir,
-					);
+					outputCheck = await runOutputCheck();
 
 					if (outputCheck.passed) {
 						if (
@@ -2163,12 +2178,7 @@ export function createStepRunner(adapter) {
 				if (statusResult.status === "done") {
 					logs = statusResult.logs;
 
-					outputCheck = await checkOutputs(
-						step.outputs,
-						baseDir,
-						validators,
-						workflowDir,
-					);
+					outputCheck = await runOutputCheck();
 
 					const mapped = statusFromOutputDecision(outputCheck);
 
@@ -2185,12 +2195,7 @@ export function createStepRunner(adapter) {
 					break;
 				}
 				if (statusResult.status === "error") {
-					outputCheck = await checkOutputs(
-						step.outputs,
-						baseDir,
-						validators,
-						workflowDir,
-					);
+					outputCheck = await runOutputCheck();
 					finalStatus = "failed";
 					errorMsg = statusResult.error || "Session error";
 					logs = statusResult.logs;
@@ -2199,21 +2204,11 @@ export function createStepRunner(adapter) {
 			}
 
 			if (finalStatus === "ok" || finalStatus === null) {
-				outputCheck = await checkOutputs(
-					step.outputs,
-					baseDir,
-					validators,
-					workflowDir,
-				);
+				outputCheck = await runOutputCheck();
 			}
 
 			if (finalStatus === "ok" || finalStatus === null) {
-				outputCheck = await checkOutputs(
-					step.outputs,
-					baseDir,
-					validators,
-					workflowDir,
-				);
+				outputCheck = await runOutputCheck();
 			}
 
 			if (finalStatus === null) {

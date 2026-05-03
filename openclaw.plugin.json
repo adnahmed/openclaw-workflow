@@ -8,7 +8,12 @@
       "workflow_run",
       "workflow_status",
       "workflow_list",
-      "workflow_cancel"
+      "workflow_cancel",
+      "write_output",
+      "read_output",
+      "list_outputs",
+      "materialize_output",
+      "workflow_state_get"
     ]
   },
   "configSchema": {
@@ -95,6 +100,41 @@
       "autoResumeOnStartup": {
         "type": "boolean",
         "description": "When true, Gateway startup scans persisted workflow runs and automatically resumes runs that were still marked running."
+      },
+      "stateBackend": {
+        "type": "string",
+        "enum": [
+          "filesystem",
+          "redis",
+          "auto",
+          "dual"
+        ],
+        "description": "Requested workflow state backend. Default: filesystem."
+      },
+      "redisUrl": {
+        "type": "string",
+        "description": "Native Redis connection URL for workflow state/artifacts."
+      },
+      "redisPrefix": {
+        "type": "string",
+        "description": "Redis key prefix used by workflow state/artifact backends."
+      },
+      "redisMcpToolPrefix": {
+        "type": "string",
+        "description": "MCP server/tool prefix used when resolving Redis through MCP adapters (for example MCP_DOCKER)."
+      },
+      "filesystemFallback": {
+        "type": "boolean",
+        "description": "When true, fallback to filesystem when Redis is unavailable."
+      },
+      "materializeOutputs": {
+        "type": "string",
+        "enum": [
+          "never",
+          "on_demand",
+          "always"
+        ],
+        "description": "Controls when artifact outputs are materialized to filesystem paths."
       }
     }
   },
@@ -138,6 +178,23 @@
       "label": "Poll interval",
       "help": "Milliseconds between status checks for running step sessions.",
       "placeholder": "5000",
+      "advanced": true
+    },
+    "stateBackend": {
+      "label": "State backend",
+      "help": "Choose filesystem, redis, auto, or dual backend resolution.",
+      "placeholder": "auto",
+      "advanced": true
+    },
+    "redisUrl": {
+      "label": "Redis URL",
+      "help": "Native Redis URL used when state backend resolves to redis-native.",
+      "placeholder": "redis://localhost:6379",
+      "advanced": true
+    },
+    "filesystemFallback": {
+      "label": "Filesystem fallback",
+      "help": "Fallback to filesystem when Redis is unavailable.",
       "advanced": true
     }
   }

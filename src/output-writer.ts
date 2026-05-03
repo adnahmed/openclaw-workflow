@@ -8,9 +8,14 @@ import type {
 	RunState,
 	StepState,
 	ValidationDecision,
+	WorkflowArtifactStore,
 	WorkflowDefinition,
 } from "./types.js";
-import { assertSafeOutputPath, outputPathOf } from "./variable-substitution.js";
+import {
+	assertSafeOutputPath,
+	outputIdOf,
+	outputPathOf,
+} from "./variable-substitution.js";
 import { getLocalISOString } from "./workflow-state.js";
 
 function workflowDirOf(workflow: WorkflowDefinition, fallback: string): string {
@@ -23,10 +28,16 @@ function normalizePath(baseDir: string, rawPath: string): string {
 	return isAbsolute(rawPath) ? rawPath : resolve(baseDir, rawPath);
 }
 
-function findDeclaredOutput(step: StepState, path: string): OutputSpec | null {
+function findDeclaredOutput(args: {
+	step: StepState;
+	path?: string;
+	outputId?: string;
+}): OutputSpec | null {
+	const { step, path, outputId } = args;
 	const declared = step.declared_outputs || [];
 	for (const out of declared) {
-		if (outputPathOf(out) === path) return out;
+		if (path && outputPathOf(out) === path) return out;
+		if (outputId && outputIdOf(out) === outputId) return out;
 	}
 	return null;
 }
@@ -54,11 +65,14 @@ export async function writeDeclaredOutput(args: {
 	workflow: WorkflowDefinition;
 	state: RunState;
 	stepId: string;
-	path: string;
+	path?: string;
+	output_id?: string;
 	data?: unknown;
 	text?: string;
 	baseDir: string;
 	workflowsDir: string;
+	artifactStore?: WorkflowArtifactStore | null;
+	materializeMode?: "never" | "on_demand" | "always";
 	attempt?: number;
 	session_key?: string;
 	subagent_run_id?: string;
@@ -71,12 +85,19 @@ export async function writeDeclaredOutput(args: {
 		throw new Error(`Step "${args.stepId}" is not running.`);
 	}
 
-	const declared = findDeclaredOutput(stepState, args.path);
+	const declared = findDeclaredOutput({
+		step: stepState,
+		path: args.path,
+		outputId: args.output_id,
+	});
 	if (!declared) {
 		throw new Error(
-			`Path is not a declared output for step "${args.stepId}": ${args.path}`,
+			`Output is not declared for step "${args.stepId}": ${args.output_id || args.path}`,
 		);
 	}
+
+	const declaredPath = outputPathOf(declared);
+	const declaredOutputId = args.output_id || outputIdOf(declared);
 
 	const validatorId = validatorIdOf(declared);
 	const validator = validatorId
@@ -86,7 +107,7 @@ export async function writeDeclaredOutput(args: {
 		throw new Error(`Unknown output validator: ${validatorId}`);
 	}
 
-	const absPath = normalizePath(args.baseDir, args.path);
+	const absPath = declaredPath ? normalizePath(args.baseDir, declaredPath) : "";
 	const value =
 		validator?.type === "json" ? args.data : (args.text ?? args.data);
 
@@ -99,6 +120,74 @@ export async function writeDeclaredOutput(args: {
 
 	if (validator?.type === "text" && typeof args.text === "undefined") {
 		throw new Error("For text validators, provide 'text'.");
+	}
+
+	if (args.artifactStore) {
+		const artifactCommit = await args.artifactStore.commitArtifact({
+			runId: args.state.run_id,
+			stepId: args.stepId,
+			outputId: declaredOutputId,
+			declaredOutput: declared,
+			data: args.data,
+			text: args.text,
+			validatorId,
+			validator,
+			validators: args.workflow.validators || {},
+			attempt: args.attempt ?? stepState.attempts,
+			sessionKey: args.session_key ?? stepState.session_key,
+			subagentRunId: args.subagent_run_id ?? stepState.subagent_run_id,
+			handoffToken: args.handoff_token ?? stepState.handoff_token,
+			workflowDir: workflowDirOf(args.workflow, args.workflowsDir),
+			baseDir: args.baseDir,
+			materialize: args.materializeMode || (declaredPath ? "always" : "on_demand"),
+		});
+
+		if (!artifactCommit.ok || !artifactCommit.committed || !artifactCommit.artifact) {
+			return {
+				ok: false,
+				committed: false,
+				decision: artifactCommit.decision,
+				validation: artifactCommit.validation,
+				message:
+					artifactCommit.message ||
+					"Output was not committed because artifact validation failed.",
+			};
+		}
+
+		const artifact = artifactCommit.artifact;
+		const provenance: OutputWriteProvenance = {
+			path: declaredPath || undefined,
+			abs_path: absPath || undefined,
+			output_id: artifact.output_id,
+			artifact_key: `${artifact.run_id}:${artifact.step_id}:${artifact.output_id}`,
+			materialized_path: artifact.materialized_path || null,
+			storage_backend: artifact.storage_backend,
+			validator: validatorId,
+			decision: artifact.decision,
+			run_id: args.state.run_id,
+			step_id: args.stepId,
+			attempt: artifact.attempt ?? stepState.attempts,
+			session_key: artifact.session_key,
+			subagent_run_id: artifact.subagent_run_id,
+			handoff_token: artifact.handoff_token,
+			bytes: artifact.bytes,
+			sha256: artifact.sha256,
+			committed_at: artifact.committed_at,
+		};
+
+		return {
+			ok: true,
+			committed: true,
+			decision: artifact.decision,
+			validation: artifactCommit.validation,
+			provenance,
+		};
+	}
+
+	if (!declaredPath) {
+		throw new Error(
+			`Declared output "${declaredOutputId}" has no path and no artifact store was configured.`,
+		);
 	}
 
 	const serialized = serializeForValidator(value, validator?.type);
@@ -160,8 +249,10 @@ export async function writeDeclaredOutput(args: {
 
 		const finalContent = await readFile(absPath, "utf8");
 		const provenance: OutputWriteProvenance = {
-			path: args.path,
+			path: declaredPath,
 			abs_path: absPath,
+			output_id: declaredOutputId,
+			storage_backend: "filesystem",
 			validator: validatorId,
 			decision: stagedValidation.decision,
 			failure_kind: stagedValidation.failure_kind,

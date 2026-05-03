@@ -37,8 +37,12 @@ export type CompletionMode =
 export type StepSignalingMode = "auto" | "off";
 
 export type OutputWriteProvenance = {
-	path: string;
-	abs_path: string;
+	path?: string;
+	abs_path?: string;
+	output_id?: string;
+	artifact_key?: string;
+	materialized_path?: string | null;
+	storage_backend?: string;
 	validator?: string;
 	decision: ValidationDecision;
 	failure_kind?: StepFailureKind;
@@ -51,6 +55,31 @@ export type OutputWriteProvenance = {
 	bytes: number;
 	sha256: string;
 	committed_at: string;
+};
+
+export type StateBackendKind = "filesystem" | "redis" | "auto" | "dual";
+
+export type MaterializeOutputsMode = "never" | "on_demand" | "always";
+
+export type WorkflowStateConfig = {
+	backend?: StateBackendKind;
+	key?: string;
+	fallback?: "filesystem" | "none";
+	ttl?: string;
+	materialize_outputs?: MaterializeOutputsMode;
+	redis?: {
+		provider?: "auto" | "native" | "mcp";
+		tool_prefix?: string;
+	};
+};
+
+export type StateBackendResolution = {
+	requested: StateBackendKind;
+	resolved: "filesystem" | "redis-native" | "redis-mcp";
+	provider?: string;
+	reason: string;
+	checked_at: string;
+	fallback?: "filesystem" | "none";
 };
 
 export type ReuseOutputsSpec = {
@@ -206,9 +235,14 @@ export type SpawnOptions = {
 export type OutputSpec =
 	| string
 	| {
-			path: string;
+			id?: string;
+			path?: string;
 			validate?: string;
 			optional?: boolean;
+			materialize?: {
+				path?: string;
+				mode?: MaterializeOutputsMode;
+			};
 	  };
 
 /**
@@ -235,6 +269,7 @@ export type WorkflowDefinition = {
 	version: string;
 	description: string;
 	config: Record<string, unknown>;
+	state?: WorkflowStateConfig;
 	validators?: Record<string, ValidatorSpec>;
 	required_skills?: string[];
 	/** MCP server names required by the workflow, e.g. MCP_DOCKER. Not OpenClaw skills. */
@@ -242,6 +277,101 @@ export type WorkflowDefinition = {
 	steps: WorkflowStep[];
 	concurrency: number;
 };
+
+export type RunFilter = {
+	workflow?: string;
+	status?: RunStatus;
+	limit?: number;
+};
+
+export type StoredArtifact = {
+	run_id: string;
+	step_id: string;
+	output_id: string;
+	validator?: string;
+	decision: ValidationDecision;
+	data: unknown;
+	text?: string;
+	bytes: number;
+	sha256: string;
+	attempt?: number;
+	session_key?: string | null;
+	subagent_run_id?: string | null;
+	handoff_token?: string | null;
+	storage_backend: string;
+	materialized_path?: string | null;
+	committed_at: string;
+};
+
+export type StoredArtifactMeta = Omit<StoredArtifact, "data" | "text">;
+
+export type CommitArtifactArgs = {
+	runId: string;
+	stepId: string;
+	outputId: string;
+	declaredOutput: OutputSpec;
+	data?: unknown;
+	text?: string;
+	validatorId?: string;
+	validator?: ValidatorSpec;
+	validators?: Record<string, ValidatorSpec>;
+	attempt?: number;
+	sessionKey?: string | null;
+	subagentRunId?: string | null;
+	handoffToken?: string | null;
+	workflowDir?: string;
+	baseDir?: string;
+	materialize?: MaterializeOutputsMode;
+};
+
+export type ArtifactCommitResult = {
+	ok: boolean;
+	committed: boolean;
+	decision: ValidationDecision;
+	validation: OutputValidationResult;
+	artifact?: StoredArtifact;
+	message?: string;
+};
+
+export type ValidateArtifactArgs = {
+	artifact: StoredArtifact;
+	validatorId?: string;
+	validator?: ValidatorSpec;
+	validators?: Record<string, ValidatorSpec>;
+	workflowDir?: string;
+};
+
+export type MaterializeArtifactArgs = {
+	runId: string;
+	stepId: string;
+	outputId: string;
+	targetPath?: string;
+	baseDir?: string;
+};
+
+export interface WorkflowStateStore {
+	loadRun(runId: string): Promise<RunState>;
+	saveRun(state: RunState): Promise<void>;
+	updateStep(
+		runId: string,
+		stepId: string,
+		patch: Partial<StepState>,
+	): Promise<RunState>;
+	listRuns(filter?: RunFilter): Promise<RunState[]>;
+	acquireLock(runId: string, owner: string, ttlMs: number): Promise<boolean>;
+}
+
+export interface WorkflowArtifactStore {
+	commitArtifact(args: CommitArtifactArgs): Promise<ArtifactCommitResult>;
+	readArtifact(
+		runId: string,
+		stepId: string,
+		outputId: string,
+	): Promise<StoredArtifact | null>;
+	validateArtifact(args: ValidateArtifactArgs): Promise<OutputValidationResult>;
+	listArtifacts(runId: string, stepId?: string): Promise<StoredArtifactMeta[]>;
+	materializeArtifact(args: MaterializeArtifactArgs): Promise<string>;
+}
 
 export type StepFailureKind =
 	| "timeout"

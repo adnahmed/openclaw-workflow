@@ -24,6 +24,12 @@ type RawPluginConfig = {
     cronPollTimeoutMs?: number;
     cancelGraceMs?: number;
     autoResumeOnStartup?: boolean;
+  stateBackend?: 'filesystem' | 'redis' | 'auto' | 'dual';
+  redisUrl?: string;
+  redisPrefix?: string;
+  redisMcpToolPrefix?: string;
+  filesystemFallback?: boolean;
+  materializeOutputs?: 'never' | 'on_demand' | 'always';
   };
 
 
@@ -89,5 +95,11 @@ export function normalizePluginConfig(rawConfig: RawPluginConfig = {}, runtime: 
     cronPollTimeoutMs: rawConfig.cronPollTimeoutMs ?? 60000,
     cancelGraceMs: rawConfig.cancelGraceMs ?? 10000,
     autoResumeOnStartup: rawConfig.autoResumeOnStartup === true,
+  stateBackend: rawConfig.stateBackend || 'filesystem',
+  redisUrl: rawConfig.redisUrl || null,
+  redisPrefix: rawConfig.redisPrefix || 'openclaw:workflow',
+  redisMcpToolPrefix: rawConfig.redisMcpToolPrefix || 'MCP_DOCKER',
+  filesystemFallback: rawConfig.filesystemFallback !== false,
+  materializeOutputs: rawConfig.materializeOutputs || 'on_demand',
   };
 }

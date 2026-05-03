@@ -117,9 +117,16 @@ export const WorkflowWriteOutputParameters = Type.Object(
 		step_id: Type.String({
 			description: "The running step ID that owns this declared output.",
 		}),
-		path: Type.String({
-			description: "Path of a declared output for this step.",
-		}),
+		path: Type.Optional(
+			Type.String({
+				description: "Legacy path of a declared output for this step.",
+			}),
+		),
+		output_id: Type.Optional(
+			Type.String({
+				description: "Logical output id of a declared output for this step.",
+			}),
+		),
 		data: Type.Optional(
 			Type.Unknown({
 				description:
@@ -140,6 +147,52 @@ export const WorkflowWriteOutputParameters = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const WorkflowReadOutputParameters = Type.Object(
+	{
+		run_id: Type.String({ description: "The active workflow run ID." }),
+		step_id: Type.String({ description: "The producing step ID." }),
+		output_id: Type.String({ description: "Declared output id." }),
+		limit: Type.Optional(Type.Number({ minimum: 1 })),
+		fields: Type.Optional(Type.Array(Type.String())),
+	},
+	{ additionalProperties: false },
+);
+
+export const WorkflowListOutputsParameters = Type.Object(
+	{
+		run_id: Type.String({ description: "The workflow run ID." }),
+		step_id: Type.Optional(Type.String({ description: "Optional step filter." })),
+	},
+	{ additionalProperties: false },
+);
+
+export const WorkflowMaterializeOutputParameters = Type.Object(
+	{
+		run_id: Type.String({ description: "The workflow run ID." }),
+		step_id: Type.String({ description: "The producing step ID." }),
+		output_id: Type.String({ description: "Declared output id." }),
+		path: Type.Optional(
+			Type.String({
+				description: "Optional target path to materialize artifact to.",
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
+
+export const WorkflowStateGetParameters = Type.Object(
+	{
+		run_id: Type.String({ description: "Workflow run ID." }),
+		include_steps: Type.Optional(
+			Type.Boolean({
+				description: "Include full per-step state in the response.",
+				default: true,
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
+
 export const toolSchemas = {
 	workflow_run: WorkflowRunParameters,
 	workflow_status: WorkflowStatusParameters,
@@ -148,4 +201,8 @@ export const toolSchemas = {
 	workflow_step_update: WorkflowStepUpdateParameters,
 	workflow_step_complete: WorkflowStepCompleteParameters,
 	write_output: WorkflowWriteOutputParameters,
+	read_output: WorkflowReadOutputParameters,
+	list_outputs: WorkflowListOutputsParameters,
+	materialize_output: WorkflowMaterializeOutputParameters,
+	workflow_state_get: WorkflowStateGetParameters,
 };

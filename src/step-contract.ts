@@ -3,7 +3,7 @@ import { mkdir, readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { run } from "@bufbuild/cel";
 import { writeJsonAtomic } from "./json-io.js";
-import { checkOutputs } from "./output-checker.js";
+import { checkOutputs, checkStepContract } from "./output-checker.js";
 import type {
 	CompletionReason,
 	OutputCheckResult,
@@ -15,7 +15,11 @@ import type {
 	WorkflowDefinition,
 	WorkflowStep,
 } from "./types.js";
-import { assertSafeOutputPath, outputPathOf } from "./variable-substitution.js";
+import {
+	assertSafeOutputPath,
+	outputIdOf,
+	outputPathOf,
+} from "./variable-substitution.js";
 import { getLocalISOString, updateStepState } from "./workflow-state.js";
 
 type CacheManifest = {
@@ -63,7 +67,7 @@ function outputPathList(
 	outputs: OutputSpec[] | string[] | undefined,
 ): string[] {
 	if (!outputs) return [];
-	return outputs.map((o: any) => outputPathOf(o));
+	return outputs.map((o: any) => outputIdOf(o));
 }
 
 function cacheManifestFilePath(
@@ -134,6 +138,7 @@ async function buildInputSignature(args: {
 
 		for (const out of declared as any[]) {
 			const p = outputPathOf(out);
+			if (!p) continue;
 			const abs = isAbsolute(p) ? p : resolve(baseDir, p);
 			try {
 				const st = await stat(abs);
@@ -347,6 +352,10 @@ export async function validateStepContract(args: {
 	baseDir: string;
 	workflowsDir?: string;
 	outputsOverride?: string[];
+	runId?: string;
+	stepId?: string;
+	artifactStore?: any;
+	filesystemFallback?: boolean;
 }): Promise<OutputCheckResult> {
 	const { workflow, step, baseDir, workflowsDir, outputsOverride } = args;
 
@@ -356,15 +365,26 @@ export async function validateStepContract(args: {
 			: step.outputs || [];
 
 	for (const output of outputs) {
-		assertSafeOutputPath(outputPathOf(output));
+		const p = outputPathOf(output);
+		if (p) {
+			assertSafeOutputPath(p);
+		}
 	}
 
-	return checkOutputs(
-		outputs,
-		baseDir,
-		workflow.validators || {},
-		(workflow as any).__dir || workflowsDir || "",
-	);
+	if (args.runId && args.stepId && args.artifactStore) {
+		return checkStepContract({
+			outputs,
+			validators: workflow.validators || {},
+			artifactStore: args.artifactStore,
+			runId: args.runId,
+			stepId: args.stepId,
+			baseDir,
+			workflowDir: (workflow as any).__dir || workflowsDir || "",
+			filesystemFallback: args.filesystemFallback !== false,
+		});
+	}
+
+	return checkOutputs(outputs, baseDir, workflow.validators || {}, (workflow as any).__dir || workflowsDir || "");
 }
 
 export function statusFromContractDecision(outputCheck: OutputCheckResult): {

@@ -231,7 +231,24 @@ const BAD_PATH_FRAGMENTS = [
 ];
 
 export function outputPathOf(output: any) {
-  return typeof output === "string" ? output : output.path;
+  if (typeof output === "string") return output;
+  return typeof output?.path === "string" ? output.path : "";
+}
+
+export function outputIdOf(output: any): string {
+  if (typeof output?.id === "string" && output.id.trim().length > 0) {
+    return output.id.trim();
+  }
+
+  if (typeof output === "string") {
+    return output;
+  }
+
+  if (typeof output?.path === "string" && output.path.trim().length > 0) {
+    return output.path;
+  }
+
+  return "";
 }
 
 export function assertSafeOutputPath(outputPath: string) {

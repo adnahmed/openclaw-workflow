@@ -6,9 +6,13 @@ import { toolSchemas } from "../dist/tool-schemas.js";
 
 test("tool schemas validate expected parameters", () => {
 	assert.deepEqual(Object.keys(toolSchemas).sort(), [
+		"list_outputs",
+		"materialize_output",
+		"read_output",
 		"workflow_cancel",
 		"workflow_list",
 		"workflow_run",
+		"workflow_state_get",
 		"workflow_status",
 		"workflow_step_complete",
 		"workflow_step_update",
@@ -52,6 +56,15 @@ test("tool schemas validate expected parameters", () => {
 		true,
 	);
 	assert.equal(
+		Value.Check(toolSchemas.write_output, {
+			run_id: "run-1",
+			step_id: "step-a",
+			output_id: "alerts_manifest",
+			data: { ok: true },
+		}),
+		true,
+	);
+	assert.equal(
 		Value.Check(toolSchemas.write_output, { path: "tmp/out.json" }),
 		false,
 	);
@@ -71,6 +84,38 @@ test("tool schemas validate expected parameters", () => {
 			run_id: "run-1",
 			step_id: "step-a",
 			reason: "generated",
+		}),
+		true,
+	);
+	assert.equal(
+		Value.Check(toolSchemas.read_output, {
+			run_id: "run-1",
+			step_id: "step-a",
+			output_id: "alerts_manifest",
+			limit: 10,
+			fields: ["id", "title"],
+		}),
+		true,
+	);
+	assert.equal(
+		Value.Check(toolSchemas.list_outputs, {
+			run_id: "run-1",
+			step_id: "step-a",
+		}),
+		true,
+	);
+	assert.equal(
+		Value.Check(toolSchemas.materialize_output, {
+			run_id: "run-1",
+			step_id: "step-a",
+			output_id: "alerts_manifest",
+		}),
+		true,
+	);
+	assert.equal(
+		Value.Check(toolSchemas.workflow_state_get, {
+			run_id: "run-1",
+			include_steps: false,
 		}),
 		true,
 	);

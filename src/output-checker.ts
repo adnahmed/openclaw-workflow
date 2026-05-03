@@ -35,9 +35,11 @@ import {
   OutputCheckResult, 
   OutputValidationResult, 
   ValidationDecision, 
-  ValidatorSpec 
+  ValidatorSpec,
+  WorkflowArtifactStore,
 } from './types.js';
 import { validateOutput } from './output-validator.js';
+import { outputIdOf, outputPathOf } from './variable-substitution.js';
 
 /**
  * Check that all expected output files exist and satisfy their validation rules.
@@ -97,4 +99,105 @@ function mergeOutputDecisions(results): ValidationDecision {
    if (results.some(r => r.decision === 'unknown')) return 'unknown';
    return 'pass';
  }
+
+export async function checkStepContract(args: {
+  outputs: OutputSpec[];
+  validators: Record<string, ValidatorSpec>;
+  artifactStore?: WorkflowArtifactStore | null;
+  runId: string;
+  stepId: string;
+  baseDir: string;
+  workflowDir?: string;
+  filesystemFallback?: boolean;
+}): Promise<OutputCheckResult> {
+  const {
+    outputs,
+    validators,
+    artifactStore,
+    runId,
+    stepId,
+    baseDir,
+    workflowDir = '',
+    filesystemFallback = true,
+  } = args;
+
+  if (!outputs || outputs.length === 0) {
+    return {
+      passed: true,
+      decision: 'pass',
+      missing_files: [],
+      checked_files: [],
+      validations: [],
+    };
+  }
+
+  const validations: OutputValidationResult[] = [];
+
+  for (const output of outputs) {
+    const spec = typeof output === 'string' ? { path: output } : output;
+    const outputId = outputIdOf(spec);
+    const outputPath = outputPathOf(spec);
+    const validatorId = spec.validate;
+    const validator = validatorId ? validators?.[validatorId] : undefined;
+
+    let handledByArtifactStore = false;
+    if (artifactStore && typeof spec.id === 'string' && spec.id.trim().length > 0) {
+      const artifact = await artifactStore.readArtifact(runId, stepId, spec.id);
+      if (artifact) {
+        const validation = await artifactStore.validateArtifact({
+          artifact,
+          validatorId,
+          validator,
+          validators,
+          workflowDir,
+        });
+        validations.push({
+          ...validation,
+          path: outputPath || `artifact:${runId}:${stepId}:${outputId}`,
+          exists: true,
+        });
+        handledByArtifactStore = true;
+      }
+    }
+
+    if (handledByArtifactStore) continue;
+
+    if (outputPath) {
+      validations.push(
+        await validateOutput(spec, baseDir, validators, workflowDir),
+      );
+      continue;
+    }
+
+    if (artifactStore && filesystemFallback) {
+      validations.push({
+        path: `artifact:${runId}:${stepId}:${outputId}`,
+        exists: false,
+        validator: validatorId,
+        decision: 'fail',
+        errors: ['Declared artifact is missing from artifact store and no fallback path is declared.'],
+        failure_kind: 'missing_file',
+      });
+      continue;
+    }
+
+    validations.push({
+      path: `artifact:${runId}:${stepId}:${outputId}`,
+      exists: false,
+      validator: validatorId,
+      decision: 'fail',
+      errors: ['Declared output has neither artifact nor file path.'],
+      failure_kind: 'missing_file',
+    });
+  }
+
+  const decision = mergeOutputDecisions(validations);
+  return {
+    passed: decision === 'pass',
+    decision,
+    missing_files: validations.filter(v => !v.exists).map(v => v.path),
+    checked_files: validations.map(v => v.path),
+    validations,
+  };
+}
 

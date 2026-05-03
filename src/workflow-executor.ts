@@ -67,6 +67,7 @@ import type { RunState, StepState, WorkflowStep } from "./types.js";
 import {
 	assertSafeOutputPath,
 	buildContext,
+	outputIdOf,
 	outputPathOf,
 	substituteDeep,
 } from "./variable-substitution.js";
@@ -222,6 +223,7 @@ export async function executeWorkflow(
 		cronPollTimeoutMs,
 		cancelGraceMs,
 		workflowsDir,
+		artifactStore,
 	} = config;
 
 	// Build substitution context once for the entire run
@@ -456,6 +458,9 @@ export async function executeWorkflow(
 				step,
 				baseDir,
 				workflowsDir,
+				runId,
+				stepId: step.id,
+				artifactStore,
 			});
 			if (recheck.passed) {
 				runningCounts.set(
@@ -543,6 +548,8 @@ export async function executeWorkflow(
 						sessionAdapter,
 						validators: workflow.validators || {},
 						workflowDir: workflow.__dir || workflowsDir,
+						artifactStore,
+						filesystemFallback: config.filesystemFallback !== false,
 						workflow,
 						getStepState: () => state.steps[step.id],
 
@@ -616,7 +623,7 @@ export async function executeWorkflow(
 						await writeStepCacheManifest({
 							baseDir,
 							stepId: step.id,
-							outputs: (step.outputs || []).map((o) => outputPathOf(o)),
+							outputs: (step.outputs || []).map((o) => outputIdOf(o)),
 							producerRunId: runId,
 							reason: "generated",
 							decision: result.output_check?.decision || "pass",
@@ -662,7 +669,7 @@ export async function executeWorkflow(
 						await writeStepCacheManifest({
 							baseDir,
 							stepId: step.id,
-							outputs: (step.outputs || []).map((o) => outputPathOf(o)),
+							outputs: (step.outputs || []).map((o) => outputIdOf(o)),
 							producerRunId: runId,
 							reason: "blocked_result",
 							decision: result.output_check?.decision || "blocked",
@@ -884,6 +891,9 @@ export async function executeWorkflow(
 			step,
 			baseDir,
 			workflowsDir,
+			runId,
+			stepId: step.id,
+			artifactStore,
 		});
 
 		const freshness = await evaluateCacheFreshness({
