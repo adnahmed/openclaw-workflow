@@ -31,7 +31,11 @@ import { mkdir, readdir, readFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import yaml from "js-yaml";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
-import { ReuseOutputsSpec, WorkflowDefinition, WorkflowStep } from "./types.js";
+import {
+	type ReuseOutputsSpec,
+	WorkflowDefinition,
+	WorkflowStep,
+} from "./types.js";
 
 /**
  * @typedef {import('./types.js').WorkflowStep} WorkflowStep
@@ -224,7 +228,10 @@ function normalizeAndValidate(raw, filePath) {
 			"input_signature",
 		]);
 
-		const normalizeReuseOutputs = (stepId, reuseRaw): ReuseOutputsSpec | undefined => {
+		const normalizeReuseOutputs = (
+			stepId,
+			reuseRaw,
+		): ReuseOutputsSpec | undefined => {
 			if (reuseRaw === undefined || reuseRaw === null) return undefined;
 			if (typeof reuseRaw !== "object") {
 				throw new Error(
@@ -243,10 +250,7 @@ function normalizeAndValidate(raw, filePath) {
 					`Step "${stepId}" reuse_outputs.when must be a string expression.`,
 				);
 			}
-			if (
-				reuse.require !== undefined &&
-				reuse.require !== "declared_outputs"
-			) {
+			if (reuse.require !== undefined && reuse.require !== "declared_outputs") {
 				throw new Error(
 					`Step "${stepId}" reuse_outputs.require must be "declared_outputs" when provided.`,
 				);
@@ -329,8 +333,7 @@ function normalizeAndValidate(raw, filePath) {
 				when: reuse.when,
 				require: reuse.require || "declared_outputs",
 				require_signature: reuse.require_signature !== false,
-				legacy_unsigned_cache:
-					reuse.legacy_unsigned_cache || "stale",
+				legacy_unsigned_cache: reuse.legacy_unsigned_cache || "stale",
 				freshness: {
 					include: include || [
 						"output_contract_version",
@@ -368,7 +371,8 @@ function normalizeAndValidate(raw, filePath) {
 
 			// Validate kind
 			const validKinds = new Set(["subagent", "loop_subagent", "plugin"]);
-			const stepKind = step.kind || (step.for_each ? "loop_subagent" : "subagent");
+			const stepKind =
+				step.kind || (step.for_each ? "loop_subagent" : "subagent");
 			if (step.kind !== undefined && !validKinds.has(step.kind)) {
 				throw new Error(
 					`Step "${step.id}" in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
@@ -430,7 +434,11 @@ function normalizeAndValidate(raw, filePath) {
 			}
 
 			let signalingMode = step.signaling;
-			if (signalingMode === undefined || signalingMode === null || signalingMode === "") {
+			if (
+				signalingMode === undefined ||
+				signalingMode === null ||
+				signalingMode === ""
+			) {
 				signalingMode =
 					completeWhen === "handoff" || completeWhen === "handoff_or_outputs"
 						? "auto"
@@ -478,15 +486,15 @@ function normalizeAndValidate(raw, filePath) {
 						materialize:
 							out.materialize && typeof out.materialize === "object"
 								? {
-									path:
-										typeof out.materialize.path === "string"
-											? out.materialize.path
-											: undefined,
-									mode:
-										typeof out.materialize.mode === "string"
-											? out.materialize.mode
-											: undefined,
-								}
+										path:
+											typeof out.materialize.path === "string"
+												? out.materialize.path
+												: undefined,
+										mode:
+											typeof out.materialize.mode === "string"
+												? out.materialize.mode
+												: undefined,
+									}
 								: undefined,
 					};
 				});
@@ -496,11 +504,17 @@ function normalizeAndValidate(raw, filePath) {
 			return {
 				id: step.id,
 				name: step.name || step.id,
-				kind: (step.kind || (step.for_each ? "loop_subagent" : "subagent")) as "subagent" | "loop_subagent" | "plugin",
+				kind: (step.kind || (step.for_each ? "loop_subagent" : "subagent")) as
+					| "subagent"
+					| "loop_subagent"
+					| "plugin",
 				uses: typeof step.uses === "string" ? step.uses : undefined,
-				with: step.with && typeof step.with === "object" && !Array.isArray(step.with)
-					? (step.with as Record<string, unknown>)
-					: undefined,
+				with:
+					step.with &&
+					typeof step.with === "object" &&
+					!Array.isArray(step.with)
+						? (step.with as Record<string, unknown>)
+						: undefined,
 				task: step.task || null,
 				depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
 				outputs: normalizeOutputs(step.id, step.outputs),
@@ -526,15 +540,17 @@ function normalizeAndValidate(raw, filePath) {
 						? step.output_contract_version
 						: null,
 
- 				always_run: step.always_run === true,
- 				on_block: step.on_block || "block_run",
+				always_run: step.always_run === true,
+				on_block: step.on_block || "block_run",
 				reuse_outputs: normalizeReuseOutputs(step.id, step.reuse_outputs),
- 				required_skills: Array.isArray(step.required_skills) ? step.required_skills : [],
- 				required_mcp_servers: Array.isArray(step.required_mcp_servers) ? step.required_mcp_servers : [],
- 				complete_when: completeWhen,
+				required_skills: Array.isArray(step.required_skills)
+					? step.required_skills
+					: [],
+				required_mcp_servers: Array.isArray(step.required_mcp_servers)
+					? step.required_mcp_servers
+					: [],
+				complete_when: completeWhen,
 				signaling: signalingMode,
-
-
 			};
 		});
 	};
@@ -563,7 +579,7 @@ function normalizeAndValidate(raw, filePath) {
 	detectCycles(depMap, raw.name);
 
 	// ── Validate orchestration-critical outputs ──────────────────────────────────
-	
+
 	const criticalOutputs = new Set();
 	for (const step of steps) {
 		if (step.for_each) criticalOutputs.add(step.for_each);
@@ -574,7 +590,7 @@ function normalizeAndValidate(raw, filePath) {
 		for (const step of steps) {
 			for (const output of step.outputs) {
 				const path = typeof output === "string" ? output : output.path;
-				// Simple match: check if critical path is exactly the output path 
+				// Simple match: check if critical path is exactly the output path
 				// or if the output path is a pattern that matches (ignoring placeholders)
 				if (path === criticalPath) {
 					if (typeof output === "object" && output.optional) {
@@ -597,36 +613,35 @@ function normalizeAndValidate(raw, filePath) {
 		state:
 			raw.state && typeof raw.state === "object"
 				? {
-					backend: raw.state.backend || "filesystem",
-					key: raw.state.key,
-					fallback: raw.state.fallback || "filesystem",
-					ttl: raw.state.ttl,
-					materialize_outputs:
-						raw.state.materialize_outputs || "on_demand",
-					redis:
-						raw.state.redis && typeof raw.state.redis === "object"
-							? {
-								provider: (
-									raw.state.redis.provider === "native"
-										? "native"
-										: raw.state.redis.provider === "mcp"
-											? "mcp"
-											: "auto"
-								) as "auto" | "native" | "mcp",
-								tool_prefix: raw.state.redis.tool_prefix || "MCP_DOCKER",
-							}
-							: undefined,
-				}
+						backend: raw.state.backend || "filesystem",
+						key: raw.state.key,
+						fallback: raw.state.fallback || "filesystem",
+						ttl: raw.state.ttl,
+						materialize_outputs: raw.state.materialize_outputs || "on_demand",
+						redis:
+							raw.state.redis && typeof raw.state.redis === "object"
+								? {
+										provider: (raw.state.redis.provider === "native"
+											? "native"
+											: raw.state.redis.provider === "mcp"
+												? "mcp"
+												: "auto") as "auto" | "native" | "mcp",
+										tool_prefix: raw.state.redis.tool_prefix || undefined,
+									}
+								: undefined,
+					}
 				: undefined,
- 		validators: raw.validators || {},
- 		required_skills: Array.isArray(raw.required_skills) ? raw.required_skills : [],
- 		required_mcp_servers: Array.isArray(raw.required_mcp_servers) ? raw.required_mcp_servers : [],
- 		steps,
+		validators: raw.validators || {},
+		required_skills: Array.isArray(raw.required_skills)
+			? raw.required_skills
+			: [],
+		required_mcp_servers: Array.isArray(raw.required_mcp_servers)
+			? raw.required_mcp_servers
+			: [],
+		steps,
 
 		concurrency:
-			typeof raw.concurrency === "number"
-				? Math.max(1, raw.concurrency)
-				: 3,
+			typeof raw.concurrency === "number" ? Math.max(1, raw.concurrency) : 3,
 		__dir: dirname(filePath),
 	};
 

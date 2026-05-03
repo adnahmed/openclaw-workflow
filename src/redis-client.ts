@@ -913,15 +913,19 @@ export async function resolveRedisClient(
 			return client;
 		} catch (error) {
 			attempts.push({ provider: "native", ok: false, error });
+			const nativeFallbackAllowed =
+				mode === "redis-native" && options.filesystemFallback === true;
 			options.logger?.warn?.(
 				`[workflow] Native Redis init failed${
-					mode === "redis-native"
-						? " and fallback is disabled"
-						: "; trying fallback if available"
+					mode === "redis-native" && !nativeFallbackAllowed
+						? " and filesystemFallback is disabled"
+						: mode === "redis-native"
+							? "; filesystemFallback=true, will fall back to filesystem"
+							: "; trying fallback if available"
 				}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 
-			if (mode === "redis-native") {
+			if (mode === "redis-native" && !nativeFallbackAllowed) {
 				throw new RedisResolutionError(
 					`Native Redis required by stateBackend=redis-native, but initialization failed.\n${formatRedisAttemptErrors(
 						attempts,
@@ -972,8 +976,8 @@ export async function resolveRedisClient(
 
 	const redisRequired =
 		mode === "redis" ||
-		mode === "redis-native" ||
-		mode === "redis-mcp" ||
+		(mode === "redis-native" && options.filesystemFallback !== true) ||
+		(mode === "redis-mcp" && options.filesystemFallback !== true) ||
 		options.filesystemFallback === false;
 
 	if (redisRequired) {

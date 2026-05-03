@@ -243,10 +243,13 @@ export default definePluginEntry({
 					);
 
 					if (
-						config.stateBackend === "redis" ||
-						config.stateBackend === "redis-native" ||
-						config.stateBackend === "redis-mcp" ||
-						config.filesystemFallback === false
+						config.filesystemFallback === false ||
+						(config.stateBackend === "redis" &&
+							config.filesystemFallback !== true) ||
+						(config.stateBackend === "redis-native" &&
+							config.filesystemFallback !== true) ||
+						(config.stateBackend === "redis-mcp" &&
+							config.filesystemFallback !== true)
 					) {
 						throw err;
 					}

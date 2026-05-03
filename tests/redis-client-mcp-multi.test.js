@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createMcpRedisClient } from "../dist/redis-client.js";
+import {
+	createMcpRedisClient,
+	resolveRedisClient,
+} from "../dist/redis-client.js";
 
 test("MCP redis multi maps commands to MCPorter runtime.callTool payloads", async () => {
 	const calls = [];
