@@ -106,6 +106,8 @@
         "enum": [
           "filesystem",
           "redis",
+          "redis-native",
+          "redis-mcp",
           "auto",
           "dual"
         ],
@@ -119,9 +121,39 @@
         "type": "string",
         "description": "Redis key prefix used by workflow state/artifact backends."
       },
+      "redisPrefer": {
+        "type": "string",
+        "enum": [
+          "native",
+          "mcp",
+          "auto"
+        ],
+        "description": "Preferred Redis transport when using stateBackend=redis or auto."
+      },
+      "redisMcpServer": {
+        "type": "string",
+        "description": "Explicit MCP server name for Redis access (for example MCP_DOCKER)."
+      },
+      "redisMcpConfigPath": {
+        "type": "string",
+        "description": "Optional MCPorter config path used when resolving MCP Redis servers."
+      },
+      "redisMcpRootDir": {
+        "type": "string",
+        "description": "Optional root directory used by MCPorter when resolving relative MCP paths."
+      },
+      "redisMcpCallTimeoutMs": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Timeout for MCP Redis tool calls via MCPorter."
+      },
+      "redisMcpServerDefinition": {
+        "type": "object",
+        "description": "Optional inline MCP server definition translated to an MCPorter server."
+      },
       "redisMcpToolPrefix": {
         "type": "string",
-        "description": "MCP server/tool prefix used when resolving Redis through MCP adapters (for example MCP_DOCKER)."
+        "description": "Deprecated alias for redisMcpServer. Treated as an MCP server name, not a __ tool prefix."
       },
       "filesystemFallback": {
         "type": "boolean",
@@ -190,6 +222,24 @@
       "label": "Redis URL",
       "help": "Native Redis URL used when state backend resolves to redis-native.",
       "placeholder": "redis://localhost:6379",
+      "advanced": true
+    },
+    "redisPrefer": {
+      "label": "Redis transport preference",
+      "help": "Prefer native Redis, MCP Redis, or allow automatic resolution.",
+      "placeholder": "auto",
+      "advanced": true
+    },
+    "redisMcpServer": {
+      "label": "Redis MCP server",
+      "help": "Explicit MCP server name used for Redis via MCPorter.",
+      "placeholder": "MCP_DOCKER",
+      "advanced": true
+    },
+    "redisMcpConfigPath": {
+      "label": "MCPorter config path",
+      "help": "Optional path to mcporter.json for Redis MCP resolution.",
+      "placeholder": "~/.mcporter/mcporter.json",
       "advanced": true
     },
     "filesystemFallback": {

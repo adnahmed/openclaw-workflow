@@ -57,7 +57,13 @@ export type OutputWriteProvenance = {
 	committed_at: string;
 };
 
-export type StateBackendKind = "filesystem" | "redis" | "auto" | "dual";
+export type StateBackendKind =
+	| "filesystem"
+	| "redis"
+	| "redis-native"
+	| "redis-mcp"
+	| "auto"
+	| "dual";
 
 export type MaterializeOutputsMode = "never" | "on_demand" | "always";
 
@@ -69,6 +75,7 @@ export type WorkflowStateConfig = {
 	materialize_outputs?: MaterializeOutputsMode;
 	redis?: {
 		provider?: "auto" | "native" | "mcp";
+		server?: string;
 		tool_prefix?: string;
 	};
 };
@@ -473,15 +480,29 @@ export interface WorkflowPluginOperation {
 export interface RedisClient {
 	readonly kind: "native" | "mcp";
 	get(key: string): Promise<string | null>;
-	set(key: string, value: string, options?: { ex?: number; px?: number; nx?: boolean }): Promise<"OK" | null>;
+	set(
+		key: string,
+		value: string,
+		options?: { ex?: number; px?: number; nx?: boolean },
+	): Promise<"OK" | null>;
 	del(...keys: string[]): Promise<number>;
 	hset(key: string, fields: Record<string, string>): Promise<number>;
 	hgetall(key: string): Promise<Record<string, string> | null>;
 	exists(...keys: string[]): Promise<number>;
 	expire(key: string, seconds: number): Promise<number>;
 	incr(key: string): Promise<number>;
-	xadd(key: string, id: string, fields: Record<string, string>): Promise<string | null>;
-	xgroup(command: "CREATE", key: string, group: string, id: string, options?: { MKSTREAM?: boolean }): Promise<"OK">;
+	xadd(
+		key: string,
+		id: string,
+		fields: Record<string, string>,
+	): Promise<string | null>;
+	xgroup(
+		command: "CREATE",
+		key: string,
+		group: string,
+		id: string,
+		options?: { MKSTREAM?: boolean },
+	): Promise<"OK">;
 	/** Execute multiple commands atomically. Returns array of results. */
 	multi(commands: Array<[string, ...unknown[]]>): Promise<unknown[]>;
 	disconnect(): Promise<void>;

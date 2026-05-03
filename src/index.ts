@@ -1,6 +1,15 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizePluginConfig } from "./config.js";
 import { writeDeclaredOutput } from "./output-writer.js";
+import { createDefaultRegistry } from "./plugin-operations.js";
+import { resolveRedisClient } from "./redis-client.js";
+import {
+	FilesystemArtifactStore,
+	FilesystemStateStore,
+	RedisArtifactStore,
+	RedisStateStore,
+	resolveStateBackend,
+} from "./state-artifact-stores.js";
 import {
 	adoptStepContract,
 	computeStepContractSignature,
@@ -12,13 +21,13 @@ import {
 import { cancelStepSession, runStep } from "./step-runner.js";
 import {
 	WorkflowCancelParameters,
-	WorkflowListParameters,
 	WorkflowListOutputsParameters,
+	WorkflowListParameters,
 	WorkflowMaterializeOutputParameters,
 	WorkflowReadOutputParameters,
 	WorkflowRunParameters,
-	WorkflowStatusParameters,
 	WorkflowStateGetParameters,
+	WorkflowStatusParameters,
 	WorkflowStepCompleteParameters,
 	WorkflowStepUpdateParameters,
 	WorkflowWriteOutputParameters,
@@ -34,20 +43,11 @@ import type {
 } from "./types.js";
 import { outputIdOf, outputPathOf } from "./variable-substitution.js";
 import {
-	FilesystemArtifactStore,
-	FilesystemStateStore,
-	RedisArtifactStore,
-	RedisStateStore,
-	resolveStateBackend,
-} from "./state-artifact-stores.js";
-import {
 	dryRun,
 	executeWorkflow,
 	resumeWorkflow,
 } from "./workflow-executor.js";
 import { listWorkflows, loadWorkflow } from "./workflow-loader.js";
-import { createDefaultRegistry } from "./plugin-operations.js";
-import { resolveRedisClient } from "./redis-client.js";
 import {
 	createRunState,
 	generateRunId,
@@ -82,6 +82,49 @@ function getLogger(api) {
 
 function readParams(first, second) {
 	return second && typeof second === "object" ? second : (first ?? {});
+}
+
+function getOpenClawMcpServerDefinition(
+	api: unknown,
+	serverName: string,
+): unknown {
+	if (!api || typeof api !== "object") return null;
+
+	const apiObject = api as Record<string, unknown>;
+	const config =
+		(apiObject.config && typeof apiObject.config === "object"
+			? (apiObject.config as Record<string, unknown>)
+			: null) ||
+		(apiObject.runtime &&
+		apiObject.runtime &&
+		typeof apiObject.runtime === "object" &&
+		(apiObject.runtime as Record<string, unknown>).config &&
+		typeof (apiObject.runtime as Record<string, unknown>).config === "object"
+			? ((apiObject.runtime as Record<string, unknown>).config as Record<
+					string,
+					unknown
+				>)
+			: null);
+
+	const mcp =
+		config?.mcp && typeof config.mcp === "object"
+			? (config.mcp as Record<string, unknown>)
+			: null;
+	const servers =
+		mcp?.servers && typeof mcp.servers === "object"
+			? (mcp.servers as Record<string, unknown>)
+			: null;
+
+	return servers?.[serverName] ?? null;
+}
+
+function resolveRedisMode(stateBackend, redisPrefer) {
+	if (stateBackend === "redis") {
+		if (redisPrefer === "native") return "redis-native";
+		if (redisPrefer === "mcp") return "redis-mcp";
+	}
+
+	return stateBackend;
 }
 
 export default definePluginEntry({
@@ -160,20 +203,54 @@ export default definePluginEntry({
 		async function resolveRedisHandle() {
 			const redisUrl =
 				config.redisUrl || process.env.OPENCLAW_WORKFLOW_REDIS_URL || null;
-			const redisMcpToolPrefix =
-				config.redisMcpToolPrefix || process.env.OPENCLAW_WORKFLOW_REDIS_MCP_TOOL_PREFIX || null;
-			if (!redisUrl && !redisMcpToolPrefix) return null;
+			const redisMcpServer =
+				config.redisMcpServer ??
+				config.redisMcpToolPrefix ??
+				process.env.OPENCLAW_WORKFLOW_REDIS_MCP_SERVER ??
+				process.env.OPENCLAW_WORKFLOW_REDIS_MCP_TOOL_PREFIX ??
+				null;
+
+			if (!redisUrl && !redisMcpServer) return null;
+
 			if (!redisClientPromise) {
+				const inlineMcpDefinition =
+					config.redisMcpServerDefinition ||
+					(redisMcpServer
+						? getOpenClawMcpServerDefinition(api, redisMcpServer)
+						: null);
+				const redisMode = resolveRedisMode(
+					config.stateBackend,
+					config.redisPrefer,
+				);
+
 				redisClientPromise = resolveRedisClient({
 					url: redisUrl,
-					mcpToolPrefix: redisMcpToolPrefix || undefined,
-					api,
+					mcpServer: redisMcpServer || undefined,
+					mcpConfigPath:
+						config.redisMcpConfigPath || process.env.MCPORTER_CONFIG || null,
+					mcpRootDir: config.redisMcpRootDir || baseDir,
+					mcpServerDefinition: inlineMcpDefinition || undefined,
+					mcpCallTimeoutMs: config.redisMcpCallTimeoutMs,
 					keyPrefix: undefined,
+					mode: redisMode,
+					logger,
 					filesystemFallback: config.filesystemFallback !== false,
 				}).catch((err) => {
-					logger.warn(
-						`[workflow] Redis client init failed: ${err?.message ?? err}`,
+					logger.error(
+						`[workflow] Redis backend resolution failed: ${
+							err instanceof Error ? err.stack || err.message : String(err)
+						}`,
 					);
+
+					if (
+						config.stateBackend === "redis" ||
+						config.stateBackend === "redis-native" ||
+						config.stateBackend === "redis-mcp" ||
+						config.filesystemFallback === false
+					) {
+						throw err;
+					}
+
 					return null;
 				});
 			}
@@ -212,7 +289,12 @@ export default definePluginEntry({
 					reason: "redis runtime",
 					checked_at: getLocalISOString(),
 					fallback: "filesystem",
-					provider: redis.kind === "mcp" ? (config.redisMcpToolPrefix || "MCP_DOCKER") : undefined,
+					provider:
+						redis.kind === "mcp"
+							? config.redisMcpServer ||
+								config.redisMcpToolPrefix ||
+								"MCP_DOCKER"
+							: undefined,
 				},
 				redis,
 			};
@@ -262,6 +344,12 @@ export default definePluginEntry({
 						redisUrl:
 							config.redisUrl ||
 							process.env.OPENCLAW_WORKFLOW_REDIS_URL ||
+							null,
+						redisMcpServer:
+							config.redisMcpServer ||
+							config.redisMcpToolPrefix ||
+							process.env.OPENCLAW_WORKFLOW_REDIS_MCP_SERVER ||
+							process.env.OPENCLAW_WORKFLOW_REDIS_MCP_TOOL_PREFIX ||
 							null,
 						redisMcpToolPrefix:
 							config.redisMcpToolPrefix ||
@@ -405,7 +493,8 @@ export default definePluginEntry({
 			for (const store of stores) {
 				try {
 					const runs = await store.listRuns({ status: "running" });
-					for (const run of runs) interruptedMap.set(run.run_id, run as RunState);
+					for (const run of runs)
+						interruptedMap.set(run.run_id, run as RunState);
 				} catch {
 					// Ignore inaccessible backend during auto-resume scan.
 				}
@@ -585,15 +674,11 @@ export default definePluginEntry({
 						[outputKey]: result.provenance,
 					};
 
-					state = await runtime.stateStore.updateStep(
-						run_id,
-						step_id,
-						{
-							output_writes: outputWrites,
-							last_update_at: now,
-							last_message: `Committed declared output: ${outputKey}`,
-						},
-					);
+					state = await runtime.stateStore.updateStep(run_id, step_id, {
+						output_writes: outputWrites,
+						last_update_at: now,
+						last_message: `Committed declared output: ${outputKey}`,
+					});
 
 					return textResult({
 						ok: true,
@@ -778,7 +863,7 @@ export default definePluginEntry({
 							if (!item || typeof item !== "object") return item;
 							const picked = {};
 							for (const key of fields) {
-								if (Object.prototype.hasOwnProperty.call(item, key)) {
+								if (Object.hasOwn(item, key)) {
 									picked[key] = item[key];
 								}
 							}
@@ -789,9 +874,7 @@ export default definePluginEntry({
 					const totalCount = Array.isArray(artifact.data)
 						? artifact.data.length
 						: 1;
-					const items = Array.isArray(projected)
-						? projected
-						: [projected];
+					const items = Array.isArray(projected) ? projected : [projected];
 
 					return textResult({
 						ok: true,
@@ -818,7 +901,8 @@ export default definePluginEntry({
 
 		api.registerTool({
 			name: "list_outputs",
-			description: "List committed output artifacts for a run (optionally scoped to one step).",
+			description:
+				"List committed output artifacts for a run (optionally scoped to one step).",
 			parameters: WorkflowListOutputsParameters,
 			optional: true,
 			async execute(first, second) {
@@ -844,7 +928,8 @@ export default definePluginEntry({
 
 		api.registerTool({
 			name: "materialize_output",
-			description: "Materialize a stored output artifact to a file path on demand.",
+			description:
+				"Materialize a stored output artifact to a file path on demand.",
 			parameters: WorkflowMaterializeOutputParameters,
 			optional: true,
 			async execute(first, second) {
@@ -852,13 +937,14 @@ export default definePluginEntry({
 				try {
 					const runtime = await resolveWorkflowRuntime(run_id);
 					await runtime.stateStore.loadRun(run_id);
-					const materializedPath = await runtime.artifactStore.materializeArtifact({
-						runId: run_id,
-						stepId: step_id,
-						outputId: output_id,
-						targetPath: path,
-						baseDir,
-					});
+					const materializedPath =
+						await runtime.artifactStore.materializeArtifact({
+							runId: run_id,
+							stepId: step_id,
+							outputId: output_id,
+							targetPath: path,
+							baseDir,
+						});
 
 					return textResult({
 						ok: true,
@@ -954,7 +1040,8 @@ export default definePluginEntry({
 
 		api.registerTool({
 			name: "workflow_state_get",
-			description: "Read raw run state (including backend resolution) for debugging/admin.",
+			description:
+				"Read raw run state (including backend resolution) for debugging/admin.",
 			parameters: WorkflowStateGetParameters,
 			optional: true,
 			async execute(first, second) {
@@ -965,16 +1052,16 @@ export default definePluginEntry({
 					const snapshot = include_steps
 						? state
 						: {
-							run_id: state.run_id,
-							workflow: state.workflow,
-							workflow_key: state.workflow_key,
-							status: state.status,
-							started_at: state.started_at,
-							completed_at: state.completed_at,
-							cancel_requested_at: state.cancel_requested_at,
-							cancelled_at: state.cancelled_at,
-							state_backend: (state as any).state_backend || null,
-						};
+								run_id: state.run_id,
+								workflow: state.workflow,
+								workflow_key: state.workflow_key,
+								status: state.status,
+								started_at: state.started_at,
+								completed_at: state.completed_at,
+								cancel_requested_at: state.cancel_requested_at,
+								cancelled_at: state.cancelled_at,
+								state_backend: (state as any).state_backend || null,
+							};
 
 					return textResult(snapshot);
 				} catch (err) {
@@ -1227,7 +1314,8 @@ export default definePluginEntry({
 								token: handoff_token,
 							},
 							last_update_at: now,
-							last_message: message || `Handoff rejected: ${attemptMatch.reason}`,
+							last_message:
+								message || `Handoff rejected: ${attemptMatch.reason}`,
 						});
 
 						return textResult({

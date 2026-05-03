@@ -1,11 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-	mkdir,
-	readdir,
-	readFile,
-	stat,
-	writeFile,
-} from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { writeJsonAtomic } from "./json-io.js";
 import { validateOutputValue } from "./output-validator.js";
@@ -18,13 +12,14 @@ import type {
 	RunFilter,
 	RunState,
 	StateBackendResolution,
+	StepState,
 	StoredArtifact,
 	StoredArtifactMeta,
-	StepState,
 	ValidationDecision,
 	WorkflowArtifactStore,
 	WorkflowStateStore,
 } from "./types.js";
+import { outputIdOf, outputPathOf } from "./variable-substitution.js";
 import {
 	getLocalISOString,
 	listRuns,
@@ -33,7 +28,6 @@ import {
 	updateRunState,
 	updateStepState,
 } from "./workflow-state.js";
-import { outputIdOf, outputPathOf } from "./variable-substitution.js";
 
 function sha256(text: string): string {
 	return `sha256:${createHash("sha256").update(text).digest("hex")}`;
@@ -150,7 +144,11 @@ export class FilesystemStateStore implements WorkflowStateStore {
 		return selected;
 	}
 
-	async acquireLock(runId: string, owner: string, ttlMs: number): Promise<boolean> {
+	async acquireLock(
+		runId: string,
+		owner: string,
+		ttlMs: number,
+	): Promise<boolean> {
 		const path = lockPath(this.runsDir, runId);
 		await mkdir(dirname(path), { recursive: true });
 
@@ -302,7 +300,11 @@ export class RedisStateStore implements WorkflowStateStore {
 		return selected;
 	}
 
-	async acquireLock(runId: string, owner: string, ttlMs: number): Promise<boolean> {
+	async acquireLock(
+		runId: string,
+		owner: string,
+		ttlMs: number,
+	): Promise<boolean> {
 		const result = await this.redis.set(
 			this.lockKey(runId),
 			JSON.stringify({
@@ -322,13 +324,18 @@ export class FilesystemArtifactStore implements WorkflowArtifactStore {
 	constructor(
 		private runsDir: string,
 		private baseDir: string,
-		private defaultMaterializeMode: "never" | "on_demand" | "always" =
-			"on_demand",
+		private defaultMaterializeMode:
+			| "never"
+			| "on_demand"
+			| "always" = "on_demand",
 	) {}
 
-	async commitArtifact(args: CommitArtifactArgs): Promise<ArtifactCommitResult> {
+	async commitArtifact(
+		args: CommitArtifactArgs,
+	): Promise<ArtifactCommitResult> {
 		const validatorType = args.validator?.type;
-		const value = validatorType === "json" ? args.data : (args.text ?? args.data);
+		const value =
+			validatorType === "json" ? args.data : (args.text ?? args.data);
 		const serialized = serializeForStorage(value, validatorType);
 		const bytes = Buffer.byteLength(serialized);
 		const declaredPath = outputPathOf(args.declaredOutput);
@@ -437,7 +444,10 @@ export class FilesystemArtifactStore implements WorkflowArtifactStore {
 		});
 	}
 
-	async listArtifacts(runId: string, stepId?: string): Promise<StoredArtifactMeta[]> {
+	async listArtifacts(
+		runId: string,
+		stepId?: string,
+	): Promise<StoredArtifactMeta[]> {
 		const root = stepId
 			? join(artifactRoot(this.runsDir), runId, stepId)
 			: join(artifactRoot(this.runsDir), runId);
@@ -474,7 +484,11 @@ export class FilesystemArtifactStore implements WorkflowArtifactStore {
 	}
 
 	async materializeArtifact(args: MaterializeArtifactArgs): Promise<string> {
-		const artifact = await this.readArtifact(args.runId, args.stepId, args.outputId);
+		const artifact = await this.readArtifact(
+			args.runId,
+			args.stepId,
+			args.outputId,
+		);
 		if (!artifact) {
 			throw new Error(
 				`Artifact not found: run=${args.runId} step=${args.stepId} output=${args.outputId}`,
@@ -486,13 +500,13 @@ export class FilesystemArtifactStore implements WorkflowArtifactStore {
 				? args.targetPath
 				: resolve(args.baseDir || this.baseDir, args.targetPath)
 			: resolve(
-				args.baseDir || this.baseDir,
-				"data",
-				"materialized",
-				args.runId,
-				args.stepId,
-				`${args.outputId}.json`,
-			);
+					args.baseDir || this.baseDir,
+					"data",
+					"materialized",
+					args.runId,
+					args.stepId,
+					`${args.outputId}.json`,
+				);
 
 		await mkdir(dirname(target), { recursive: true });
 		const content =
@@ -519,8 +533,10 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 		private redis: RedisClient,
 		private baseDir: string,
 		private keyPrefix = "openclaw:workflow",
-		private defaultMaterializeMode: "never" | "on_demand" | "always" =
-			"on_demand",
+		private defaultMaterializeMode:
+			| "never"
+			| "on_demand"
+			| "always" = "on_demand",
 	) {}
 
 	private payloadKey(runId: string, stepId: string, outputId: string): string {
@@ -539,9 +555,12 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 		return `${this.keyPrefix}:runs:${runId}:steps:${stepId}:artifacts`;
 	}
 
-	async commitArtifact(args: CommitArtifactArgs): Promise<ArtifactCommitResult> {
+	async commitArtifact(
+		args: CommitArtifactArgs,
+	): Promise<ArtifactCommitResult> {
 		const validatorType = args.validator?.type;
-		const value = validatorType === "json" ? args.data : (args.text ?? args.data);
+		const value =
+			validatorType === "json" ? args.data : (args.text ?? args.data);
 		const serialized = serializeForStorage(value, validatorType);
 		const bytes = Buffer.byteLength(serialized);
 		const declaredPath = outputPathOf(args.declaredOutput);
@@ -597,7 +616,11 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 		await this.redis.multi([
 			["set", payloadKey, serializedPayload],
 			["set", metaKey, JSON.stringify(meta)],
-			["hset", this.stepArtifactsKey(args.runId, args.stepId), { [args.outputId]: metaKey }],
+			[
+				"hset",
+				this.stepArtifactsKey(args.runId, args.stepId),
+				{ [args.outputId]: metaKey },
+			],
 			[
 				"hset",
 				this.runArtifactsKey(args.runId),
@@ -673,7 +696,10 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 		});
 	}
 
-	async listArtifacts(runId: string, stepId?: string): Promise<StoredArtifactMeta[]> {
+	async listArtifacts(
+		runId: string,
+		stepId?: string,
+	): Promise<StoredArtifactMeta[]> {
 		const metas: StoredArtifactMeta[] = [];
 
 		if (stepId) {
@@ -690,7 +716,8 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 				}
 			}
 		} else {
-			const indexed = (await this.redis.hgetall(this.runArtifactsKey(runId))) || {};
+			const indexed =
+				(await this.redis.hgetall(this.runArtifactsKey(runId))) || {};
 			for (const metaKey of Object.values(indexed)) {
 				const rawMeta = await this.redis.get(metaKey);
 				if (!rawMeta) continue;
@@ -707,7 +734,11 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 	}
 
 	async materializeArtifact(args: MaterializeArtifactArgs): Promise<string> {
-		const artifact = await this.readArtifact(args.runId, args.stepId, args.outputId);
+		const artifact = await this.readArtifact(
+			args.runId,
+			args.stepId,
+			args.outputId,
+		);
 		if (!artifact) {
 			throw new Error(
 				`Artifact not found: run=${args.runId} step=${args.stepId} output=${args.outputId}`,
@@ -741,22 +772,59 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 
 export function resolveStateBackend(args: {
 	workflowState?: {
-		backend?: "filesystem" | "redis" | "auto" | "dual";
+		backend?:
+			| "filesystem"
+			| "redis"
+			| "redis-native"
+			| "redis-mcp"
+			| "auto"
+			| "dual";
 		fallback?: "filesystem" | "none";
-		redis?: { provider?: "auto" | "native" | "mcp"; tool_prefix?: string };
+		redis?: {
+			provider?: "auto" | "native" | "mcp";
+			server?: string;
+			tool_prefix?: string;
+		};
 	};
 	pluginConfig?: {
-		stateBackend?: "filesystem" | "redis" | "auto" | "dual";
+		stateBackend?:
+			| "filesystem"
+			| "redis"
+			| "redis-native"
+			| "redis-mcp"
+			| "auto"
+			| "dual";
 		redisUrl?: string | null;
+		redisMcpServer?: string | null;
 		redisMcpToolPrefix?: string | null;
 		filesystemFallback?: boolean;
 	};
 }): StateBackendResolution {
 	const requested =
-		args.workflowState?.backend || args.pluginConfig?.stateBackend || "filesystem";
+		args.workflowState?.backend ||
+		args.pluginConfig?.stateBackend ||
+		"filesystem";
 
 	const checked_at = getLocalISOString();
-	const redisUrl = args.pluginConfig?.redisUrl || process.env.OPENCLAW_WORKFLOW_REDIS_URL;
+	const redisUrl =
+		args.pluginConfig?.redisUrl || process.env.OPENCLAW_WORKFLOW_REDIS_URL;
+	const workflowMcpServer =
+		args.workflowState?.redis?.server ||
+		args.workflowState?.redis?.tool_prefix ||
+		null;
+	const pluginMcpServer =
+		args.pluginConfig?.redisMcpServer ||
+		args.pluginConfig?.redisMcpToolPrefix ||
+		null;
+	const envMcpServer =
+		process.env.OPENCLAW_WORKFLOW_REDIS_MCP_SERVER ||
+		process.env.OPENCLAW_WORKFLOW_REDIS_MCP_TOOL_PREFIX ||
+		null;
+	const mcpServer = workflowMcpServer || pluginMcpServer || envMcpServer;
+	const fallbackAllowed =
+		args.workflowState?.fallback === "filesystem" ||
+		args.pluginConfig?.filesystemFallback !== false;
+
 	if (requested === "filesystem") {
 		return {
 			requested,
@@ -764,6 +832,75 @@ export function resolveStateBackend(args: {
 			reason: "workflow requested filesystem",
 			checked_at,
 			fallback: "filesystem",
+		};
+	}
+
+	if (requested === "redis-native") {
+		if (redisUrl) {
+			return {
+				requested,
+				resolved: "redis-native",
+				reason:
+					"state backend requires native redis and redis url is configured",
+				checked_at,
+				fallback: args.workflowState?.fallback || "filesystem",
+			};
+		}
+
+		if (fallbackAllowed) {
+			return {
+				requested,
+				resolved: "filesystem",
+				reason: "native redis unavailable; filesystem fallback enabled",
+				checked_at,
+				fallback: "filesystem",
+			};
+		}
+
+		throw new Error(
+			"Workflow requested redis-native state, but no Redis URL was configured and filesystem fallback is disabled.",
+		);
+	}
+
+	if (requested === "redis-mcp") {
+		if (mcpServer) {
+			return {
+				requested,
+				resolved: "redis-mcp",
+				provider: mcpServer,
+				reason: "mcp redis server configured",
+				checked_at,
+				fallback: args.workflowState?.fallback || "filesystem",
+			};
+		}
+
+		if (fallbackAllowed) {
+			return {
+				requested,
+				resolved: "filesystem",
+				reason: "mcp redis unavailable; filesystem fallback enabled",
+				checked_at,
+				fallback: "filesystem",
+			};
+		}
+
+		throw new Error(
+			"Workflow requested redis-mcp state, but no MCP Redis server was configured and filesystem fallback is disabled.",
+		);
+	}
+
+	if (
+		(requested === "redis" || requested === "auto" || requested === "dual") &&
+		args.workflowState?.redis?.provider === "mcp" &&
+		mcpServer
+	) {
+		return {
+			requested,
+			resolved: "redis-mcp",
+			provider: mcpServer,
+			reason: "workflow requested mcp redis provider",
+			checked_at,
+			fallback: args.workflowState?.fallback || "filesystem",
 		};
 	}
 
@@ -780,26 +917,28 @@ export function resolveStateBackend(args: {
 	const mcpProvider =
 		args.workflowState?.redis?.provider === "mcp" ||
 		args.workflowState?.redis?.provider === "auto" ||
+		!!args.pluginConfig?.redisMcpServer ||
 		!!args.pluginConfig?.redisMcpToolPrefix;
 
 	if (mcpProvider) {
+		const provider =
+			workflowMcpServer ||
+			args.pluginConfig?.redisMcpServer ||
+			args.pluginConfig?.redisMcpToolPrefix ||
+			envMcpServer ||
+			"MCP_DOCKER";
+
 		return {
 			requested,
 			resolved: "redis-mcp",
-			provider:
-				args.workflowState?.redis?.tool_prefix ||
-				args.pluginConfig?.redisMcpToolPrefix ||
-				"MCP_DOCKER",
-			reason: "mcp redis tool prefix configured",
+			provider,
+			reason: "mcp redis server configured",
 			checked_at,
 			fallback: args.workflowState?.fallback || "filesystem",
 		};
 	}
 
-	if (
-		args.workflowState?.fallback === "filesystem" ||
-		args.pluginConfig?.filesystemFallback !== false
-	) {
+	if (fallbackAllowed) {
 		return {
 			requested,
 			resolved: "filesystem",
@@ -810,6 +949,6 @@ export function resolveStateBackend(args: {
 	}
 
 	throw new Error(
-		"Workflow requested Redis state, but no Redis URL or MCP Redis tool prefix was configured and filesystem fallback is disabled.",
+		"Workflow requested Redis state, but no Redis URL or MCP Redis server was configured and filesystem fallback is disabled.",
 	);
 }
