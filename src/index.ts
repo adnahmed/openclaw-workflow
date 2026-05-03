@@ -565,190 +565,236 @@ export default definePluginEntry({
 			});
 		}
 
-		api.registerTool({
-			name: "write_output",
-			description:
-				"Safely write a declared workflow step output using the step's declared validator.",
-			parameters: WorkflowWriteOutputParameters,
-			optional: true,
-			async execute(first, second) {
-				const params = readParams(first, second);
-				const {
-					run_id,
-					step_id,
-					path,
-					output_id,
-					data,
-					text,
-					attempt,
-					session_key,
-					subagent_run_id,
-					handoff_token,
-				} = params;
-
-				try {
-					if (!run_id || !step_id) {
-						return errorResult(
-							"write_output requires run_id and step_id. These must be injected into the step prompt by the workflow runner.",
-						);
-					}
-
-					if (
-						(typeof data === "undefined" && typeof text === "undefined") ||
-						(typeof data !== "undefined" && typeof text !== "undefined")
-					) {
-						return errorResult("Provide exactly one of 'data' or 'text'.");
-					}
-
-					if (!path && !output_id) {
-						return errorResult("Provide one of: path or output_id.");
-					}
-
-					const runtime = await resolveWorkflowRuntime(run_id);
-					let state = await runtime.stateStore.loadRun(run_id);
-					const step = (state as RunState).steps?.[step_id] as
-						| StepState
-						| undefined;
-
-					if (!step) {
-						return errorResult(
-							`Step "${step_id}" does not exist in run "${run_id}".`,
-						);
-					}
-
-					if (state.status !== "running") {
-						return errorResult(
-							`Run "${run_id}" is not active (status=${state.status}).`,
-						);
-					}
-
-					if (step.status !== "running") {
-						return errorResult(
-							`Step "${step_id}" is not currently running (status=${step.status}).`,
-						);
-					}
-
-					const attemptMatch = handoffMatchesCurrentAttempt({
-						stepState: step,
-						attempt,
-						session_key,
-						subagent_run_id,
-						handoff_token,
-					});
-
-					if (!attemptMatch.ok) {
-						return textResult({
-							ok: false,
-							committed: false,
-							decision: "fail",
-							message: `write_output rejected: ${attemptMatch.reason}`,
-						});
-					}
-
-					const workflow = await loadWorkflowForRun(state as RunState);
-
-					const result = await writeDeclaredOutput({
-						workflow,
-						state: state as RunState,
-						stepId: step_id,
+		api.registerTool(
+			{
+				name: "write_output",
+				description:
+					"Safely write a declared workflow step output using the step's declared validator.",
+				parameters: WorkflowWriteOutputParameters,
+				async execute(first, second) {
+					const params = readParams(first, second);
+					const {
+						run_id,
+						step_id,
 						path,
 						output_id,
 						data,
 						text,
-						baseDir,
-						workflowsDir,
-						artifactStore: runtime.artifactStore,
-						materializeMode: config.materializeOutputs,
 						attempt,
 						session_key,
 						subagent_run_id,
 						handoff_token,
-					});
+					} = params;
 
-					if (!result.ok || !result.committed) {
-						return textResult(result);
-					}
-
-					const now = getLocalISOString();
-					const outputKey =
-						result.provenance.output_id || output_id || path || "(unknown)";
-					const outputWrites = {
-						...(step.output_writes || {}),
-						[outputKey]: result.provenance,
-					};
-
-					state = await runtime.stateStore.updateStep(run_id, step_id, {
-						output_writes: outputWrites,
-						last_update_at: now,
-						last_message: `Committed declared output: ${outputKey}`,
-					});
-
-					return textResult({
-						ok: true,
-						committed: true,
-						path: result.provenance.path || path,
-						output_id: result.provenance.output_id || output_id,
-						stored: result.provenance.storage_backend || "filesystem",
-						decision: result.decision,
-						validator: result.provenance.validator,
-						bytes: result.provenance.bytes,
-						sha256: result.provenance.sha256,
-						message: "Declared output committed.",
-					});
-				} catch (err) {
-					if (err?.code === "ENOENT") {
-						return errorResult(`Run not found: ${run_id}`);
-					}
-					return errorResult(err instanceof Error ? err.message : String(err));
-				}
-			},
-		});
-
-		api.registerTool({
-			name: "workflow_run",
-			description:
-				"Run a named workflow asynchronously. Supports dry_run validation and resume from the most recent run.",
-			parameters: WorkflowRunParameters,
-			optional: true,
-			async execute(first, second) {
-				const {
-					name,
-					dry_run = false,
-					resume = false,
-				} = readParams(first, second);
-				try {
-					const workflow = await loadWorkflow(name, workflowsDir);
-					const runtime = await resolveWorkflowRuntime(workflow);
-					const backendResolution = runtime.stateBackendResolution;
-					const runId = generateRunId(workflow.name);
-
-					if (dry_run) {
-						const plan = dryRun(workflow, runId);
-						return textResult({
-							dry_run: true,
-							message: `Workflow "${workflow.name}" is valid. ${workflow.steps.length} step(s) would run.`,
-							...plan,
-						});
-					}
-
-					const notify = buildNotifier();
-					const execConfig = await buildExecutorConfig(workflow, notify);
-
-					if (resume) {
-						const [lastRun] = await runtime.stateStore.listRuns({
-							workflow: name,
-							limit: 1,
-						});
-						if (!lastRun) {
+					try {
+						if (!run_id || !step_id) {
 							return errorResult(
-								`No previous run found for workflow "${name}" to resume from. Run without resume:true to start fresh.`,
+								"write_output requires run_id and step_id. These must be injected into the step prompt by the workflow runner.",
 							);
 						}
 
+						if (
+							(typeof data === "undefined" && typeof text === "undefined") ||
+							(typeof data !== "undefined" && typeof text !== "undefined")
+						) {
+							return errorResult("Provide exactly one of 'data' or 'text'.");
+						}
+
+						if (!path && !output_id) {
+							return errorResult("Provide one of: path or output_id.");
+						}
+
+						const runtime = await resolveWorkflowRuntime(run_id);
+						let state = await runtime.stateStore.loadRun(run_id);
+						const step = (state as RunState).steps?.[step_id] as
+							| StepState
+							| undefined;
+
+						if (!step) {
+							return errorResult(
+								`Step "${step_id}" does not exist in run "${run_id}".`,
+							);
+						}
+
+						if (state.status !== "running") {
+							return errorResult(
+								`Run "${run_id}" is not active (status=${state.status}).`,
+							);
+						}
+
+						if (step.status !== "running") {
+							return errorResult(
+								`Step "${step_id}" is not currently running (status=${step.status}).`,
+							);
+						}
+
+						const attemptMatch = handoffMatchesCurrentAttempt({
+							stepState: step,
+							attempt,
+							session_key,
+							subagent_run_id,
+							handoff_token,
+						});
+
+						if (!attemptMatch.ok) {
+							return textResult({
+								ok: false,
+								committed: false,
+								decision: "fail",
+								message: `write_output rejected: ${attemptMatch.reason}`,
+							});
+						}
+
+						const workflow = await loadWorkflowForRun(state as RunState);
+
+						const result = await writeDeclaredOutput({
+							workflow,
+							state: state as RunState,
+							stepId: step_id,
+							path,
+							output_id,
+							data,
+							text,
+							baseDir,
+							workflowsDir,
+							artifactStore: runtime.artifactStore,
+							materializeMode: config.materializeOutputs,
+							attempt,
+							session_key,
+							subagent_run_id,
+							handoff_token,
+						});
+
+						if (!result.ok || !result.committed) {
+							return textResult(result);
+						}
+
+						const now = getLocalISOString();
+						const outputKey =
+							result.provenance.output_id || output_id || path || "(unknown)";
+						const outputWrites = {
+							...(step.output_writes || {}),
+							[outputKey]: result.provenance,
+						};
+
+						state = await runtime.stateStore.updateStep(run_id, step_id, {
+							output_writes: outputWrites,
+							last_update_at: now,
+							last_message: `Committed declared output: ${outputKey}`,
+						});
+
+						return textResult({
+							ok: true,
+							committed: true,
+							path: result.provenance.path || path,
+							output_id: result.provenance.output_id || output_id,
+							stored: result.provenance.storage_backend || "filesystem",
+							decision: result.decision,
+							validator: result.provenance.validator,
+							bytes: result.provenance.bytes,
+							sha256: result.provenance.sha256,
+							message: "Declared output committed.",
+						});
+					} catch (err) {
+						if (err?.code === "ENOENT") {
+							return errorResult(`Run not found: ${run_id}`);
+						}
+						return errorResult(
+							err instanceof Error ? err.message : String(err),
+						);
+					}
+				},
+			},
+			{ optional: true },
+		);
+
+		api.registerTool(
+			{
+				name: "workflow_run",
+				description:
+					"Run a named workflow asynchronously. Supports dry_run validation and resume from the most recent run.",
+				parameters: WorkflowRunParameters,
+				async execute(first, second) {
+					const {
+						name,
+						dry_run = false,
+						resume = false,
+					} = readParams(first, second);
+					try {
+						const workflow = await loadWorkflow(name, workflowsDir);
+						const runtime = await resolveWorkflowRuntime(workflow);
+						const backendResolution = runtime.stateBackendResolution;
+						const runId = generateRunId(workflow.name);
+
+						if (dry_run) {
+							const plan = dryRun(workflow, runId);
+							return textResult({
+								dry_run: true,
+								message: `Workflow "${workflow.name}" is valid. ${workflow.steps.length} step(s) would run.`,
+								...plan,
+							});
+						}
+
+						const notify = buildNotifier();
+						const execConfig = await buildExecutorConfig(workflow, notify);
+
+						if (resume) {
+							const [lastRun] = await runtime.stateStore.listRuns({
+								workflow: name,
+								limit: 1,
+							});
+							if (!lastRun) {
+								return errorResult(
+									`No previous run found for workflow "${name}" to resume from. Run without resume:true to start fresh.`,
+								);
+							}
+
+							runInBackground(
+								runId,
+								resumeWorkflow(
+									lastRun,
+									workflow,
+									runId,
+									api,
+									{
+										...execConfig,
+										sessionAdapter,
+									},
+									runStep,
+									lastRun.workflow_key,
+								),
+							);
+
+							const skippedSteps = Object.entries((lastRun as RunState).steps)
+								.filter(([, step]) => (step as StepState).status === "ok")
+								.map(([id]) => id);
+
+							return textResult({
+								run_id: runId,
+								status: "running",
+								resumed_from: lastRun.run_id,
+								skipped_steps: skippedSteps,
+								message: `Workflow "${workflow.name}" resumed. ${skippedSteps.length} step(s) skipped (already ok). Use workflow_status to track progress.`,
+							});
+						}
+
+						const initialState = createRunState(
+							workflow.name,
+							name,
+							workflow.steps.map((s) => s.id),
+							runId,
+						);
+						const runningState: RunState = {
+							...initialState,
+							status: "running" as const,
+							completed_at: null,
+							state_backend: backendResolution,
+						};
+						await runtime.stateStore.saveRun(runningState);
+
 						runInBackground(
 							runId,
-							resumeWorkflow(
-								lastRun,
+							executeWorkflow(
 								workflow,
 								runId,
 								api,
@@ -757,210 +803,188 @@ export default definePluginEntry({
 									sessionAdapter,
 								},
 								runStep,
-								lastRun.workflow_key,
+								runningState,
+								name,
 							),
 						);
 
-						const skippedSteps = Object.entries((lastRun as RunState).steps)
-							.filter(([, step]) => (step as StepState).status === "ok")
-							.map(([id]) => id);
+						const stepSummary = {};
+						for (const step of workflow.steps) {
+							stepSummary[step.id] = {
+								status: "pending",
+								depends_on: step.depends_on,
+							};
+						}
 
 						return textResult({
 							run_id: runId,
+							workflow: workflow.name,
 							status: "running",
-							resumed_from: lastRun.run_id,
-							skipped_steps: skippedSteps,
-							message: `Workflow "${workflow.name}" resumed. ${skippedSteps.length} step(s) skipped (already ok). Use workflow_status to track progress.`,
+							state_backend: backendResolution,
+							total_steps: workflow.steps.length,
+							steps: stepSummary,
+							message: `Workflow "${workflow.name}" started. Use workflow_status with run_id "${runId}" to track progress.`,
 						});
-					}
-
-					const initialState = createRunState(
-						workflow.name,
-						name,
-						workflow.steps.map((s) => s.id),
-						runId,
-					);
-					const runningState: RunState = {
-						...initialState,
-						status: "running" as const,
-						completed_at: null,
-						state_backend: backendResolution,
-					};
-					await runtime.stateStore.saveRun(runningState);
-
-					runInBackground(
-						runId,
-						executeWorkflow(
-							workflow,
-							runId,
-							api,
-							{
-								...execConfig,
-								sessionAdapter,
-							},
-							runStep,
-							runningState,
-							name,
-						),
-					);
-
-					const stepSummary = {};
-					for (const step of workflow.steps) {
-						stepSummary[step.id] = {
-							status: "pending",
-							depends_on: step.depends_on,
-						};
-					}
-
-					return textResult({
-						run_id: runId,
-						workflow: workflow.name,
-						status: "running",
-						state_backend: backendResolution,
-						total_steps: workflow.steps.length,
-						steps: stepSummary,
-						message: `Workflow "${workflow.name}" started. Use workflow_status with run_id "${runId}" to track progress.`,
-					});
-				} catch (err) {
-					return errorResult(err instanceof Error ? err.message : String(err));
-				}
-			},
-		});
-
-		api.registerTool({
-			name: "read_output",
-			description: "Read one committed declared output artifact by output_id.",
-			parameters: WorkflowReadOutputParameters,
-			optional: true,
-			async execute(first, second) {
-				const { run_id, step_id, output_id, limit, fields } = readParams(
-					first,
-					second,
-				);
-
-				try {
-					const runtime = await resolveWorkflowRuntime(run_id);
-					await runtime.stateStore.loadRun(run_id);
-					const artifact = await runtime.artifactStore.readArtifact(
-						run_id,
-						step_id,
-						output_id,
-					);
-					if (!artifact) {
+					} catch (err) {
 						return errorResult(
-							`Output not found: run=${run_id} step=${step_id} output_id=${output_id}`,
+							err instanceof Error ? err.message : String(err),
 						);
 					}
-
-					let projected = artifact.data;
-					if (Array.isArray(projected) && typeof limit === "number") {
-						projected = projected.slice(0, Math.max(1, limit));
-					}
-
-					if (
-						Array.isArray(projected) &&
-						Array.isArray(fields) &&
-						fields.length > 0
-					) {
-						projected = projected.map((item) => {
-							if (!item || typeof item !== "object") return item;
-							const picked = {};
-							for (const key of fields) {
-								if (Object.hasOwn(item, key)) {
-									picked[key] = item[key];
-								}
-							}
-							return picked;
-						});
-					}
-
-					const totalCount = Array.isArray(artifact.data)
-						? artifact.data.length
-						: 1;
-					const items = Array.isArray(projected) ? projected : [projected];
-
-					return textResult({
-						ok: true,
-						run_id,
-						step_id,
-						output_id,
-						count: items.length,
-						total_count: totalCount,
-						items,
-						meta: {
-							validator: artifact.validator,
-							decision: artifact.decision,
-							bytes: artifact.bytes,
-							sha256: artifact.sha256,
-							storage_backend: artifact.storage_backend,
-							materialized_path: artifact.materialized_path ?? null,
-						},
-					});
-				} catch (err) {
-					return errorResult(err instanceof Error ? err.message : String(err));
-				}
+				},
 			},
-		});
+			{ optional: true },
+		);
 
-		api.registerTool({
-			name: "list_outputs",
-			description:
-				"List committed output artifacts for a run (optionally scoped to one step).",
-			parameters: WorkflowListOutputsParameters,
-			optional: true,
-			async execute(first, second) {
-				const { run_id, step_id } = readParams(first, second);
-				try {
-					const runtime = await resolveWorkflowRuntime(run_id);
-					await runtime.stateStore.loadRun(run_id);
-					const artifacts = await runtime.artifactStore.listArtifacts(
-						run_id,
-						step_id,
+		api.registerTool(
+			{
+				name: "read_output",
+				description:
+					"Read one committed declared output artifact by output_id.",
+				parameters: WorkflowReadOutputParameters,
+				async execute(first, second) {
+					const { run_id, step_id, output_id, limit, fields } = readParams(
+						first,
+						second,
 					);
-					return textResult({
-						run_id,
-						step_id: step_id || null,
-						count: artifacts.length,
-						artifacts,
-					});
-				} catch (err) {
-					return errorResult(err instanceof Error ? err.message : String(err));
-				}
-			},
-		});
 
-		api.registerTool({
-			name: "materialize_output",
-			description:
-				"Materialize a stored output artifact to a file path on demand.",
-			parameters: WorkflowMaterializeOutputParameters,
-			optional: true,
-			async execute(first, second) {
-				const { run_id, step_id, output_id, path } = readParams(first, second);
-				try {
-					const runtime = await resolveWorkflowRuntime(run_id);
-					await runtime.stateStore.loadRun(run_id);
-					const materializedPath =
-						await runtime.artifactStore.materializeArtifact({
-							runId: run_id,
-							stepId: step_id,
-							outputId: output_id,
-							targetPath: path,
-							baseDir,
+					try {
+						const runtime = await resolveWorkflowRuntime(run_id);
+						await runtime.stateStore.loadRun(run_id);
+						const artifact = await runtime.artifactStore.readArtifact(
+							run_id,
+							step_id,
+							output_id,
+						);
+						if (!artifact) {
+							return errorResult(
+								`Output not found: run=${run_id} step=${step_id} output_id=${output_id}`,
+							);
+						}
+
+						let projected = artifact.data;
+						if (Array.isArray(projected) && typeof limit === "number") {
+							projected = projected.slice(0, Math.max(1, limit));
+						}
+
+						if (
+							Array.isArray(projected) &&
+							Array.isArray(fields) &&
+							fields.length > 0
+						) {
+							projected = projected.map((item) => {
+								if (!item || typeof item !== "object") return item;
+								const picked = {};
+								for (const key of fields) {
+									if (Object.hasOwn(item, key)) {
+										picked[key] = item[key];
+									}
+								}
+								return picked;
+							});
+						}
+
+						const totalCount = Array.isArray(artifact.data)
+							? artifact.data.length
+							: 1;
+						const items = Array.isArray(projected) ? projected : [projected];
+
+						return textResult({
+							ok: true,
+							run_id,
+							step_id,
+							output_id,
+							count: items.length,
+							total_count: totalCount,
+							items,
+							meta: {
+								validator: artifact.validator,
+								decision: artifact.decision,
+								bytes: artifact.bytes,
+								sha256: artifact.sha256,
+								storage_backend: artifact.storage_backend,
+								materialized_path: artifact.materialized_path ?? null,
+							},
 						});
-
-					return textResult({
-						ok: true,
-						run_id,
-						step_id,
-						output_id,
-						path: materializedPath,
-					});
-				} catch (err) {
-					return errorResult(err instanceof Error ? err.message : String(err));
-				}
+					} catch (err) {
+						return errorResult(
+							err instanceof Error ? err.message : String(err),
+						);
+					}
+				},
 			},
-		});
+			{ optional: true },
+		);
+
+		api.registerTool(
+			{
+				name: "list_outputs",
+				description:
+					"List committed output artifacts for a run (optionally scoped to one step).",
+				parameters: WorkflowListOutputsParameters,
+				async execute(first, second) {
+					const { run_id, step_id } = readParams(first, second);
+					try {
+						const runtime = await resolveWorkflowRuntime(run_id);
+						await runtime.stateStore.loadRun(run_id);
+						const artifacts = await runtime.artifactStore.listArtifacts(
+							run_id,
+							step_id,
+						);
+						return textResult({
+							run_id,
+							step_id: step_id || null,
+							count: artifacts.length,
+							artifacts,
+						});
+					} catch (err) {
+						return errorResult(
+							err instanceof Error ? err.message : String(err),
+						);
+					}
+				},
+			},
+			{ optional: true },
+		);
+
+		api.registerTool(
+			{
+				name: "materialize_output",
+				description:
+					"Materialize a stored output artifact to a file path on demand.",
+				parameters: WorkflowMaterializeOutputParameters,
+				async execute(first, second) {
+					const { run_id, step_id, output_id, path } = readParams(
+						first,
+						second,
+					);
+					try {
+						const runtime = await resolveWorkflowRuntime(run_id);
+						await runtime.stateStore.loadRun(run_id);
+						const materializedPath =
+							await runtime.artifactStore.materializeArtifact({
+								runId: run_id,
+								stepId: step_id,
+								outputId: output_id,
+								targetPath: path,
+								baseDir,
+							});
+
+						return textResult({
+							ok: true,
+							run_id,
+							step_id,
+							output_id,
+							path: materializedPath,
+						});
+					} catch (err) {
+						return errorResult(
+							err instanceof Error ? err.message : String(err),
+						);
+					}
+				},
+			},
+			{ optional: true },
+		);
 
 		api.registerTool({
 			name: "workflow_status",
@@ -1046,7 +1070,6 @@ export default definePluginEntry({
 			description:
 				"Read raw run state (including backend resolution) for debugging/admin.",
 			parameters: WorkflowStateGetParameters,
-			optional: true,
 			async execute(first, second) {
 				const { run_id, include_steps = true } = readParams(first, second);
 				try {
@@ -1126,183 +1149,287 @@ export default definePluginEntry({
 			},
 		});
 
-		api.registerTool({
-			name: "workflow_step_update",
-			description:
-				"Report non-authoritative step progress and counters for an active workflow run.",
-			parameters: WorkflowStepUpdateParameters,
-			optional: true,
-			async execute(first, second) {
-				const { run_id, step_id, status, message, counters } = readParams(
-					first,
-					second,
-				);
+		api.registerTool(
+			{
+				name: "workflow_step_update",
+				description:
+					"Report non-authoritative step progress and counters for an active workflow run.",
+				parameters: WorkflowStepUpdateParameters,
+				async execute(first, second) {
+					const { run_id, step_id, status, message, counters } = readParams(
+						first,
+						second,
+					);
 
-				try {
-					const runtime = await resolveWorkflowRuntime(run_id);
-					let state = await runtime.stateStore.loadRun(run_id);
-					const step = (state as RunState).steps?.[step_id] as
-						| StepState
-						| undefined;
+					try {
+						const runtime = await resolveWorkflowRuntime(run_id);
+						let state = await runtime.stateStore.loadRun(run_id);
+						const step = (state as RunState).steps?.[step_id] as
+							| StepState
+							| undefined;
 
-					if (!step) {
+						if (!step) {
+							return errorResult(
+								`Step "${step_id}" does not exist in run "${run_id}".`,
+							);
+						}
+
+						if (state.status !== "running") {
+							return errorResult(
+								`Run "${run_id}" is not active (status=${state.status}).`,
+							);
+						}
+
+						const now = getLocalISOString();
+						const mergedCounters = {
+							...((step.counters as Record<string, number>) || {}),
+							...(counters || {}),
+						};
+
+						state = await runtime.stateStore.updateStep(run_id, step_id, {
+							reported_status: status || step.reported_status || "progress",
+							counters:
+								Object.keys(mergedCounters).length > 0 ? mergedCounters : null,
+							last_update_at: now,
+							last_message: message || step.last_message || null,
+						});
+
+						return textResult({
+							ok: true,
+							run_id,
+							step_id,
+							status: state.steps[step_id].status,
+							reported_status: state.steps[step_id].reported_status,
+							last_update_at: state.steps[step_id].last_update_at,
+							message: "Progress update recorded.",
+						});
+					} catch (err) {
+						if (err?.code === "ENOENT") {
+							return errorResult(`Run not found: ${run_id}`);
+						}
 						return errorResult(
-							`Step "${step_id}" does not exist in run "${run_id}".`,
+							err instanceof Error ? err.message : String(err),
 						);
 					}
+				},
+			},
+			{ optional: true },
+		);
 
-					if (state.status !== "running") {
-						return errorResult(
-							`Run "${run_id}" is not active (status=${state.status}).`,
-						);
-					}
-
-					const now = getLocalISOString();
-					const mergedCounters = {
-						...((step.counters as Record<string, number>) || {}),
-						...(counters || {}),
-					};
-
-					state = await runtime.stateStore.updateStep(run_id, step_id, {
-						reported_status: status || step.reported_status || "progress",
-						counters:
-							Object.keys(mergedCounters).length > 0 ? mergedCounters : null,
-						last_update_at: now,
-						last_message: message || step.last_message || null,
-					});
-
-					return textResult({
-						ok: true,
+		api.registerTool(
+			{
+				name: "workflow_step_complete",
+				description:
+					"Request step completion by validating the declared output contract for the active attempt.",
+				parameters: WorkflowStepCompleteParameters,
+				async execute(first, second) {
+					const params = readParams(first, second);
+					const {
 						run_id,
 						step_id,
-						status: state.steps[step_id].status,
-						reported_status: state.steps[step_id].reported_status,
-						last_update_at: state.steps[step_id].last_update_at,
-						message: "Progress update recorded.",
-					});
-				} catch (err) {
-					if (err?.code === "ENOENT") {
-						return errorResult(`Run not found: ${run_id}`);
-					}
-					return errorResult(err instanceof Error ? err.message : String(err));
-				}
-			},
-		});
-
-		api.registerTool({
-			name: "workflow_step_complete",
-			description:
-				"Request step completion by validating the declared output contract for the active attempt.",
-			parameters: WorkflowStepCompleteParameters,
-			optional: true,
-			async execute(first, second) {
-				const params = readParams(first, second);
-				const {
-					run_id,
-					step_id,
-					reason = "generated",
-					outputs,
-					message,
-					counters,
-					metadata,
-					attempt,
-					session_key,
-					subagent_run_id,
-					handoff_token,
-				} = params;
-
-				try {
-					const runtime = await resolveWorkflowRuntime(run_id);
-					let state = await runtime.stateStore.loadRun(run_id);
-					const step = (state as RunState).steps?.[step_id] as
-						| StepState
-						| undefined;
-
-					if (!step) {
-						return errorResult(
-							`Step "${step_id}" does not exist in run "${run_id}".`,
-						);
-					}
-
-					if (state.status !== "running") {
-						return errorResult(
-							`Run "${run_id}" is not active (status=${state.status}).`,
-						);
-					}
-
-					if (step.status !== "running") {
-						return errorResult(
-							`Step "${step_id}" is not currently running (status=${step.status}).`,
-						);
-					}
-
-					const attemptMatch = handoffMatchesCurrentAttempt({
-						stepState: step,
+						reason = "generated",
+						outputs,
+						message,
+						counters,
+						metadata,
 						attempt,
 						session_key,
 						subagent_run_id,
 						handoff_token,
-					});
+					} = params;
 
-					if (!attemptMatch.ok) {
-						const now = getLocalISOString();
+					try {
+						const runtime = await resolveWorkflowRuntime(run_id);
+						let state = await runtime.stateStore.loadRun(run_id);
+						const step = (state as RunState).steps?.[step_id] as
+							| StepState
+							| undefined;
 
-						// Stale-attempt fast path: if outputs already validate, store as a
-						// late_success_candidate so the executor can adopt before next retry.
-						if (attemptMatch.reason === "stale_attempt") {
-							const workflow = await loadWorkflowForRun(state as RunState);
-							const runArtifactStore = runtime.artifactStore;
-							const workflowStepDef = workflow.steps.find(
-								(s) => s.id === step_id,
+						if (!step) {
+							return errorResult(
+								`Step "${step_id}" does not exist in run "${run_id}".`,
 							);
-							const declaredOutputs = step.declared_outputs || [];
-							const contractStep: WorkflowStep = {
-								...(workflowStepDef || {
-									id: step_id,
-									name: step_id,
-									task: null,
-									depends_on: [],
-									outputs: declaredOutputs,
-									timeout: 60,
-									retry: 0,
-									retry_delay: 0,
-									optional: false,
-								}),
-								id: step_id,
-								outputs: declaredOutputs,
-							};
-							const lateOutputCheck = await validateStepContract({
-								workflow,
-								step: contractStep,
-								baseDir,
-								workflowsDir,
-								runId: run_id,
-								stepId: step_id,
-								artifactStore: runArtifactStore,
-							});
-
-							if (lateOutputCheck.passed) {
-								state = await runtime.stateStore.updateStep(run_id, step_id, {
-									late_success_candidate: {
-										attempt: attempt ?? 0,
-										handoff_token: handoff_token ?? null,
-										checked_at: now,
-										output_check: lateOutputCheck,
-										reason: "stale_attempt_but_outputs_passed",
-									},
-									last_update_at: now,
-									last_message: `Stale attempt ${attempt} — outputs validated; queued for adoption`,
-								});
-
-								return textResult({
-									ok: true,
-									decision: "late_success_candidate",
-									message:
-										"Stale attempt, but declared outputs validate and will be adopted by runner.",
-								});
-							}
 						}
 
+						if (state.status !== "running") {
+							return errorResult(
+								`Run "${run_id}" is not active (status=${state.status}).`,
+							);
+						}
+
+						if (step.status !== "running") {
+							return errorResult(
+								`Step "${step_id}" is not currently running (status=${step.status}).`,
+							);
+						}
+
+						const attemptMatch = handoffMatchesCurrentAttempt({
+							stepState: step,
+							attempt,
+							session_key,
+							subagent_run_id,
+							handoff_token,
+						});
+
+						if (!attemptMatch.ok) {
+							const now = getLocalISOString();
+
+							// Stale-attempt fast path: if outputs already validate, store as a
+							// late_success_candidate so the executor can adopt before next retry.
+							if (attemptMatch.reason === "stale_attempt") {
+								const workflow = await loadWorkflowForRun(state as RunState);
+								const runArtifactStore = runtime.artifactStore;
+								const workflowStepDef = workflow.steps.find(
+									(s) => s.id === step_id,
+								);
+								const declaredOutputs = step.declared_outputs || [];
+								const contractStep: WorkflowStep = {
+									...(workflowStepDef || {
+										id: step_id,
+										name: step_id,
+										task: null,
+										depends_on: [],
+										outputs: declaredOutputs,
+										timeout: 60,
+										retry: 0,
+										retry_delay: 0,
+										optional: false,
+									}),
+									id: step_id,
+									outputs: declaredOutputs,
+								};
+								const lateOutputCheck = await validateStepContract({
+									workflow,
+									step: contractStep,
+									baseDir,
+									workflowsDir,
+									runId: run_id,
+									stepId: step_id,
+									artifactStore: runArtifactStore,
+								});
+
+								if (lateOutputCheck.passed) {
+									state = await runtime.stateStore.updateStep(run_id, step_id, {
+										late_success_candidate: {
+											attempt: attempt ?? 0,
+											handoff_token: handoff_token ?? null,
+											checked_at: now,
+											output_check: lateOutputCheck,
+											reason: "stale_attempt_but_outputs_passed",
+										},
+										last_update_at: now,
+										last_message: `Stale attempt ${attempt} — outputs validated; queued for adoption`,
+									});
+
+									return textResult({
+										ok: true,
+										decision: "late_success_candidate",
+										message:
+											"Stale attempt, but declared outputs validate and will be adopted by runner.",
+									});
+								}
+							}
+
+							state = await runtime.stateStore.updateStep(run_id, step_id, {
+								handoff: {
+									...(step.handoff || {}),
+									requested_at: now,
+									reason,
+									message,
+									outputs: outputs || undefined,
+									metadata,
+									attempt,
+									session_key,
+									subagent_run_id,
+									token: handoff_token,
+								},
+								last_update_at: now,
+								last_message:
+									message || `Handoff rejected: ${attemptMatch.reason}`,
+							});
+
+							return textResult({
+								ok: false,
+								decision: "fail",
+								message: `Handoff rejected: ${attemptMatch.reason}`,
+							});
+						}
+
+						const workflow = await loadWorkflowForRun(state as RunState);
+						const runArtifactStore = runtime.artifactStore;
+						const workflowStepDef = workflow.steps.find(
+							(s) => s.id === step_id,
+						);
+						const declaredOutputs = step.declared_outputs || [];
+						const contractStep: WorkflowStep = {
+							...(workflowStepDef || {
+								id: step_id,
+								name: step_id,
+								task: null,
+								depends_on: [],
+								outputs: declaredOutputs,
+								timeout: 60,
+								retry: 0,
+								retry_delay: 0,
+								optional: false,
+							}),
+							id: step_id,
+							outputs: declaredOutputs,
+						};
+
+						const outputCheck = await validateStepContract({
+							workflow,
+							step: contractStep,
+							baseDir,
+							workflowsDir,
+							runId: run_id,
+							stepId: step_id,
+							artifactStore: runArtifactStore,
+						});
+
+						const decision = outputCheck.decision;
+						let freshness: {
+							ok: boolean;
+							reason?: string;
+							current_signature: string;
+							previous_signature?: string;
+							producer_run_id?: string;
+							validator_hash?: string;
+						} = {
+							ok: true,
+							reason: "signature_match",
+							current_signature: "",
+							previous_signature: undefined,
+							producer_run_id: undefined,
+							validator_hash: undefined,
+						};
+
+						if (reason === "cache_hit" || reason === "cache_repaired") {
+							freshness = await evaluateCacheFreshness({
+								workflow,
+								step: {
+									...contractStep,
+									reuse_outputs: {
+										enabled: true,
+										require_signature:
+											workflowStepDef?.reuse_outputs?.require_signature !==
+											false,
+										legacy_unsigned_cache:
+											workflowStepDef?.reuse_outputs?.legacy_unsigned_cache ||
+											"stale",
+										freshness: workflowStepDef?.reuse_outputs?.freshness,
+									},
+								},
+								state,
+								baseDir,
+								workflowsDir,
+							});
+						}
+
+						const handoffValid =
+							(decision === "pass" || decision === "blocked") && freshness.ok;
+
+						const now = getLocalISOString();
 						state = await runtime.stateStore.updateStep(run_id, step_id, {
 							handoff: {
 								...(step.handoff || {}),
@@ -1316,198 +1443,105 @@ export default definePluginEntry({
 								subagent_run_id,
 								token: handoff_token,
 							},
+							counters: counters || step.counters || null,
 							last_update_at: now,
-							last_message:
-								message || `Handoff rejected: ${attemptMatch.reason}`,
+							last_message: message || step.last_message || null,
+							output_check: outputCheck,
 						});
 
-						return textResult({
-							ok: false,
-							decision: "fail",
-							message: `Handoff rejected: ${attemptMatch.reason}`,
-						});
-					}
+						if (!handoffValid) {
+							const invalidOutputs = outputCheck.validations
+								.filter((v) => v.decision !== "pass")
+								.map((v) => ({
+									path: v.path,
+									validator: v.validator,
+									errors: v.errors,
+								}));
 
-					const workflow = await loadWorkflowForRun(state as RunState);
-					const runArtifactStore = runtime.artifactStore;
-					const workflowStepDef = workflow.steps.find((s) => s.id === step_id);
-					const declaredOutputs = step.declared_outputs || [];
-					const contractStep: WorkflowStep = {
-						...(workflowStepDef || {
-							id: step_id,
-							name: step_id,
-							task: null,
-							depends_on: [],
-							outputs: declaredOutputs,
-							timeout: 60,
-							retry: 0,
-							retry_delay: 0,
-							optional: false,
-						}),
-						id: step_id,
-						outputs: declaredOutputs,
-					};
+							return textResult({
+								ok: false,
+								decision: freshness.ok ? decision : "stale",
+								missing_outputs: outputCheck.missing_files,
+								invalid_outputs: invalidOutputs,
+								message: freshness.ok
+									? "Handoff received but step contract did not validate."
+									: "Cached outputs passed validators but were produced under an older output contract.",
+								action: freshness.ok ? "fix_outputs" : "continue_running",
+							});
+						}
 
-					const outputCheck = await validateStepContract({
-						workflow,
-						step: contractStep,
-						baseDir,
-						workflowsDir,
-						runId: run_id,
-						stepId: step_id,
-						artifactStore: runArtifactStore,
-					});
-
-					const decision = outputCheck.decision;
-					let freshness: {
-						ok: boolean;
-						reason?: string;
-						current_signature: string;
-						previous_signature?: string;
-						producer_run_id?: string;
-						validator_hash?: string;
-					} = {
-						ok: true,
-						reason: "signature_match",
-						current_signature: "",
-						previous_signature: undefined,
-						producer_run_id: undefined,
-						validator_hash: undefined,
-					};
-
-					if (reason === "cache_hit" || reason === "cache_repaired") {
-						freshness = await evaluateCacheFreshness({
-							workflow,
-							step: {
-								...contractStep,
-								reuse_outputs: {
-									enabled: true,
-									require_signature:
-										workflowStepDef?.reuse_outputs?.require_signature !== false,
-									legacy_unsigned_cache:
-										workflowStepDef?.reuse_outputs?.legacy_unsigned_cache ||
-										"stale",
-									freshness: workflowStepDef?.reuse_outputs?.freshness,
-								},
-							},
+						state = await adoptStepContract({
 							state,
-							baseDir,
-							workflowsDir,
-						});
-					}
-
-					const handoffValid =
-						(decision === "pass" || decision === "blocked") && freshness.ok;
-
-					const now = getLocalISOString();
-					state = await runtime.stateStore.updateStep(run_id, step_id, {
-						handoff: {
-							...(step.handoff || {}),
-							requested_at: now,
+							stateStore: runtime.stateStore,
+							stepId: step_id,
+							outputCheck,
 							reason,
 							message,
-							outputs: outputs || undefined,
 							metadata,
-							attempt,
-							session_key,
-							subagent_run_id,
-							token: handoff_token,
-						},
-						counters: counters || step.counters || null,
-						last_update_at: now,
-						last_message: message || step.last_message || null,
-						output_check: outputCheck,
-					});
+							counters,
+						});
 
-					if (!handoffValid) {
-						const invalidOutputs = outputCheck.validations
-							.filter((v) => v.decision !== "pass")
-							.map((v) => ({
-								path: v.path,
-								validator: v.validator,
-								errors: v.errors,
-							}));
+						try {
+							const signature = await computeStepContractSignature({
+								workflow,
+								step: {
+									...contractStep,
+									reuse_outputs: {
+										enabled: true,
+										freshness: workflowStepDef?.reuse_outputs?.freshness,
+									},
+								},
+								state,
+								baseDir,
+								workflowsDir,
+							});
+
+							await writeStepCacheManifest({
+								baseDir,
+								stepId: step_id,
+								outputs: declaredOutputs.map((o: OutputSpec) => outputIdOf(o)),
+								producerRunId: run_id,
+								reason,
+								decision: outputCheck.decision,
+								signature,
+							});
+						} catch {
+							// Non-fatal: handoff completion should not fail solely on manifest persistence.
+						}
+
+						const latest = state.steps[step_id] as StepState;
+						if (latest.session_key && latest.status !== "running") {
+							await cancelStepSession(api, {
+								sessionAdapter: latest.session_adapter || sessionAdapter,
+								sessionId: latest.session_id || latest.subagent_run_id,
+								sessionKey: latest.session_key,
+								runId: latest.session_id || run_id,
+								reason: `workflow_step_handoff_complete:${step_id}`,
+								cronRunTimeoutMs,
+								cancelGraceMs: config.cancelGraceMs ?? 30000,
+								logger,
+							}).catch(() => null);
+						}
 
 						return textResult({
-							ok: false,
-							decision: freshness.ok ? decision : "stale",
-							missing_outputs: outputCheck.missing_files,
-							invalid_outputs: invalidOutputs,
-							message: freshness.ok
-								? "Handoff received but step contract did not validate."
-								: "Cached outputs passed validators but were produced under an older output contract.",
-							action: freshness.ok ? "fix_outputs" : "continue_running",
+							ok: true,
+							decision,
+							status: state.steps[step_id].status,
+							message:
+								"Handoff accepted and step contract validated successfully.",
 						});
+					} catch (err) {
+						if (err?.code === "ENOENT") {
+							return errorResult(`Run not found: ${run_id}`);
+						}
+						return errorResult(
+							err instanceof Error ? err.message : String(err),
+						);
 					}
-
-					state = await adoptStepContract({
-						state,
-						stateStore: runtime.stateStore,
-						stepId: step_id,
-						outputCheck,
-						reason,
-						message,
-						metadata,
-						counters,
-					});
-
-					try {
-						const signature = await computeStepContractSignature({
-							workflow,
-							step: {
-								...contractStep,
-								reuse_outputs: {
-									enabled: true,
-									freshness: workflowStepDef?.reuse_outputs?.freshness,
-								},
-							},
-							state,
-							baseDir,
-							workflowsDir,
-						});
-
-						await writeStepCacheManifest({
-							baseDir,
-							stepId: step_id,
-							outputs: declaredOutputs.map((o: OutputSpec) => outputIdOf(o)),
-							producerRunId: run_id,
-							reason,
-							decision: outputCheck.decision,
-							signature,
-						});
-					} catch {
-						// Non-fatal: handoff completion should not fail solely on manifest persistence.
-					}
-
-					const latest = state.steps[step_id] as StepState;
-					if (latest.session_key && latest.status !== "running") {
-						await cancelStepSession(api, {
-							sessionAdapter: latest.session_adapter || sessionAdapter,
-							sessionId: latest.session_id || latest.subagent_run_id,
-							sessionKey: latest.session_key,
-							runId: latest.session_id || run_id,
-							reason: `workflow_step_handoff_complete:${step_id}`,
-							cronRunTimeoutMs,
-							cancelGraceMs: config.cancelGraceMs ?? 30000,
-							logger,
-						}).catch(() => null);
-					}
-
-					return textResult({
-						ok: true,
-						decision,
-						status: state.steps[step_id].status,
-						message:
-							"Handoff accepted and step contract validated successfully.",
-					});
-				} catch (err) {
-					if (err?.code === "ENOENT") {
-						return errorResult(`Run not found: ${run_id}`);
-					}
-					return errorResult(err instanceof Error ? err.message : String(err));
-				}
+				},
 			},
-		});
+			{ optional: true },
+		);
 
 		api.registerTool({
 			name: "workflow_cancel",
