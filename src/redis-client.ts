@@ -319,14 +319,15 @@ class NativeRedisClient implements RedisClient {
 		const pipeline = this.client.multi();
 
 		for (const [command, ...args] of commands) {
-			const method = pipeline[command.toLowerCase()];
+			const commandName = command.toLowerCase();
+			const method = (pipeline as Record<string, unknown>)[commandName];
 			if (typeof method !== "function") {
 				throw new Error(
 					`Native Redis multi() does not support command: ${command}`,
 				);
 			}
 
-			method(...args);
+			Reflect.apply(method, pipeline, args);
 		}
 
 		return pipeline.exec();
