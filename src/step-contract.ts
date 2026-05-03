@@ -14,6 +14,7 @@ import type {
 	ValidatorSpec,
 	WorkflowDefinition,
 	WorkflowStep,
+	WorkflowStateStore,
 } from "./types.js";
 import {
 	assertSafeOutputPath,
@@ -68,6 +69,16 @@ function outputPathList(
 ): string[] {
 	if (!outputs) return [];
 	return outputs.map((o: any) => outputIdOf(o));
+}
+
+function legacyOutputPathList(outputs: OutputSpec[] | string[] | undefined): string[] {
+	if (!outputs) return [];
+	return outputs
+		.map((o: any) => {
+			if (typeof o === "string") return o;
+			return typeof o?.path === "string" ? o.path : "";
+		})
+		.filter((v) => typeof v === "string" && v.trim().length > 0);
 }
 
 function cacheManifestFilePath(
@@ -299,11 +310,25 @@ export async function evaluateCacheFreshness(args: {
 			: outputPathList(args.step.outputs);
 
 	const current = await computeStepContractSignature(args);
-	const manifest = await readStepCacheManifest({
+	let manifest = await readStepCacheManifest({
 		baseDir: args.baseDir,
 		stepId: args.step.id,
 		outputs,
 	});
+
+	if (!manifest) {
+		const legacyOutputs = legacyOutputPathList(args.step.outputs);
+		if (
+			legacyOutputs.length > 0 &&
+			legacyOutputs.join("|") !== outputs.join("|")
+		) {
+			manifest = await readStepCacheManifest({
+				baseDir: args.baseDir,
+				stepId: args.step.id,
+				outputs: legacyOutputs,
+			});
+		}
+	}
 
 	const requireSignature = args.step.reuse_outputs?.require_signature !== false;
 	const legacyPolicy =
@@ -497,7 +522,8 @@ export function handoffMatchesCurrentAttempt(args: {
 
 export async function adoptStepContract(args: {
 	state: RunState;
-	runsDir: string;
+	stateStore?: WorkflowStateStore;
+	runsDir?: string;
 	stepId: string;
 	outputCheck: OutputCheckResult;
 	reason: CompletionReason | string;
@@ -519,32 +545,38 @@ export async function adoptStepContract(args: {
 	const mapped = statusFromContractDecision(outputCheck);
 	const now = getLocalISOString();
 
-	return updateStepState(
-		state,
-		stepId,
-		{
-			status: mapped.status,
+	const patch = {
+		status: mapped.status,
+		completed_at: now,
+		output_check: outputCheck,
+		error: mapped.error,
+		handoff: {
+			...(state.steps?.[stepId]?.handoff || {}),
 			completed_at: now,
-			output_check: outputCheck,
-			error: mapped.error,
-			handoff: {
-				...(state.steps?.[stepId]?.handoff || {}),
-				completed_at: now,
-				reason,
-				message: message || null,
-				metadata: metadata || undefined,
-			},
-			counters: counters || state.steps?.[stepId]?.counters || null,
-			last_update_at: now,
-			last_message: message || state.steps?.[stepId]?.last_message || null,
+			reason,
+			message: message || null,
+			metadata: metadata || undefined,
 		},
-		runsDir,
-	);
+		counters: counters || state.steps?.[stepId]?.counters || null,
+		last_update_at: now,
+		last_message: message || state.steps?.[stepId]?.last_message || null,
+	};
+
+	if (args.stateStore) {
+		return args.stateStore.updateStep(state.run_id, stepId, patch);
+	}
+
+	if (!args.runsDir) {
+		throw new Error("adoptStepContract requires either stateStore or runsDir");
+	}
+
+	return updateStepState(state, stepId, patch, args.runsDir);
 }
 
 export async function markCacheProbe(args: {
 	state: RunState;
-	runsDir: string;
+	stateStore?: WorkflowStateStore;
+	runsDir?: string;
 	stepId: string;
 	hit: boolean;
 	adopted: boolean;
@@ -557,25 +589,30 @@ export async function markCacheProbe(args: {
 	validator_hash?: string;
 }): Promise<RunState> {
 	const now = getLocalISOString();
-	return updateStepState(
-		args.state,
-		args.stepId,
-		{
-			cache: {
-				checked_at: now,
-				hit: args.hit,
-				adopted: args.adopted,
-				decision: args.decision,
-				reason: args.reason,
-				producer_run_id: args.producer_run_id,
-				contract_signature: args.contract_signature,
-				previous_contract_signature: args.previous_contract_signature,
-				current_contract_signature: args.current_contract_signature,
-				validator_hash: args.validator_hash,
-			},
-			last_update_at: now,
-			last_message: args.reason || (args.hit ? "cache_hit" : "cache_miss"),
+	const patch = {
+		cache: {
+			checked_at: now,
+			hit: args.hit,
+			adopted: args.adopted,
+			decision: args.decision,
+			reason: args.reason,
+			producer_run_id: args.producer_run_id,
+			contract_signature: args.contract_signature,
+			previous_contract_signature: args.previous_contract_signature,
+			current_contract_signature: args.current_contract_signature,
+			validator_hash: args.validator_hash,
 		},
-		args.runsDir,
-	);
+		last_update_at: now,
+		last_message: args.reason || (args.hit ? "cache_hit" : "cache_miss"),
+	};
+
+	if (args.stateStore) {
+		return args.stateStore.updateStep(args.state.run_id, args.stepId, patch);
+	}
+
+	if (!args.runsDir) {
+		throw new Error("markCacheProbe requires either stateStore or runsDir");
+	}
+
+	return updateStepState(args.state, args.stepId, patch, args.runsDir);
 }

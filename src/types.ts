@@ -68,14 +68,14 @@ export type WorkflowStateConfig = {
 	ttl?: string;
 	materialize_outputs?: MaterializeOutputsMode;
 	redis?: {
-		provider?: "auto" | "native" | "mcp";
+		provider?: "auto" | "native";
 		tool_prefix?: string;
 	};
 };
 
 export type StateBackendResolution = {
 	requested: StateBackendKind;
-	resolved: "filesystem" | "redis-native" | "redis-mcp";
+	resolved: "filesystem" | "redis-native";
 	provider?: string;
 	reason: string;
 	checked_at: string;
@@ -111,6 +111,7 @@ export type ReuseOutputsSpec = {
 export type StepState = {
 	status: StepStatus;
 	started_at: string | null;
+	spawned_at?: string | null;
 	completed_at: string | null;
 	duration_ms: number | null;
 	session_key: string | null;
@@ -182,6 +183,11 @@ export type RunState = {
 	workflow: string;
 	workflow_key: string;
 	status: RunStatus;
+	phase?: string | null;
+	error?: string | null;
+	resumed_as?: string | null;
+	spawned_sessions?: number;
+	state_backend?: StateBackendResolution;
 	started_at: string;
 	completed_at: string | null;
 	cancel_requested_at: string | null;
@@ -352,6 +358,7 @@ export type MaterializeArtifactArgs = {
 export interface WorkflowStateStore {
 	loadRun(runId: string): Promise<RunState>;
 	saveRun(state: RunState): Promise<void>;
+	updateRun(runId: string, patch: Partial<RunState>): Promise<RunState>;
 	updateStep(
 		runId: string,
 		stepId: string,

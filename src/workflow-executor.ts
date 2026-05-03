@@ -50,6 +50,7 @@ import {
 	resolvePathToList,
 	validateLoopItems,
 } from "./list-resolver.js";
+import { FilesystemStateStore } from "./state-artifact-stores.js";
 import {
 	adoptStepContract,
 	buildStepHandoffToken,
@@ -75,10 +76,6 @@ import {
 import {
 	createRunState,
 	getLocalISOString,
-	readRunState,
-	saveRunState,
-	updateRunState,
-	updateStepState,
 } from "./workflow-state.js";
 
 /** Scheduler tick interval in milliseconds. Lower = more responsive but more CPU. */
@@ -181,30 +178,13 @@ export async function executeWorkflow(
 	initialState = null,
 	workflowKey = null,
 ) {
+	let planningError: unknown = null;
 	try {
 		await fs.mkdir(config.runsDir, { recursive: true });
 		const plan = await compileWorkflow(workflow, runId, config);
 		await writeJsonAtomic(join(config.runsDir, `${runId}.plan.json`), plan);
 	} catch (err) {
-		const state =
-			initialState ??
-			createRunState(
-				workflow.name,
-				workflowKey || workflow.name,
-				workflow.steps.map((s) => s.id),
-				runId,
-			);
-		return await updateRunState(
-			state,
-			{
-				status: "failed",
-				phase: "compile",
-				error: err instanceof Error ? err.message : String(err),
-				completed_at: getLocalISOString(),
-				spawned_sessions: 0,
-			},
-			config.runsDir,
-		);
+		planningError = err;
 	}
 
 	const {
@@ -230,28 +210,27 @@ export async function executeWorkflow(
 		redis = null,
 	} = config;
 
-	async function mirrorRunState(nextState) {
-		if (stateStore && typeof stateStore.saveRun === "function") {
-			try {
-				await stateStore.saveRun(nextState);
-			} catch (err) {
-				api?.logger?.warn?.(
-					`[workflow:${runId}] failed to mirror state to configured stateStore`,
-					err,
-				);
-			}
-		}
+	const activeStateStore =
+		stateStore || new FilesystemStateStore(runsDir);
+
+	async function persistRunPatch(patch: Partial<RunState>): Promise<RunState> {
+		return activeStateStore.updateRun(runId, patch);
 	}
 
-	async function loadRunStateSnapshot() {
-		if (stateStore && typeof stateStore.loadRun === "function") {
-			try {
-				return await stateStore.loadRun(runId);
-			} catch {
-				// fall back to filesystem snapshot
-			}
-		}
-		return readRunState(runId, runsDir);
+	async function persistStepPatch(
+		stepId: string,
+		patch: Partial<StepState>,
+	): Promise<RunState> {
+		return activeStateStore.updateStep(runId, stepId, patch);
+	}
+
+	async function persistRunState(nextState: RunState): Promise<RunState> {
+		await activeStateStore.saveRun(nextState);
+		return nextState;
+	}
+
+	async function loadRunStateSnapshot(): Promise<RunState> {
+		return activeStateStore.loadRun(runId);
 	}
 
 	// Build substitution context once for the entire run
@@ -282,14 +261,24 @@ export async function executeWorkflow(
 				runId,
 			);
 
+	await persistRunState(state);
+
+	if (planningError) {
+		return persistRunPatch({
+			status: "failed",
+			phase: "compile",
+			error:
+				planningError instanceof Error
+					? planningError.message
+					: String(planningError),
+			completed_at: getLocalISOString(),
+			spawned_sessions: 0,
+		});
+	}
+
 	// Transition run to 'running' immediately (overwrites 'pending' from fresh create,
 	// or re-sets 'failed'/'cancelled' to 'running' for a resume scenario)
-	state = await updateRunState(
-		state,
-		{ status: "running", completed_at: null },
-		runsDir,
-	);
-	await mirrorRunState(state);
+	state = await persistRunPatch({ status: "running", completed_at: null });
 
 	// Map of step ID → Promise (for in-flight steps)
 	/** @type {Map<string, Promise<void>>} */
@@ -308,7 +297,7 @@ export async function executeWorkflow(
 				try {
 					nextState = await mutator(state);
 					state = nextState;
-					await mirrorRunState(state);
+					await persistRunState(state);
 				} catch (err) {
 					api?.logger?.error?.(
 						`[workflow:${runId}] state mutation failed`,
@@ -405,9 +394,7 @@ export async function executeWorkflow(
 		}
 
 		for (const stepId of toSkip) {
-			await mutateState((current) =>
-				updateStepState(current, stepId, { status: "skipped" }, runsDir),
-			);
+			await mutateState(() => persistStepPatch(stepId, { status: "skipped" }));
 		}
 	}
 
@@ -416,41 +403,32 @@ export async function executeWorkflow(
 		const now = getLocalISOString();
 
 		await mutateState(async (current) => {
-			let next = await updateStepState(
-				current,
-				step.id,
-				{
-					status: step.optional ? "ok" : "failed",
-					started_at: current.steps[step.id]?.started_at ?? now,
-					completed_at: now,
-					duration_ms: current.steps[step.id]?.started_at
-						? Date.now() - new Date(current.steps[step.id].started_at).getTime()
-						: 0,
-					error: step.optional ? null : `Loop expansion failed: ${message}`,
-					logs: JSON.stringify(
-						{
-							phase: "expand_loop",
-							loop_step: step.id,
-							error: message,
-						},
-						null,
-						2,
-					),
-				},
-				runsDir,
-			);
+			let next = await persistStepPatch(step.id, {
+				status: step.optional ? "ok" : "failed",
+				started_at: current.steps[step.id]?.started_at ?? now,
+				completed_at: now,
+				duration_ms: current.steps[step.id]?.started_at
+					? Date.now() - new Date(current.steps[step.id].started_at).getTime()
+					: 0,
+				error: step.optional ? null : `Loop expansion failed: ${message}`,
+				logs: JSON.stringify(
+					{
+						phase: "expand_loop",
+						loop_step: step.id,
+						error: message,
+					},
+					null,
+					2,
+				),
+			});
 
 			if (!step.optional) {
-				next = await updateRunState(
-					next,
-					{
-						status: "failed",
-						phase: "expand_loop",
-						completed_at: now,
-						error: `Loop expansion failed in ${step.id}: ${message}`,
-					},
-					runsDir,
-				);
+				next = await persistRunPatch({
+					status: "failed",
+					phase: "expand_loop",
+					completed_at: now,
+					error: `Loop expansion failed in ${step.id}: ${message}`,
+				});
 			}
 
 			return next;
@@ -619,53 +597,46 @@ export async function executeWorkflow(
 				await mutateState(async (current) => {
 					const next = await adoptStepContract({
 						state: current,
-						runsDir,
+						stateStore: activeStateStore,
 						stepId: step.id,
 						outputCheck: recheck,
 						reason: "generated",
 						message: `Late handoff adopted (attempt ${candidate.attempt})`,
 					});
-					return updateStepState(
-						next,
-						step.id,
-						{ late_success_candidate: null, attempts },
-						runsDir,
-					);
+					return activeStateStore.updateStep(runId, step.id, {
+						late_success_candidate: null,
+						attempts,
+					});
 				});
 				await notify(`✅ ${step.name} complete (late handoff adopted)`);
 				return;
 			}
 		}
 
-		await mutateState((current) =>
-			updateStepState(
-				current,
-				step.id,
-				{
-					status: "running",
-					started_at: getLocalISOString(),
-					retry_not_before: null,
-					attempts,
-					declared_outputs: step.outputs || [],
-					...(attempts === 1 ? { first_started_at_ms: Date.now() } : {}),
+		await mutateState(() =>
+			persistStepPatch(step.id, {
+				status: "running",
+				started_at: getLocalISOString(),
+				retry_not_before: null,
+				attempts,
+				declared_outputs: step.outputs || [],
+				...(attempts === 1 ? { first_started_at_ms: Date.now() } : {}),
 
-					session_key: null,
-					session_id: null,
-					subagent_run_id: null,
-					session_adapter: sessionAdapter,
-					handoff_token: handoffToken,
-					handoff: null,
-					output_writes: null,
-					late_success_candidate: null,
+				session_key: null,
+				session_id: null,
+				subagent_run_id: null,
+				session_adapter: sessionAdapter,
+				handoff_token: handoffToken,
+				handoff: null,
+				output_writes: null,
+				late_success_candidate: null,
 
-					cancel_requested_at: null,
-					cancel_confirmed_at: null,
-					cancel_method: null,
-					cancel_error: null,
-					cancellation_reason: null,
-				},
-				runsDir,
-			),
+				cancel_requested_at: null,
+				cancel_confirmed_at: null,
+				cancel_method: null,
+				cancel_error: null,
+				cancellation_reason: null,
+			}),
 		);
 
 			const promise = (async () => {
@@ -716,20 +687,15 @@ export async function executeWorkflow(
 						getStepState: () => state.steps[step.id],
 
 						onSpawn: async (spawn) => {
-							await mutateState((current) =>
-								updateStepState(
-									current,
-									step.id,
-									{
-										status: "running",
-										session_key: spawn.sessionKey,
-										session_id: spawn.sessionId,
-										subagent_run_id: spawn.sessionId,
-										session_adapter: spawn.sessionAdapter,
-										spawned_at: spawn.spawnedAt,
-									},
-									runsDir,
-								),
+							await mutateState(() =>
+								persistStepPatch(step.id, {
+									status: "running",
+									session_key: spawn.sessionKey,
+									session_id: spawn.sessionId,
+									subagent_run_id: spawn.sessionId,
+									session_adapter: spawn.sessionAdapter,
+									spawned_at: spawn.spawnedAt,
+								}),
 							);
 						},
 					});
@@ -748,9 +714,9 @@ export async function executeWorkflow(
 				if (step.kind === "plugin" && result.output_writes) {
 					await mutateState((current) => {
 						const existing = current.steps[step.id]?.output_writes ?? {};
-						return updateStepState(current, step.id, {
+						return persistStepPatch(step.id, {
 							output_writes: { ...existing, ...result.output_writes },
-						}, runsDir);
+						});
 					});
 				}
 
@@ -767,22 +733,17 @@ export async function executeWorkflow(
 
 				if (result.status === "ok") {
 					// Success path
-					await mutateState((current) =>
-						updateStepState(
-							current,
-							step.id,
-							{
-								status: "ok",
-								completed_at: completedAt,
-								duration_ms: durationMs,
-								session_key: result.session_key,
-								output_check: result.output_check,
-								error: null,
-								logs: result.logs,
-								attempts,
-							},
-							runsDir,
-						),
+					await mutateState(() =>
+						persistStepPatch(step.id, {
+							status: "ok",
+							completed_at: completedAt,
+							duration_ms: durationMs,
+							session_key: result.session_key,
+							output_check: result.output_check,
+							error: null,
+							logs: result.logs,
+							attempts,
+						}),
 					);
 
 					try {
@@ -813,22 +774,17 @@ export async function executeWorkflow(
 					await notify(`✅ ${step.name} complete (${durationSec}s)`);
 				} else if (result.status === "blocked") {
 					// Blocked path — non-retryable terminal state
-					await mutateState((current) =>
-						updateStepState(
-							current,
-							step.id,
-							{
-								status: "blocked",
-								completed_at: completedAt,
-								duration_ms: durationMs,
-								session_key: result.session_key,
-								output_check: result.output_check,
-								error: result.error,
-								logs: result.logs,
-								attempts,
-							},
-							runsDir,
-						),
+					await mutateState(() =>
+						persistStepPatch(step.id, {
+							status: "blocked",
+							completed_at: completedAt,
+							duration_ms: durationMs,
+							session_key: result.session_key,
+							output_check: result.output_check,
+							error: result.error,
+							logs: result.logs,
+							attempts,
+						}),
 					);
 
 					try {
@@ -943,62 +899,52 @@ export async function executeWorkflow(
 							new Date(Date.now() + step.retry_delay * 1000),
 						);
 
-						await mutateState((current) =>
-							updateStepState(
-								current,
-								step.id,
-								{
-									status: "pending",
-									retry_not_before: retryNotBefore,
-									error: result.error,
-									logs: result.logs,
-									attempts,
-									cancel_requested_at: result.cancel_result?.requested
-										? completedAt
-										: null,
-									cancel_confirmed_at: result.cancel_result?.confirmed
-										? completedAt
-										: null,
-									cancel_method: result.cancel_result?.method ?? null,
-									cancel_error: result.cancel_result?.error ?? null,
-									cancellation_reason: result.cancel_result?.requested
-										? `workflow_step_timeout:${step.id}`
-										: null,
-								},
-								runsDir,
-							),
+						await mutateState(() =>
+							persistStepPatch(step.id, {
+								status: "pending",
+								retry_not_before: retryNotBefore,
+								error: result.error,
+								logs: result.logs,
+								attempts,
+								cancel_requested_at: result.cancel_result?.requested
+									? completedAt
+									: null,
+								cancel_confirmed_at: result.cancel_result?.confirmed
+									? completedAt
+									: null,
+								cancel_method: result.cancel_result?.method ?? null,
+								cancel_error: result.cancel_result?.error ?? null,
+								cancellation_reason: result.cancel_result?.requested
+									? `workflow_step_timeout:${step.id}`
+									: null,
+							}),
 						);
 
 						return;
 					} else {
 						// All retries exhausted — mark as failed
-						await mutateState((current) =>
-							updateStepState(
-								current,
-								step.id,
-								{
-									status: "failed",
-									completed_at: completedAt,
-									duration_ms: durationMs,
-									session_key: result.session_key,
-									output_check: result.output_check,
-									error: result.error,
-									logs: result.logs,
-									attempts,
-									cancel_requested_at: result.cancel_result?.requested
-										? completedAt
-										: null,
-									cancel_confirmed_at: result.cancel_result?.confirmed
-										? completedAt
-										: null,
-									cancel_method: result.cancel_result?.method ?? null,
-									cancel_error: result.cancel_result?.error ?? null,
-									cancellation_reason: result.cancel_result?.requested
-										? `workflow_step_timeout:${step.id}`
-										: null,
-								},
-								runsDir,
-							),
+						await mutateState(() =>
+							persistStepPatch(step.id, {
+								status: "failed",
+								completed_at: completedAt,
+								duration_ms: durationMs,
+								session_key: result.session_key,
+								output_check: result.output_check,
+								error: result.error,
+								logs: result.logs,
+								attempts,
+								cancel_requested_at: result.cancel_result?.requested
+									? completedAt
+									: null,
+								cancel_confirmed_at: result.cancel_result?.confirmed
+									? completedAt
+									: null,
+								cancel_method: result.cancel_result?.method ?? null,
+								cancel_error: result.cancel_result?.error ?? null,
+								cancellation_reason: result.cancel_result?.requested
+									? `workflow_step_timeout:${step.id}`
+									: null,
+							}),
 						);
 
 						const wasRetried = step.retry > 0;
@@ -1081,7 +1027,7 @@ export async function executeWorkflow(
 			await mutateState((current) =>
 				markCacheProbe({
 					state: current,
-					runsDir,
+					stateStore: activeStateStore,
 					stepId: step.id,
 					hit: true,
 					adopted: false,
@@ -1106,7 +1052,7 @@ export async function executeWorkflow(
 			await mutateState(async (current) => {
 				let next = await markCacheProbe({
 					state: current,
-					runsDir,
+					stateStore: activeStateStore,
 					stepId: step.id,
 					hit: true,
 					adopted: true,
@@ -1119,7 +1065,7 @@ export async function executeWorkflow(
 
 				next = await adoptStepContract({
 					state: next,
-					runsDir,
+					stateStore: activeStateStore,
 					stepId: step.id,
 					outputCheck,
 					reason: step.reuse_outputs?.on_hit?.reason || "cache_hit",
@@ -1141,7 +1087,7 @@ export async function executeWorkflow(
 		await mutateState((current) =>
 			markCacheProbe({
 				state: current,
-				runsDir,
+				stateStore: activeStateStore,
 				stepId: step.id,
 				hit: false,
 				adopted: false,
@@ -1154,18 +1100,13 @@ export async function executeWorkflow(
 		);
 
 		if (step.reuse_outputs?.on_invalid === "fail_step") {
-			await mutateState((current) =>
-				updateStepState(
-					current,
-					step.id,
-					{
-						status: "failed",
-						completed_at: getLocalISOString(),
-						output_check: outputCheck,
-						error: `Cache validation failed (${outputCheck.decision}) and on_invalid=fail_step`,
-					},
-					runsDir,
-				),
+			await mutateState(() =>
+				persistStepPatch(step.id, {
+					status: "failed",
+					completed_at: getLocalISOString(),
+					output_check: outputCheck,
+					error: `Cache validation failed (${outputCheck.decision}) and on_invalid=fail_step`,
+				}),
 			);
 
 			if (!step.optional) {
@@ -1214,17 +1155,12 @@ export async function executeWorkflow(
 								? "blocked"
 								: "ok";
 
-					await mutateState((current) =>
-						updateStepState(
-							current,
-							step.id,
-							{
-								status: parentStatus,
-								completed_at: completedAt,
-								duration_ms: durationMs,
-							},
-							runsDir,
-						),
+					await mutateState(() =>
+						persistStepPatch(step.id, {
+							status: parentStatus,
+							completed_at: completedAt,
+							duration_ms: durationMs,
+						}),
 					);
 
 					if (parentStatus === "failed" || parentStatus === "blocked") {
@@ -1246,24 +1182,18 @@ export async function executeWorkflow(
 					// External cancel: mark running steps as cancellation-requested, drain active promises, and exit.
 					for (const [stepId] of inFlight.entries()) {
 						await mutateState((current) =>
-							updateStepState(
-								current,
-								stepId,
-								{
-									cancel_requested_at:
-										current.steps[stepId]?.cancel_requested_at ||
-										getLocalISOString(),
-									cancellation_reason:
-										current.steps[stepId]?.cancellation_reason ||
-										`external_cancel:${runId}`,
-								},
-								runsDir,
-							),
+							persistStepPatch(stepId, {
+								cancel_requested_at:
+									current.steps[stepId]?.cancel_requested_at || getLocalISOString(),
+								cancellation_reason:
+									current.steps[stepId]?.cancellation_reason ||
+									`external_cancel:${runId}`,
+							}),
 						);
 					}
 
 					await Promise.allSettled([...inFlight.values()]);
-					return await readRunState(runId, runsDir);
+					return await activeStateStore.loadRun(runId);
 				}
 			} catch {
 				// If we can't read the state file, continue with in-memory state
@@ -1306,27 +1236,20 @@ export async function executeWorkflow(
 
 				if (blocked_final) {
 					// Dep failed and not optional — skip this step
-					await mutateState((current) =>
-						updateStepState(current, step.id, { status: "skipped" }, runsDir),
-					);
+					await mutateState(() => persistStepPatch(step.id, { status: "skipped" }));
 					continue;
 				}
 
 				if (ready_final) {
 					if (step.for_each) {
 						await mutateState((current) =>
-							updateStepState(
-								current,
-								step.id,
-								{
-									status: "running",
-									started_at:
-										current.steps[step.id]?.started_at ?? getLocalISOString(),
-									attempts: (current.steps[step.id]?.attempts || 0) + 1,
-									error: null,
-								},
-								runsDir,
-							),
+							persistStepPatch(step.id, {
+								status: "running",
+								started_at:
+									current.steps[step.id]?.started_at ?? getLocalISOString(),
+								attempts: (current.steps[step.id]?.attempts || 0) + 1,
+								error: null,
+							}),
 						);
 
 						try {
@@ -1399,38 +1322,23 @@ export async function executeWorkflow(
 								for (const child of expandedChildren) {
 									steps.push(child);
 									stepMap.set(child.id, child);
-									await mutateState((current) =>
-										updateStepState(
-											current,
-											child.id,
-											{ status: "pending" },
-											runsDir,
-										),
+									await mutateState(() =>
+										persistStepPatch(child.id, { status: "pending" }),
 									);
 								}
 							}
 
 							if (expandedChildren.length > 0) {
-								await mutateState((current) =>
-									updateStepState(
-										current,
-										step.id,
-										{ status: "running" },
-										runsDir,
-									),
+								await mutateState(() =>
+									persistStepPatch(step.id, { status: "running" }),
 								);
 							} else {
-								await mutateState((current) =>
-									updateStepState(
-										current,
-										step.id,
-										{
-											status: "ok",
-											completed_at: getLocalISOString(),
-											duration_ms: 0,
-										},
-										runsDir,
-									),
+								await mutateState(() =>
+									persistStepPatch(step.id, {
+										status: "ok",
+										completed_at: getLocalISOString(),
+										duration_ms: 0,
+									}),
 								);
 							}
 
@@ -1467,17 +1375,12 @@ export async function executeWorkflow(
 						await notify(`📊 List length for ${step.id}: ${list.length}`);
 
 						if (list.length === 0) {
-							await mutateState((current) =>
-								updateStepState(
-									current,
-									step.id,
-									{
-										status: "ok",
-										completed_at: getLocalISOString(),
-										duration_ms: 0,
-									},
-									runsDir,
-								),
+							await mutateState(() =>
+								persistStepPatch(step.id, {
+									status: "ok",
+									completed_at: getLocalISOString(),
+									duration_ms: 0,
+								}),
 							);
 							await notify(`⏩ Skipped ${step.name} (input data empty)`);
 							continue;
@@ -1519,19 +1422,14 @@ export async function executeWorkflow(
 		);
 	});
 
-	let finalStatus = "ok";
+	let finalStatus: RunState["status"] = "ok";
 	if (anyNonOptionalBlocked) finalStatus = "blocked";
 	else if (anyNonOptionalFailed) finalStatus = "failed";
 
-	state = await updateRunState(
-		state,
-		{
-			status: finalStatus,
-			completed_at: getLocalISOString(),
-		},
-		runsDir,
-	);
-	await mirrorRunState(state);
+	state = await persistRunPatch({
+		status: finalStatus,
+		completed_at: getLocalISOString(),
+	});
 
 	// ── Final notification ─────────────────────────────────────────────────────
 	const okCount = finalStepStatuses.filter((s) => s === "ok").length;
@@ -1584,8 +1482,6 @@ export async function resumeWorkflow(
 	stepRunner,
 	workflowKey = null,
 ) {
-	const { runsDir } = config;
-
 	// Build a new state based on the previous one, resetting non-ok steps.
 	// Steps that were 'ok' in the previous run are preserved — they'll be
 	// skipped by the executor's scheduler loop (which only launches 'pending' steps).
@@ -1607,11 +1503,12 @@ export async function resumeWorkflow(
 		// All other statuses (failed, skipped, running) remain as 'pending' (reset to retry)
 	}
 
-	// Save the bootstrapped state before running so it's on disk for status checks
-	await saveRunState(state, runsDir);
-	if (config.stateStore && typeof config.stateStore.saveRun === "function") {
-		await config.stateStore.saveRun(state);
+	if (!config.stateStore || typeof config.stateStore.saveRun !== "function") {
+		throw new Error("resumeWorkflow requires stateStore.saveRun");
 	}
+
+	// Save the bootstrapped state before running so it's on disk for status checks
+	await config.stateStore.saveRun(state);
 
 	// Pass initialState so executeWorkflow doesn't overwrite our pre-seeded ok steps
 	return executeWorkflow(

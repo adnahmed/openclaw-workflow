@@ -606,7 +606,11 @@ function normalizeAndValidate(raw, filePath) {
 					redis:
 						raw.state.redis && typeof raw.state.redis === "object"
 							? {
-								provider: raw.state.redis.provider || "auto",
+								provider: (
+									raw.state.redis.provider === "native"
+										? "native"
+										: "auto"
+								) as "auto" | "native",
 								tool_prefix: raw.state.redis.tool_prefix || "MCP_DOCKER",
 							}
 							: undefined,

@@ -50,13 +50,8 @@ import { createDefaultRegistry } from "./plugin-operations.js";
 import { resolveRedisClient } from "./redis-client.js";
 import {
 	createRunState,
-	findLatestRun,
 	generateRunId,
 	getLocalISOString,
-	listRuns,
-	readRunState,
-	updateRunState,
-	updateStepState,
 } from "./workflow-state.js";
 
 function textResult(data) {
@@ -152,58 +147,143 @@ export default definePluginEntry({
 			baseDir,
 			config.materializeOutputs || "on_demand",
 		);
-		const stateStore = filesystemStateStore;
-		const artifactStore = filesystemArtifactStore;
+		const redisPrefix =
+			config.redisPrefix ||
+			process.env.OPENCLAW_WORKFLOW_REDIS_PREFIX ||
+			"openclaw:workflow";
 
 		// Plugin registry — always created with default built-ins
 		const pluginRegistry = createDefaultRegistry();
 
-		async function buildExecutorConfig(workflow, notify) {
-			const backendResolution = resolveStateBackend({
-				workflowState: workflow?.state,
-				pluginConfig: {
-					stateBackend: config.stateBackend,
-					redisUrl: config.redisUrl,
-					redisMcpToolPrefix: config.redisMcpToolPrefix,
-					filesystemFallback: config.filesystemFallback,
-				},
-			});
+		let redisClientPromise: Promise<any> | null = null;
 
-			// Resolve Redis client per call (graceful fallback to null)
-			let redis = null;
-			if (config.redisUrl || config.redisMcpToolPrefix) {
+		async function resolveRedisHandle() {
+			const redisUrl =
+				config.redisUrl || process.env.OPENCLAW_WORKFLOW_REDIS_URL || null;
+			if (!redisUrl) return null;
+			if (!redisClientPromise) {
+				redisClientPromise = resolveRedisClient({
+					url: redisUrl,
+					keyPrefix: undefined,
+					filesystemFallback: config.filesystemFallback !== false,
+				}).catch((err) => {
+					logger.warn(
+						`[workflow] Redis client init failed: ${err?.message ?? err}`,
+					);
+					return null;
+				});
+			}
+			return redisClientPromise;
+		}
+
+		function filesystemRuntime() {
+			return {
+				stateStore: filesystemStateStore,
+				artifactStore: filesystemArtifactStore,
+				stateBackendResolution: {
+					requested: "filesystem",
+					resolved: "filesystem",
+					reason: "filesystem runtime",
+					checked_at: getLocalISOString(),
+					fallback: "filesystem",
+				},
+				redis: null,
+			};
+		}
+
+		async function redisRuntime() {
+			const redis = await resolveRedisHandle();
+			if (!redis) return null;
+			return {
+				stateStore: new RedisStateStore(redis, redisPrefix),
+				artifactStore: new RedisArtifactStore(
+					redis,
+					baseDir,
+					redisPrefix,
+					config.materializeOutputs || "on_demand",
+				),
+				stateBackendResolution: {
+					requested: "redis",
+					resolved: "redis-native",
+					reason: "redis runtime",
+					checked_at: getLocalISOString(),
+					fallback: "filesystem",
+				},
+				redis,
+			};
+		}
+
+		async function resolveWorkflowRuntime(workflowOrRun?: any) {
+			const fsRuntime = filesystemRuntime();
+
+			const runId =
+				typeof workflowOrRun === "string"
+					? workflowOrRun
+					: workflowOrRun?.run_id || null;
+
+			if (runId) {
+				const redisRt = await redisRuntime();
+				if (redisRt) {
+					try {
+						await redisRt.stateStore.loadRun(runId);
+						return redisRt;
+					} catch {
+						// Fall through to filesystem.
+					}
+				}
+
 				try {
-					redis = await resolveRedisClient({
-						url: config.redisUrl,
-						mcpToolPrefix: config.redisMcpToolPrefix,
-						api,
-						filesystemFallback: config.filesystemFallback !== false,
-					});
-				} catch (redisErr) {
-					logger.warn(`[workflow] Redis client init failed: ${redisErr?.message ?? redisErr}`);
+					const fsState = await fsRuntime.stateStore.loadRun(runId);
+					if (fsState?.state_backend?.resolved === "redis-native" && redisRt) {
+						return redisRt;
+					}
+					return fsRuntime;
+				} catch {
+					if (redisRt) return redisRt;
+					throw new Error(`Run not found: ${runId}`);
 				}
 			}
 
-			let stateStore: WorkflowStateStore = filesystemStateStore;
-			let artifactStore: WorkflowArtifactStore = filesystemArtifactStore;
+			const backendResolution =
+				workflowOrRun?.state_backend ||
+				resolveStateBackend({
+					workflowState: workflowOrRun?.state,
+					pluginConfig: {
+						stateBackend: config.stateBackend,
+						redisUrl:
+							config.redisUrl ||
+							process.env.OPENCLAW_WORKFLOW_REDIS_URL ||
+							null,
+						filesystemFallback: config.filesystemFallback,
+					},
+				});
 
-			if (redis && backendResolution.resolved === "redis-native") {
-				stateStore = new RedisStateStore(redis);
-				artifactStore = new RedisArtifactStore(
-					redis,
-					baseDir,
-					"openclaw:workflow",
-					config.materializeOutputs || "on_demand",
-				);
+			if (backendResolution?.resolved === "redis-native") {
+				const redisRt = await redisRuntime();
+				if (redisRt) {
+					return {
+						...redisRt,
+						stateBackendResolution: backendResolution,
+					};
+				}
 			}
+
+			return {
+				...fsRuntime,
+				stateBackendResolution: backendResolution,
+			};
+		}
+
+		async function buildExecutorConfig(workflow, notify) {
+			const runtime = await resolveWorkflowRuntime(workflow);
 
 			return {
 				runsDir,
 				baseDir,
 				concurrency: workflow.concurrency ?? concurrencyDefault,
-				stateStore,
-				artifactStore,
-				stateBackendResolution: backendResolution,
+				stateStore: runtime.stateStore,
+				artifactStore: runtime.artifactStore,
+				stateBackendResolution: runtime.stateBackendResolution,
 				filesystemFallback: config.filesystemFallback,
 				notify,
 				pollIntervalMs,
@@ -218,64 +298,8 @@ export default definePluginEntry({
 				cancelGraceMs,
 				workflowsDir,
 				pluginRegistry,
-				redis,
+				redis: runtime.redis,
 			};
-		}
-
-		let redisClientPromise: Promise<any> | null = null;
-
-		async function resolveRedisHandle() {
-			if (!config.redisUrl && !config.redisMcpToolPrefix) return null;
-			if (!redisClientPromise) {
-				redisClientPromise = resolveRedisClient({
-					url: config.redisUrl,
-					mcpToolPrefix: config.redisMcpToolPrefix,
-					api,
-					filesystemFallback: config.filesystemFallback !== false,
-				}).catch((err) => {
-					logger.warn(`[workflow] Redis client init failed: ${err?.message ?? err}`);
-					return null;
-				});
-			}
-			return redisClientPromise;
-		}
-
-		function isRedisResolvedBackend(backendResolution: any): boolean {
-			return (
-				backendResolution?.resolved === "redis-native" ||
-				backendResolution?.resolved === "redis-mcp"
-			);
-		}
-
-		async function resolveArtifactStoreForRun(args: {
-			runState?: RunState | null;
-			workflow?: any;
-		}) {
-			const backendResolution =
-				(args.runState as any)?.state_backend ||
-				resolveStateBackend({
-					workflowState: args.workflow?.state,
-					pluginConfig: {
-						stateBackend: config.stateBackend,
-						redisUrl: config.redisUrl,
-						redisMcpToolPrefix: config.redisMcpToolPrefix,
-						filesystemFallback: config.filesystemFallback,
-					},
-				});
-
-			if (!isRedisResolvedBackend(backendResolution)) {
-				return filesystemArtifactStore;
-			}
-
-			const redis = await resolveRedisHandle();
-			if (!redis) return filesystemArtifactStore;
-
-			return new RedisArtifactStore(
-				redis,
-				baseDir,
-				"openclaw:workflow",
-				config.materializeOutputs || "on_demand",
-			);
 		}
 
 		function buildNotifier() {
@@ -301,17 +325,14 @@ export default definePluginEntry({
 				}`,
 			);
 			try {
-				const state = await readRunState(runId, runsDir);
+				const runtime = await resolveWorkflowRuntime(runId);
+				const state = await runtime.stateStore.loadRun(runId);
 				if (!["ok", "failed", "cancelled"].includes(state.status)) {
-					await updateRunState(
-						state,
-						{
-							status: "failed",
-							completed_at: getLocalISOString(),
-							error: message,
-						},
-						runsDir,
-					);
+					await runtime.stateStore.updateRun(runId, {
+						status: "failed",
+						completed_at: getLocalISOString(),
+						error: message,
+					});
 				}
 			} catch (stateErr) {
 				logger.error(
@@ -360,8 +381,21 @@ export default definePluginEntry({
 		}
 
 		async function autoResumeInterruptedRuns() {
-			const runs = await listRuns(runsDir);
-			const interrupted = runs.filter((run) => run.status === "running");
+			const stores: WorkflowStateStore[] = [filesystemStateStore];
+			const redisRt = await redisRuntime();
+			if (redisRt) stores.push(redisRt.stateStore);
+
+			const interruptedMap = new Map<string, RunState>();
+			for (const store of stores) {
+				try {
+					const runs = await store.listRuns({ status: "running" });
+					for (const run of runs) interruptedMap.set(run.run_id, run as RunState);
+				} catch {
+					// Ignore inaccessible backend during auto-resume scan.
+				}
+			}
+
+			const interrupted = [...interruptedMap.values()];
 
 			if (interrupted.length === 0) {
 				logger.info("[workflow] auto-resume: no interrupted runs found");
@@ -377,16 +411,13 @@ export default definePluginEntry({
 					const workflow = await loadWorkflowForRun(previousRun);
 					const newRunId = generateRunId(workflow.name);
 
-					await updateRunState(
-						previousRun,
-						{
-							status: "failed",
-							completed_at: getLocalISOString(),
-							error: `Gateway restart detected; auto-resumed as ${newRunId}`,
-							resumed_as: newRunId,
-						},
-						runsDir,
-					);
+					const runtime = await resolveWorkflowRuntime(previousRun);
+					await runtime.stateStore.updateRun(previousRun.run_id, {
+						status: "failed",
+						completed_at: getLocalISOString(),
+						error: `Gateway restart detected; auto-resumed as ${newRunId}`,
+						resumed_as: newRunId,
+					});
 
 					const notify = buildNotifier();
 					const execConfig = await buildExecutorConfig(workflow, notify);
@@ -465,7 +496,8 @@ export default definePluginEntry({
 						return errorResult("Provide one of: path or output_id.");
 					}
 
-					let state = await stateStore.loadRun(run_id);
+					const runtime = await resolveWorkflowRuntime(run_id);
+					let state = await runtime.stateStore.loadRun(run_id);
 					const step = (state as RunState).steps?.[step_id] as
 						| StepState
 						| undefined;
@@ -506,10 +538,6 @@ export default definePluginEntry({
 					}
 
 					const workflow = await loadWorkflowForRun(state as RunState);
-					const runArtifactStore = await resolveArtifactStoreForRun({
-						runState: state as RunState,
-						workflow,
-					});
 
 					const result = await writeDeclaredOutput({
 						workflow,
@@ -521,7 +549,7 @@ export default definePluginEntry({
 						text,
 						baseDir,
 						workflowsDir,
-						artifactStore: runArtifactStore,
+						artifactStore: runtime.artifactStore,
 						materializeMode: config.materializeOutputs,
 						attempt,
 						session_key,
@@ -541,7 +569,7 @@ export default definePluginEntry({
 						[outputKey]: result.provenance,
 					};
 
-					state = await stateStore.updateStep(
+					state = await runtime.stateStore.updateStep(
 						run_id,
 						step_id,
 						{
@@ -586,15 +614,8 @@ export default definePluginEntry({
 				} = readParams(first, second);
 				try {
 					const workflow = await loadWorkflow(name, workflowsDir);
-					const backendResolution = resolveStateBackend({
-						workflowState: workflow.state,
-						pluginConfig: {
-							stateBackend: config.stateBackend,
-							redisUrl: config.redisUrl,
-							redisMcpToolPrefix: config.redisMcpToolPrefix,
-							filesystemFallback: config.filesystemFallback,
-						},
-					});
+					const runtime = await resolveWorkflowRuntime(workflow);
+					const backendResolution = runtime.stateBackendResolution;
 					const runId = generateRunId(workflow.name);
 
 					if (dry_run) {
@@ -610,7 +631,10 @@ export default definePluginEntry({
 					const execConfig = await buildExecutorConfig(workflow, notify);
 
 					if (resume) {
-						const lastRun = await findLatestRun(name, runsDir);
+						const [lastRun] = await runtime.stateStore.listRuns({
+							workflow: name,
+							limit: 1,
+						});
 						if (!lastRun) {
 							return errorResult(
 								`No previous run found for workflow "${name}" to resume from. Run without resume:true to start fresh.`,
@@ -652,16 +676,13 @@ export default definePluginEntry({
 						workflow.steps.map((s) => s.id),
 						runId,
 					);
-
-					const runningState = await updateRunState(
-						initialState,
-						{
-							status: "running",
-							completed_at: null,
-							state_backend: backendResolution,
-						},
-						runsDir,
-					);
+					const runningState: RunState = {
+						...initialState,
+						status: "running" as const,
+						completed_at: null,
+						state_backend: backendResolution,
+					};
+					await runtime.stateStore.saveRun(runningState);
 
 					runInBackground(
 						runId,
@@ -714,11 +735,9 @@ export default definePluginEntry({
 				);
 
 				try {
-					const runState = await readRunState(run_id, runsDir);
-					const runArtifactStore = await resolveArtifactStoreForRun({
-						runState,
-					});
-					const artifact = await runArtifactStore.readArtifact(
+					const runtime = await resolveWorkflowRuntime(run_id);
+					await runtime.stateStore.loadRun(run_id);
+					const artifact = await runtime.artifactStore.readArtifact(
 						run_id,
 						step_id,
 						output_id,
@@ -729,17 +748,17 @@ export default definePluginEntry({
 						);
 					}
 
-					let payload = artifact.data;
-					if (Array.isArray(payload) && typeof limit === "number") {
-						payload = payload.slice(0, Math.max(1, limit));
+					let projected = artifact.data;
+					if (Array.isArray(projected) && typeof limit === "number") {
+						projected = projected.slice(0, Math.max(1, limit));
 					}
 
 					if (
-						Array.isArray(payload) &&
+						Array.isArray(projected) &&
 						Array.isArray(fields) &&
 						fields.length > 0
 					) {
-						payload = payload.map((item) => {
+						projected = projected.map((item) => {
 							if (!item || typeof item !== "object") return item;
 							const picked = {};
 							for (const key of fields) {
@@ -751,17 +770,29 @@ export default definePluginEntry({
 						});
 					}
 
+					const totalCount = Array.isArray(artifact.data)
+						? artifact.data.length
+						: 1;
+					const items = Array.isArray(projected)
+						? projected
+						: [projected];
+
 					return textResult({
+						ok: true,
 						run_id,
 						step_id,
 						output_id,
-						validator: artifact.validator,
-						decision: artifact.decision,
-						bytes: artifact.bytes,
-						sha256: artifact.sha256,
-						stored: artifact.storage_backend,
-						materialized_path: artifact.materialized_path || null,
-						data: payload,
+						count: items.length,
+						total_count: totalCount,
+						items,
+						meta: {
+							validator: artifact.validator,
+							decision: artifact.decision,
+							bytes: artifact.bytes,
+							sha256: artifact.sha256,
+							storage_backend: artifact.storage_backend,
+							materialized_path: artifact.materialized_path ?? null,
+						},
 					});
 				} catch (err) {
 					return errorResult(err instanceof Error ? err.message : String(err));
@@ -777,11 +808,12 @@ export default definePluginEntry({
 			async execute(first, second) {
 				const { run_id, step_id } = readParams(first, second);
 				try {
-					const runState = await readRunState(run_id, runsDir);
-					const runArtifactStore = await resolveArtifactStoreForRun({
-						runState,
-					});
-					const artifacts = await runArtifactStore.listArtifacts(run_id, step_id);
+					const runtime = await resolveWorkflowRuntime(run_id);
+					await runtime.stateStore.loadRun(run_id);
+					const artifacts = await runtime.artifactStore.listArtifacts(
+						run_id,
+						step_id,
+					);
 					return textResult({
 						run_id,
 						step_id: step_id || null,
@@ -802,11 +834,9 @@ export default definePluginEntry({
 			async execute(first, second) {
 				const { run_id, step_id, output_id, path } = readParams(first, second);
 				try {
-					const runState = await readRunState(run_id, runsDir);
-					const runArtifactStore = await resolveArtifactStoreForRun({
-						runState,
-					});
-					const materializedPath = await runArtifactStore.materializeArtifact({
+					const runtime = await resolveWorkflowRuntime(run_id);
+					await runtime.stateStore.loadRun(run_id);
+					const materializedPath = await runtime.artifactStore.materializeArtifact({
 						runId: run_id,
 						stepId: step_id,
 						outputId: output_id,
@@ -837,9 +867,16 @@ export default definePluginEntry({
 				try {
 					let state: RunState | null = null;
 					if (run_id) {
-						state = await readRunState(run_id, runsDir);
+						const runtime = await resolveWorkflowRuntime(run_id);
+						state = await runtime.stateStore.loadRun(run_id);
 					} else if (name) {
-						state = await findLatestRun(name, runsDir);
+						const workflow = await loadWorkflow(name, workflowsDir);
+						const runtime = await resolveWorkflowRuntime(workflow);
+						const [latest] = await runtime.stateStore.listRuns({
+							workflow: name,
+							limit: 1,
+						});
+						state = latest || null;
 						if (!state)
 							return errorResult(`No runs found for workflow "${name}"`);
 					} else {
@@ -907,7 +944,8 @@ export default definePluginEntry({
 			async execute(first, second) {
 				const { run_id, include_steps = true } = readParams(first, second);
 				try {
-					const state = await stateStore.loadRun(run_id);
+					const runtime = await resolveWorkflowRuntime(run_id);
+					const state = await runtime.stateStore.loadRun(run_id);
 					const snapshot = include_steps
 						? state
 						: {
@@ -942,7 +980,18 @@ export default definePluginEntry({
 					const availableWorkflows = await listWorkflows(workflowsDir);
 					const workflows = await Promise.all(
 						availableWorkflows.map(async (workflow) => {
-							const lastRun = await findLatestRun(workflow.name, runsDir);
+							let lastRun = null;
+							try {
+								const loaded = await loadWorkflow(workflow.name, workflowsDir);
+								const runtime = await resolveWorkflowRuntime(loaded);
+								const [latest] = await runtime.stateStore.listRuns({
+									workflow: workflow.name,
+									limit: 1,
+								});
+								lastRun = latest || null;
+							} catch {
+								lastRun = null;
+							}
 							return {
 								name: workflow.name,
 								display_name: workflow.displayName || workflow.name,
@@ -984,7 +1033,8 @@ export default definePluginEntry({
 				);
 
 				try {
-					let state = await readRunState(run_id, runsDir);
+					const runtime = await resolveWorkflowRuntime(run_id);
+					let state = await runtime.stateStore.loadRun(run_id);
 					const step = (state as RunState).steps?.[step_id] as
 						| StepState
 						| undefined;
@@ -1007,18 +1057,13 @@ export default definePluginEntry({
 						...(counters || {}),
 					};
 
-					state = await updateStepState(
-						state,
-						step_id,
-						{
-							reported_status: status || step.reported_status || "progress",
-							counters:
-								Object.keys(mergedCounters).length > 0 ? mergedCounters : null,
-							last_update_at: now,
-							last_message: message || step.last_message || null,
-						},
-						runsDir,
-					);
+					state = await runtime.stateStore.updateStep(run_id, step_id, {
+						reported_status: status || step.reported_status || "progress",
+						counters:
+							Object.keys(mergedCounters).length > 0 ? mergedCounters : null,
+						last_update_at: now,
+						last_message: message || step.last_message || null,
+					});
 
 					return textResult({
 						ok: true,
@@ -1061,7 +1106,8 @@ export default definePluginEntry({
 				} = params;
 
 				try {
-					let state = await readRunState(run_id, runsDir);
+					const runtime = await resolveWorkflowRuntime(run_id);
+					let state = await runtime.stateStore.loadRun(run_id);
 					const step = (state as RunState).steps?.[step_id] as
 						| StepState
 						| undefined;
@@ -1099,10 +1145,7 @@ export default definePluginEntry({
 						// late_success_candidate so the executor can adopt before next retry.
 						if (attemptMatch.reason === "stale_attempt") {
 							const workflow = await loadWorkflowForRun(state as RunState);
-							const runArtifactStore = await resolveArtifactStoreForRun({
-								runState: state as RunState,
-								workflow,
-							});
+							const runArtifactStore = runtime.artifactStore;
 							const workflowStepDef = workflow.steps.find(
 								(s) => s.id === step_id,
 							);
@@ -1133,22 +1176,17 @@ export default definePluginEntry({
 							});
 
 							if (lateOutputCheck.passed) {
-								state = await updateStepState(
-									state,
-									step_id,
-									{
-										late_success_candidate: {
-											attempt: attempt ?? 0,
-											handoff_token: handoff_token ?? null,
-											checked_at: now,
-											output_check: lateOutputCheck,
-											reason: "stale_attempt_but_outputs_passed",
-										},
-										last_update_at: now,
-										last_message: `Stale attempt ${attempt} — outputs validated; queued for adoption`,
+								state = await runtime.stateStore.updateStep(run_id, step_id, {
+									late_success_candidate: {
+										attempt: attempt ?? 0,
+										handoff_token: handoff_token ?? null,
+										checked_at: now,
+										output_check: lateOutputCheck,
+										reason: "stale_attempt_but_outputs_passed",
 									},
-									runsDir,
-								);
+									last_update_at: now,
+									last_message: `Stale attempt ${attempt} — outputs validated; queued for adoption`,
+								});
 
 								return textResult({
 									ok: true,
@@ -1159,28 +1197,22 @@ export default definePluginEntry({
 							}
 						}
 
-						state = await updateStepState(
-							state,
-							step_id,
-							{
-								handoff: {
-									...(step.handoff || {}),
-									requested_at: now,
-									reason,
-									message,
-									outputs: outputs || undefined,
-									metadata,
-									attempt,
-									session_key,
-									subagent_run_id,
-									token: handoff_token,
-								},
-								last_update_at: now,
-								last_message:
-									message || `Handoff rejected: ${attemptMatch.reason}`,
+						state = await runtime.stateStore.updateStep(run_id, step_id, {
+							handoff: {
+								...(step.handoff || {}),
+								requested_at: now,
+								reason,
+								message,
+								outputs: outputs || undefined,
+								metadata,
+								attempt,
+								session_key,
+								subagent_run_id,
+								token: handoff_token,
 							},
-							runsDir,
-						);
+							last_update_at: now,
+							last_message: message || `Handoff rejected: ${attemptMatch.reason}`,
+						});
 
 						return textResult({
 							ok: false,
@@ -1190,10 +1222,7 @@ export default definePluginEntry({
 					}
 
 					const workflow = await loadWorkflowForRun(state as RunState);
-					const runArtifactStore = await resolveArtifactStoreForRun({
-						runState: state as RunState,
-						workflow,
-					});
+					const runArtifactStore = runtime.artifactStore;
 					const workflowStepDef = workflow.steps.find((s) => s.id === step_id);
 					const declaredOutputs = step.declared_outputs || [];
 					const contractStep: WorkflowStep = {
@@ -1264,29 +1293,24 @@ export default definePluginEntry({
 						(decision === "pass" || decision === "blocked") && freshness.ok;
 
 					const now = getLocalISOString();
-					state = await updateStepState(
-						state,
-						step_id,
-						{
-							handoff: {
-								...(step.handoff || {}),
-								requested_at: now,
-								reason,
-								message,
-								outputs: outputs || undefined,
-								metadata,
-								attempt,
-								session_key,
-								subagent_run_id,
-								token: handoff_token,
-							},
-							counters: counters || step.counters || null,
-							last_update_at: now,
-							last_message: message || step.last_message || null,
-							output_check: outputCheck,
+					state = await runtime.stateStore.updateStep(run_id, step_id, {
+						handoff: {
+							...(step.handoff || {}),
+							requested_at: now,
+							reason,
+							message,
+							outputs: outputs || undefined,
+							metadata,
+							attempt,
+							session_key,
+							subagent_run_id,
+							token: handoff_token,
 						},
-						runsDir,
-					);
+						counters: counters || step.counters || null,
+						last_update_at: now,
+						last_message: message || step.last_message || null,
+						output_check: outputCheck,
+					});
 
 					if (!handoffValid) {
 						const invalidOutputs = outputCheck.validations
@@ -1311,7 +1335,7 @@ export default definePluginEntry({
 
 					state = await adoptStepContract({
 						state,
-						runsDir,
+						stateStore: runtime.stateStore,
 						stepId: step_id,
 						outputCheck,
 						reason,
@@ -1388,7 +1412,8 @@ export default definePluginEntry({
 				const { run_id } = readParams(first, second);
 
 				try {
-					let state = await readRunState(run_id, runsDir);
+					const runtime = await resolveWorkflowRuntime(run_id);
+					let state = await runtime.stateStore.loadRun(run_id);
 
 					const terminal = ["ok", "failed", "cancelled"].includes(state.status);
 					const runningSteps = Object.entries((state as RunState).steps).filter(
@@ -1403,16 +1428,12 @@ export default definePluginEntry({
 					}
 
 					const now = getLocalISOString();
-					state = await updateRunState(
-						state,
-						{
-							status: "cancelled",
-							cancel_requested_at: now,
-							cancelled_at: now,
-							completed_at: now,
-						},
-						runsDir,
-					);
+					state = await runtime.stateStore.updateRun(run_id, {
+						status: "cancelled",
+						cancel_requested_at: now,
+						cancelled_at: now,
+						completed_at: now,
+					});
 
 					const results = [];
 
@@ -1421,15 +1442,10 @@ export default definePluginEntry({
 						const sessionKey = step.session_key;
 						const sessionId = step.session_id || step.subagent_run_id || null;
 
-						state = await updateStepState(
-							state,
-							stepId,
-							{
-								cancel_requested_at: now,
-								cancellation_reason: `workflow_cancel:${run_id}`,
-							},
-							runsDir,
-						);
+						state = await runtime.stateStore.updateStep(run_id, stepId, {
+							cancel_requested_at: now,
+							cancellation_reason: `workflow_cancel:${run_id}`,
+						});
 
 						if (!sessionKey) {
 							const result = {
@@ -1442,14 +1458,9 @@ export default definePluginEntry({
 
 							results.push(result);
 
-							state = await updateStepState(
-								state,
-								stepId,
-								{
-									cancel_error: result.error,
-								},
-								runsDir,
-							);
+							state = await runtime.stateStore.updateStep(run_id, stepId, {
+								cancel_error: result.error,
+							});
 
 							continue;
 						}
@@ -1483,18 +1494,13 @@ export default definePluginEntry({
 							...cancelResult,
 						});
 
-						state = await updateStepState(
-							state,
-							stepId,
-							{
-								cancel_method: cancelResult.method || null,
-								cancel_error: cancelResult.error || null,
-								cancel_confirmed_at: cancelResult.confirmed
-									? getLocalISOString()
-									: null,
-							},
-							runsDir,
-						);
+						state = await runtime.stateStore.updateStep(run_id, stepId, {
+							cancel_method: cancelResult.method || null,
+							cancel_error: cancelResult.error || null,
+							cancel_confirmed_at: cancelResult.confirmed
+								? getLocalISOString()
+								: null,
+						});
 					}
 
 					return textResult({

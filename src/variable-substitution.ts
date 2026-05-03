@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 /**
  * @module variable-substitution
@@ -240,12 +241,12 @@ export function outputIdOf(output: any): string {
     return output.id.trim();
   }
 
-  if (typeof output === "string") {
-    return output;
-  }
-
-  if (typeof output?.path === "string" && output.path.trim().length > 0) {
-    return output.path;
+  const p = typeof output === "string" ? output : output?.path;
+  if (typeof p === "string" && p.trim().length > 0) {
+    return `path_${createHash("sha256")
+      .update(p.trim())
+      .digest("hex")
+      .slice(0, 16)}`;
   }
 
   return "";

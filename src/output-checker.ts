@@ -137,13 +137,18 @@ export async function checkStepContract(args: {
     const spec = typeof output === 'string' ? { path: output } : output;
     const outputId = outputIdOf(spec);
     const outputPath = outputPathOf(spec);
+    const artifactIds = [outputId, outputPath].filter(
+      (v, i, arr) => typeof v === 'string' && v.length > 0 && arr.indexOf(v) === i,
+    );
     const validatorId = spec.validate;
     const validator = validatorId ? validators?.[validatorId] : undefined;
 
     let handledByArtifactStore = false;
     if (artifactStore) {
-      const artifact = await artifactStore.readArtifact(runId, stepId, outputId);
-      if (artifact) {
+      for (const artifactId of artifactIds) {
+        const artifact = await artifactStore.readArtifact(runId, stepId, artifactId);
+        if (!artifact) continue;
+
         const validation = await artifactStore.validateArtifact({
           artifact,
           validatorId,
@@ -153,10 +158,11 @@ export async function checkStepContract(args: {
         });
         validations.push({
           ...validation,
-          path: outputPath || `artifact:${runId}:${stepId}:${outputId}`,
+          path: outputPath || `artifact:${runId}:${stepId}:${artifactId}`,
           exists: true,
         });
         handledByArtifactStore = true;
+        break;
       }
     }
 

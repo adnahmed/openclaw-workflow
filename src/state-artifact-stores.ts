@@ -26,11 +26,11 @@ import type {
 	WorkflowStateStore,
 } from "./types.js";
 import {
-	findLatestRun,
 	getLocalISOString,
 	listRuns,
 	readRunState,
 	saveRunState,
+	updateRunState,
 	updateStepState,
 } from "./workflow-state.js";
 import { outputIdOf, outputPathOf } from "./variable-substitution.js";
@@ -90,33 +90,6 @@ async function listJsonFiles(dir: string): Promise<string[]> {
 	return files;
 }
 
-async function readJsonArrayIndex(
-	redis: RedisClient,
-	key: string,
-): Promise<string[]> {
-	const raw = await redis.get(key);
-	if (!raw) return [];
-	try {
-		const parsed = JSON.parse(raw);
-		if (Array.isArray(parsed)) {
-			return parsed.map((v) => String(v));
-		}
-	} catch {
-		// ignore malformed index payload and reset lazily
-	}
-	return [];
-}
-
-async function addJsonArrayIndex(
-	redis: RedisClient,
-	key: string,
-	value: string,
-): Promise<void> {
-	const current = await readJsonArrayIndex(redis, key);
-	if (!current.includes(value)) current.push(value);
-	await redis.set(key, JSON.stringify(current));
-}
-
 function normalizeMaterializeTarget(args: {
 	baseDir: string;
 	targetPath?: string;
@@ -149,6 +122,11 @@ export class FilesystemStateStore implements WorkflowStateStore {
 
 	async saveRun(state: RunState): Promise<void> {
 		await saveRunState(state, this.runsDir);
+	}
+
+	async updateRun(runId: string, patch: Partial<RunState>): Promise<RunState> {
+		const state = await readRunState(runId, this.runsDir);
+		return updateRunState(state, patch, this.runsDir);
 	}
 
 	async updateStep(
@@ -214,15 +192,19 @@ export class RedisStateStore implements WorkflowStateStore {
 	) {}
 
 	private runKey(runId: string): string {
-		return `${this.keyPrefix}:state:${runId}`;
+		return `${this.keyPrefix}:runs:${runId}:state`;
 	}
 
 	private runIndexKey(): string {
-		return `${this.keyPrefix}:state:index`;
+		return `${this.keyPrefix}:runs:index`;
+	}
+
+	private workflowIndexKey(workflowKey: string): string {
+		return `${this.keyPrefix}:runs:by_workflow:${workflowKey}`;
 	}
 
 	private lockKey(runId: string): string {
-		return `${this.keyPrefix}:lock:${runId}`;
+		return `${this.keyPrefix}:runs:${runId}:lock`;
 	}
 
 	async loadRun(runId: string): Promise<RunState> {
@@ -236,8 +218,26 @@ export class RedisStateStore implements WorkflowStateStore {
 	}
 
 	async saveRun(state: RunState): Promise<void> {
-		await this.redis.set(this.runKey(state.run_id), JSON.stringify(state));
-		await addJsonArrayIndex(this.redis, this.runIndexKey(), state.run_id);
+		const runKey = this.runKey(state.run_id);
+		const workflowIndexKey = this.workflowIndexKey(
+			state.workflow_key || state.workflow,
+		);
+
+		await this.redis.multi([
+			["set", runKey, JSON.stringify(state)],
+			["hset", this.runIndexKey(), { [state.run_id]: runKey }],
+			["hset", workflowIndexKey, { [state.run_id]: runKey }],
+		]);
+	}
+
+	async updateRun(runId: string, patch: Partial<RunState>): Promise<RunState> {
+		const state = await this.loadRun(runId);
+		const next = {
+			...state,
+			...patch,
+		};
+		await this.saveRun(next as RunState);
+		return next as RunState;
 	}
 
 	async updateStep(
@@ -261,7 +261,11 @@ export class RedisStateStore implements WorkflowStateStore {
 	}
 
 	async listRuns(filter?: RunFilter): Promise<RunState[]> {
-		const ids = await readJsonArrayIndex(this.redis, this.runIndexKey());
+		const indexKey = filter?.workflow
+			? this.workflowIndexKey(filter.workflow)
+			: this.runIndexKey();
+		const indexed = (await this.redis.hgetall(indexKey)) || {};
+		const ids = Object.keys(indexed);
 		const runs: RunState[] = [];
 
 		for (const id of ids) {
@@ -276,7 +280,9 @@ export class RedisStateStore implements WorkflowStateStore {
 		let selected = runs;
 		if (filter?.workflow) {
 			selected = selected.filter(
-				(r) => r.workflow === filter.workflow || (r as any).workflow_key === filter.workflow,
+				(r) =>
+					r.workflow === filter.workflow ||
+					(r as any).workflow_key === filter.workflow,
 			);
 		}
 		if (filter?.status) {
@@ -517,29 +523,20 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 			"on_demand",
 	) {}
 
-	private artifactKey(runId: string, stepId: string, outputId: string): string {
-		return `${this.keyPrefix}:artifact:${runId}:${stepId}:${encodeURIComponent(outputId)}`;
+	private payloadKey(runId: string, stepId: string, outputId: string): string {
+		return `${this.keyPrefix}:runs:${runId}:artifacts:${stepId}:${encodeURIComponent(outputId)}:payload`;
 	}
 
-	private runArtifactIndexKey(runId: string): string {
-		return `${this.keyPrefix}:artifact-index:${runId}`;
+	private metaKey(runId: string, stepId: string, outputId: string): string {
+		return `${this.keyPrefix}:runs:${runId}:artifacts:${stepId}:${encodeURIComponent(outputId)}:meta`;
 	}
 
-	private stepArtifactIndexKey(runId: string, stepId: string): string {
-		return `${this.keyPrefix}:artifact-index:${runId}:${stepId}`;
+	private runArtifactsKey(runId: string): string {
+		return `${this.keyPrefix}:runs:${runId}:artifacts:index`;
 	}
 
-	private encodeIndexEntry(stepId: string, outputId: string): string {
-		return `${stepId}::${outputId}`;
-	}
-
-	private decodeIndexEntry(entry: string): { stepId: string; outputId: string } | null {
-		const split = entry.indexOf("::");
-		if (split < 0) return null;
-		return {
-			stepId: entry.slice(0, split),
-			outputId: entry.slice(split + 2),
-		};
+	private stepArtifactsKey(runId: string, stepId: string): string {
+		return `${this.keyPrefix}:runs:${runId}:steps:${stepId}:artifacts`;
 	}
 
 	async commitArtifact(args: CommitArtifactArgs): Promise<ArtifactCommitResult> {
@@ -575,39 +572,44 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 			};
 		}
 
-		const artifact: StoredArtifact = {
+		const committedAt = getLocalISOString();
+		const storageBackend = `redis:${this.redis.kind}`;
+		const meta = {
 			run_id: args.runId,
 			step_id: args.stepId,
 			output_id: args.outputId,
 			validator: args.validatorId,
 			decision: validation.decision,
-			data: value,
-			text: typeof value === "string" ? value : undefined,
 			bytes,
 			sha256: sha256(serialized),
 			attempt: args.attempt,
 			session_key: args.sessionKey || null,
 			subagent_run_id: args.subagentRunId || null,
 			handoff_token: args.handoffToken || null,
-			storage_backend: `redis:${this.redis.kind}`,
+			storage_backend: storageBackend,
 			materialized_path: null,
-			committed_at: getLocalISOString(),
+			committed_at: committedAt,
 		};
+		const serializedPayload = JSON.stringify(value);
+		const payloadKey = this.payloadKey(args.runId, args.stepId, args.outputId);
+		const metaKey = this.metaKey(args.runId, args.stepId, args.outputId);
 
-		await this.redis.set(
-			this.artifactKey(args.runId, args.stepId, args.outputId),
-			JSON.stringify(artifact),
-		);
-		await addJsonArrayIndex(
-			this.redis,
-			this.runArtifactIndexKey(args.runId),
-			this.encodeIndexEntry(args.stepId, args.outputId),
-		);
-		await addJsonArrayIndex(
-			this.redis,
-			this.stepArtifactIndexKey(args.runId, args.stepId),
-			args.outputId,
-		);
+		await this.redis.multi([
+			["set", payloadKey, serializedPayload],
+			["set", metaKey, JSON.stringify(meta)],
+			["hset", this.stepArtifactsKey(args.runId, args.stepId), { [args.outputId]: metaKey }],
+			[
+				"hset",
+				this.runArtifactsKey(args.runId),
+				{ [`${args.stepId}:${args.outputId}`]: metaKey },
+			],
+		]);
+
+		const artifact: StoredArtifact = {
+			...meta,
+			data: value,
+			text: typeof value === "string" ? value : undefined,
+		};
 
 		const materializeMode = args.materialize || this.defaultMaterializeMode;
 		if (targetPath && materializeMode === "always") {
@@ -615,8 +617,8 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 			await writeFile(targetPath, serialized, "utf8");
 			artifact.materialized_path = targetPath;
 			await this.redis.set(
-				this.artifactKey(args.runId, args.stepId, args.outputId),
-				JSON.stringify(artifact),
+				metaKey,
+				JSON.stringify({ ...meta, materialized_path: targetPath }),
 			);
 		}
 
@@ -634,10 +636,19 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 		stepId: string,
 		outputId: string,
 	): Promise<StoredArtifact | null> {
-		const raw = await this.redis.get(this.artifactKey(runId, stepId, outputId));
-		if (!raw) return null;
+		const [rawMeta, rawPayload] = await Promise.all([
+			this.redis.get(this.metaKey(runId, stepId, outputId)),
+			this.redis.get(this.payloadKey(runId, stepId, outputId)),
+		]);
+		if (!rawMeta || !rawPayload) return null;
 		try {
-			return JSON.parse(raw) as StoredArtifact;
+			const meta = JSON.parse(rawMeta) as Omit<StoredArtifact, "data" | "text">;
+			const data = JSON.parse(rawPayload);
+			return {
+				...meta,
+				data,
+				text: typeof data === "string" ? data : undefined,
+			} as StoredArtifact;
 		} catch {
 			return null;
 		}
@@ -663,32 +674,32 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 	}
 
 	async listArtifacts(runId: string, stepId?: string): Promise<StoredArtifactMeta[]> {
-		const entries = stepId
-			? (await readJsonArrayIndex(this.redis, this.stepArtifactIndexKey(runId, stepId))).map((outputId) => ({ stepId, outputId }))
-			: (await readJsonArrayIndex(this.redis, this.runArtifactIndexKey(runId)))
-				.map((entry) => this.decodeIndexEntry(entry))
-				.filter((v): v is { stepId: string; outputId: string } => !!v);
-
 		const metas: StoredArtifactMeta[] = [];
-		for (const entry of entries) {
-			const artifact = await this.readArtifact(runId, entry.stepId, entry.outputId);
-			if (!artifact) continue;
-			metas.push({
-				run_id: artifact.run_id,
-				step_id: artifact.step_id,
-				output_id: artifact.output_id,
-				validator: artifact.validator,
-				decision: artifact.decision,
-				bytes: artifact.bytes,
-				sha256: artifact.sha256,
-				attempt: artifact.attempt,
-				session_key: artifact.session_key,
-				subagent_run_id: artifact.subagent_run_id,
-				handoff_token: artifact.handoff_token,
-				storage_backend: artifact.storage_backend,
-				materialized_path: artifact.materialized_path,
-				committed_at: artifact.committed_at,
-			});
+
+		if (stepId) {
+			const indexed =
+				(await this.redis.hgetall(this.stepArtifactsKey(runId, stepId))) || {};
+			for (const outputId of Object.keys(indexed)) {
+				const metaKey = indexed[outputId];
+				const rawMeta = await this.redis.get(metaKey);
+				if (!rawMeta) continue;
+				try {
+					metas.push(JSON.parse(rawMeta) as StoredArtifactMeta);
+				} catch {
+					// skip malformed meta
+				}
+			}
+		} else {
+			const indexed = (await this.redis.hgetall(this.runArtifactsKey(runId))) || {};
+			for (const metaKey of Object.values(indexed)) {
+				const rawMeta = await this.redis.get(metaKey);
+				if (!rawMeta) continue;
+				try {
+					metas.push(JSON.parse(rawMeta) as StoredArtifactMeta);
+				} catch {
+					// skip malformed meta
+				}
+			}
 		}
 
 		metas.sort((a, b) => b.committed_at.localeCompare(a.committed_at));
@@ -720,8 +731,8 @@ export class RedisArtifactStore implements WorkflowArtifactStore {
 
 		artifact.materialized_path = target;
 		await this.redis.set(
-			this.artifactKey(args.runId, args.stepId, args.outputId),
-			JSON.stringify(artifact),
+			this.metaKey(args.runId, args.stepId, args.outputId),
+			JSON.stringify({ ...artifact, data: undefined, text: undefined }),
 		);
 
 		return target;
@@ -732,12 +743,11 @@ export function resolveStateBackend(args: {
 	workflowState?: {
 		backend?: "filesystem" | "redis" | "auto" | "dual";
 		fallback?: "filesystem" | "none";
-		redis?: { provider?: "auto" | "native" | "mcp"; tool_prefix?: string };
+		redis?: { provider?: "auto" | "native"; tool_prefix?: string };
 	};
 	pluginConfig?: {
 		stateBackend?: "filesystem" | "redis" | "auto" | "dual";
 		redisUrl?: string | null;
-		redisMcpToolPrefix?: string | null;
 		filesystemFallback?: boolean;
 	};
 }): StateBackendResolution {
@@ -766,23 +776,6 @@ export function resolveStateBackend(args: {
 		};
 	}
 
-	const mcpProvider =
-		args.workflowState?.redis?.provider === "mcp" ||
-		args.workflowState?.redis?.provider === "auto";
-	if (mcpProvider) {
-		return {
-			requested,
-			resolved: "redis-mcp",
-			provider:
-				args.workflowState?.redis?.tool_prefix ||
-				args.pluginConfig?.redisMcpToolPrefix ||
-				"MCP_DOCKER",
-			reason: "workflow requested MCP redis provider",
-			checked_at,
-			fallback: args.workflowState?.fallback || "filesystem",
-		};
-	}
-
 	if (
 		args.workflowState?.fallback === "filesystem" ||
 		args.pluginConfig?.filesystemFallback !== false
@@ -797,6 +790,6 @@ export function resolveStateBackend(args: {
 	}
 
 	throw new Error(
-		"Workflow requested Redis state, but no Redis URL or MCP Redis provider was configured and filesystem fallback is disabled.",
+		"Workflow requested Redis state, but no Redis URL was configured and filesystem fallback is disabled.",
 	);
 }
