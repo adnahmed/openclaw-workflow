@@ -28,12 +28,16 @@ import type {
 	OutputSpec,
 	RunState,
 	StepState,
+	WorkflowArtifactStore,
+	WorkflowStateStore,
 	WorkflowStep,
 } from "./types.js";
 import { outputIdOf, outputPathOf } from "./variable-substitution.js";
 import {
 	FilesystemArtifactStore,
 	FilesystemStateStore,
+	RedisArtifactStore,
+	RedisStateStore,
 	resolveStateBackend,
 } from "./state-artifact-stores.js";
 import {
@@ -142,12 +146,14 @@ export default definePluginEntry({
 			cancelGraceMs,
 		} = config;
 
-		const stateStore = new FilesystemStateStore(runsDir);
-		const artifactStore = new FilesystemArtifactStore(
+		const filesystemStateStore = new FilesystemStateStore(runsDir);
+		const filesystemArtifactStore = new FilesystemArtifactStore(
 			runsDir,
 			baseDir,
 			config.materializeOutputs || "on_demand",
 		);
+		const stateStore = filesystemStateStore;
+		const artifactStore = filesystemArtifactStore;
 
 		// Plugin registry — always created with default built-ins
 		const pluginRegistry = createDefaultRegistry();
@@ -178,6 +184,19 @@ export default definePluginEntry({
 				}
 			}
 
+			let stateStore: WorkflowStateStore = filesystemStateStore;
+			let artifactStore: WorkflowArtifactStore = filesystemArtifactStore;
+
+			if (redis && backendResolution.resolved === "redis-native") {
+				stateStore = new RedisStateStore(redis);
+				artifactStore = new RedisArtifactStore(
+					redis,
+					baseDir,
+					"openclaw:workflow",
+					config.materializeOutputs || "on_demand",
+				);
+			}
+
 			return {
 				runsDir,
 				baseDir,
@@ -201,6 +220,62 @@ export default definePluginEntry({
 				pluginRegistry,
 				redis,
 			};
+		}
+
+		let redisClientPromise: Promise<any> | null = null;
+
+		async function resolveRedisHandle() {
+			if (!config.redisUrl && !config.redisMcpToolPrefix) return null;
+			if (!redisClientPromise) {
+				redisClientPromise = resolveRedisClient({
+					url: config.redisUrl,
+					mcpToolPrefix: config.redisMcpToolPrefix,
+					api,
+					filesystemFallback: config.filesystemFallback !== false,
+				}).catch((err) => {
+					logger.warn(`[workflow] Redis client init failed: ${err?.message ?? err}`);
+					return null;
+				});
+			}
+			return redisClientPromise;
+		}
+
+		function isRedisResolvedBackend(backendResolution: any): boolean {
+			return (
+				backendResolution?.resolved === "redis-native" ||
+				backendResolution?.resolved === "redis-mcp"
+			);
+		}
+
+		async function resolveArtifactStoreForRun(args: {
+			runState?: RunState | null;
+			workflow?: any;
+		}) {
+			const backendResolution =
+				(args.runState as any)?.state_backend ||
+				resolveStateBackend({
+					workflowState: args.workflow?.state,
+					pluginConfig: {
+						stateBackend: config.stateBackend,
+						redisUrl: config.redisUrl,
+						redisMcpToolPrefix: config.redisMcpToolPrefix,
+						filesystemFallback: config.filesystemFallback,
+					},
+				});
+
+			if (!isRedisResolvedBackend(backendResolution)) {
+				return filesystemArtifactStore;
+			}
+
+			const redis = await resolveRedisHandle();
+			if (!redis) return filesystemArtifactStore;
+
+			return new RedisArtifactStore(
+				redis,
+				baseDir,
+				"openclaw:workflow",
+				config.materializeOutputs || "on_demand",
+			);
 		}
 
 		function buildNotifier() {
@@ -431,6 +506,10 @@ export default definePluginEntry({
 					}
 
 					const workflow = await loadWorkflowForRun(state as RunState);
+					const runArtifactStore = await resolveArtifactStoreForRun({
+						runState: state as RunState,
+						workflow,
+					});
 
 					const result = await writeDeclaredOutput({
 						workflow,
@@ -442,7 +521,7 @@ export default definePluginEntry({
 						text,
 						baseDir,
 						workflowsDir,
-						artifactStore,
+						artifactStore: runArtifactStore,
 						materializeMode: config.materializeOutputs,
 						attempt,
 						session_key,
@@ -635,7 +714,11 @@ export default definePluginEntry({
 				);
 
 				try {
-					const artifact = await artifactStore.readArtifact(
+					const runState = await readRunState(run_id, runsDir);
+					const runArtifactStore = await resolveArtifactStoreForRun({
+						runState,
+					});
+					const artifact = await runArtifactStore.readArtifact(
 						run_id,
 						step_id,
 						output_id,
@@ -694,7 +777,11 @@ export default definePluginEntry({
 			async execute(first, second) {
 				const { run_id, step_id } = readParams(first, second);
 				try {
-					const artifacts = await artifactStore.listArtifacts(run_id, step_id);
+					const runState = await readRunState(run_id, runsDir);
+					const runArtifactStore = await resolveArtifactStoreForRun({
+						runState,
+					});
+					const artifacts = await runArtifactStore.listArtifacts(run_id, step_id);
 					return textResult({
 						run_id,
 						step_id: step_id || null,
@@ -715,7 +802,11 @@ export default definePluginEntry({
 			async execute(first, second) {
 				const { run_id, step_id, output_id, path } = readParams(first, second);
 				try {
-					const materializedPath = await artifactStore.materializeArtifact({
+					const runState = await readRunState(run_id, runsDir);
+					const runArtifactStore = await resolveArtifactStoreForRun({
+						runState,
+					});
+					const materializedPath = await runArtifactStore.materializeArtifact({
 						runId: run_id,
 						stepId: step_id,
 						outputId: output_id,
@@ -1008,6 +1099,10 @@ export default definePluginEntry({
 						// late_success_candidate so the executor can adopt before next retry.
 						if (attemptMatch.reason === "stale_attempt") {
 							const workflow = await loadWorkflowForRun(state as RunState);
+							const runArtifactStore = await resolveArtifactStoreForRun({
+								runState: state as RunState,
+								workflow,
+							});
 							const workflowStepDef = workflow.steps.find(
 								(s) => s.id === step_id,
 							);
@@ -1034,7 +1129,7 @@ export default definePluginEntry({
 								workflowsDir,
 								runId: run_id,
 								stepId: step_id,
-								artifactStore,
+								artifactStore: runArtifactStore,
 							});
 
 							if (lateOutputCheck.passed) {
@@ -1095,6 +1190,10 @@ export default definePluginEntry({
 					}
 
 					const workflow = await loadWorkflowForRun(state as RunState);
+					const runArtifactStore = await resolveArtifactStoreForRun({
+						runState: state as RunState,
+						workflow,
+					});
 					const workflowStepDef = workflow.steps.find((s) => s.id === step_id);
 					const declaredOutputs = step.declared_outputs || [];
 					const contractStep: WorkflowStep = {
@@ -1120,7 +1219,7 @@ export default definePluginEntry({
 						workflowsDir,
 						runId: run_id,
 						stepId: step_id,
-						artifactStore,
+						artifactStore: runArtifactStore,
 					});
 
 					const decision = outputCheck.decision;

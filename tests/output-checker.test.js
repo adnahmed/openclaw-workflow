@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { writeFile, mkdir } from 'node:fs/promises';
 
 import { checkOutputs } from '../dist/output-checker.js';
+import { checkStepContract } from '../dist/output-checker.js';
+import { FilesystemArtifactStore } from '../dist/state-artifact-stores.js';
 import { withTempDir } from './temp-dir.js';
 
 // ── Empty / null paths ─────────────────────────────────────────────────────
@@ -133,6 +135,42 @@ test('fails when required file is missing but optional one is also missing', asy
     ], dir);
     assert.equal(result.passed, false);
     assert.equal(result.missing_files.length, 2);
+  });
+});
+
+test('checkStepContract validates path-only output from artifact store by outputId fallback', async () => {
+  await withTempDir('output-check-artifact-first', async (dir) => {
+    const artifactStore = new FilesystemArtifactStore(dir, dir, 'on_demand');
+
+    const outputs = [
+      { path: 'data/foo.json', validate: 'jsonDoc' }
+    ];
+
+    await artifactStore.commitArtifact({
+      runId: 'run-artifact-first',
+      stepId: 'step-a',
+      outputId: 'data/foo.json',
+      declaredOutput: outputs[0],
+      data: { ok: true },
+      validatorId: 'jsonDoc',
+      validator: { type: 'json', pass_when: 'true' },
+      validators: { jsonDoc: { type: 'json', pass_when: 'true' } },
+      baseDir: dir,
+      materialize: 'never',
+    });
+
+    const result = await checkStepContract({
+      outputs,
+      validators: { jsonDoc: { type: 'json', pass_when: 'true' } },
+      artifactStore,
+      runId: 'run-artifact-first',
+      stepId: 'step-a',
+      baseDir: dir,
+      filesystemFallback: true,
+    });
+
+    assert.equal(result.passed, true);
+    assert.equal(result.decision, 'pass');
   });
 });
 

@@ -6,11 +6,11 @@
  *   1. Native Redis client (ioredis) — preferred for init/transactional work
  *   2. MCP Redis adapter (MCPorter/MCP_DOCKER) — fallback via agent tool calls
  *
- * ioredis is a peer/optional dependency. If not installed, native client creation
- * throws a clear error pointing to installation instructions.
+ * Native Redis uses ioredis. If unavailable at runtime, native client creation
+ * throws a clear error and the resolver can fall back to MCP/filesystem paths.
  *
  * The MCP adapter wraps tool calls made through the OpenClaw api object, translating
- * Redis commands to MCP tool invocations (e.g. MCP_DOCKER__redis_get, etc.).
+ * Redis commands to MCP tool invocations (e.g. MCP_DOCKER__get, MCP_DOCKER__hset, etc.).
  */
 
 import type { RedisClient } from "./types.js";
@@ -104,7 +104,7 @@ class NativeRedisClient implements RedisClient {
 
 /**
  * Create a native Redis client backed by ioredis.
- * ioredis must be installed as an optional peer dependency.
+ * ioredis is expected as a runtime dependency.
  */
 export async function createNativeRedisClient(
 	url: string,
@@ -159,9 +159,57 @@ class McpRedisClient implements RedisClient {
 		);
 	}
 
+	private parseToolPayload(result: any): any {
+		if (result == null) return result;
+		if (typeof result !== "object") return result;
+
+		if ("result" in result) return result.result;
+		if ("data" in result) return result.data;
+		if ("value" in result && Object.keys(result).length === 1) return result.value;
+
+		const content = (result as any).content;
+		if (Array.isArray(content) && content.length > 0) {
+			const textChunk = content.find((c: any) => c?.type === "text" && typeof c.text === "string");
+			if (textChunk) {
+				try {
+					return JSON.parse(textChunk.text);
+				} catch {
+					return textChunk.text;
+				}
+			}
+		}
+
+		return result;
+	}
+
+	private asBoolean(value: any): boolean {
+		if (typeof value === "boolean") return value;
+		if (typeof value === "number") return value !== 0;
+		if (typeof value === "string") {
+			const normalized = value.trim().toLowerCase();
+			return normalized === "1" || normalized === "true" || normalized === "ok";
+		}
+		return Boolean(value);
+	}
+
+	private asNumber(value: any, fallback = 0): number {
+		if (typeof value === "number" && Number.isFinite(value)) return value;
+		if (typeof value === "string" && value.trim().length > 0) {
+			const parsed = Number(value);
+			if (Number.isFinite(parsed)) return parsed;
+		}
+		return fallback;
+	}
+
 	async get(key: string): Promise<string | null> {
-		const result = await this.callTool("redis_get", { key }) as any;
-		return result?.value ?? null;
+		const raw = await this.callTool("get", { key });
+		const result = this.parseToolPayload(raw);
+		if (typeof result === "string") return result;
+		if (result && typeof result === "object" && typeof (result as any).value !== "undefined") {
+			const value = (result as any).value;
+			return value == null ? null : String(value);
+		}
+		return null;
 	}
 
 	async set(
@@ -173,43 +221,94 @@ class McpRedisClient implements RedisClient {
 		if (options?.ex) args["ex"] = options.ex;
 		if (options?.px) args["px"] = options.px;
 		if (options?.nx) args["nx"] = true;
-		const result = await this.callTool("redis_set", args) as any;
-		return result?.ok ? "OK" : null;
+		const raw = await this.callTool("set", args);
+		const result = this.parseToolPayload(raw);
+		if (typeof result === "string") {
+			return result.toUpperCase() === "OK" ? "OK" : null;
+		}
+		if (result && typeof result === "object") {
+			if (typeof (result as any).result === "string" && (result as any).result.toUpperCase() === "OK") {
+				return "OK";
+			}
+			if (this.asBoolean((result as any).ok)) return "OK";
+		}
+		return null;
 	}
 
 	async del(...keys: string[]): Promise<number> {
-		const result = await this.callTool("redis_del", { keys }) as any;
-		return result?.deleted ?? 0;
+		const raw = await this.callTool("del", { keys }) as any;
+		const result = this.parseToolPayload(raw);
+		if (typeof result === "number") return result;
+		if (result && typeof result === "object") {
+			return this.asNumber((result as any).deleted ?? (result as any).count ?? (result as any).value, 0);
+		}
+		return 0;
 	}
 
 	async hset(key: string, fields: Record<string, string>): Promise<number> {
-		const result = await this.callTool("redis_hset", { key, fields }) as any;
-		return result?.added ?? 0;
+		const raw = await this.callTool("hset", { key, fields }) as any;
+		const result = this.parseToolPayload(raw);
+		if (typeof result === "number") return result;
+		if (result && typeof result === "object") {
+			return this.asNumber((result as any).added ?? (result as any).count ?? (result as any).value, 0);
+		}
+		return 0;
 	}
 
 	async hgetall(key: string): Promise<Record<string, string> | null> {
-		const result = await this.callTool("redis_hgetall", { key }) as any;
-		return result?.fields ?? null;
+		const raw = await this.callTool("hgetall", { key }) as any;
+		const result = this.parseToolPayload(raw);
+		if (result && typeof result === "object" && !Array.isArray(result)) {
+			const fields = (result as any).fields && typeof (result as any).fields === "object"
+				? (result as any).fields
+				: result;
+			if (Object.keys(fields).length === 0) return null;
+			const normalized: Record<string, string> = {};
+			for (const [k, v] of Object.entries(fields)) normalized[k] = String(v);
+			return normalized;
+		}
+		return null;
 	}
 
 	async exists(...keys: string[]): Promise<number> {
-		const result = await this.callTool("redis_exists", { keys }) as any;
-		return result?.count ?? 0;
+		const raw = await this.callTool("exists", { keys }) as any;
+		const result = this.parseToolPayload(raw);
+		if (typeof result === "number") return result;
+		if (result && typeof result === "object") {
+			return this.asNumber((result as any).count ?? (result as any).value, 0);
+		}
+		return 0;
 	}
 
 	async expire(key: string, seconds: number): Promise<number> {
-		const result = await this.callTool("redis_expire", { key, seconds }) as any;
-		return result?.ok ? 1 : 0;
+		const raw = await this.callTool("expire", { key, seconds }) as any;
+		const result = this.parseToolPayload(raw);
+		if (typeof result === "number") return result;
+		if (result && typeof result === "object") {
+			if (typeof (result as any).value !== "undefined") return this.asNumber((result as any).value, 0);
+			if (typeof (result as any).ok !== "undefined") return this.asBoolean((result as any).ok) ? 1 : 0;
+		}
+		return this.asBoolean(result) ? 1 : 0;
 	}
 
 	async incr(key: string): Promise<number> {
-		const result = await this.callTool("redis_incr", { key }) as any;
-		return result?.value ?? 0;
+		const raw = await this.callTool("incr", { key }) as any;
+		const result = this.parseToolPayload(raw);
+		if (typeof result === "number") return result;
+		if (result && typeof result === "object") {
+			return this.asNumber((result as any).value, 0);
+		}
+		return this.asNumber(result, 0);
 	}
 
 	async xadd(key: string, id: string, fields: Record<string, string>): Promise<string | null> {
-		const result = await this.callTool("redis_xadd", { key, id, fields }) as any;
-		return result?.id ?? null;
+		const raw = await this.callTool("xadd", { key, id, fields }) as any;
+		const result = this.parseToolPayload(raw);
+		if (typeof result === "string") return result;
+		if (result && typeof result === "object" && typeof (result as any).id !== "undefined") {
+			return String((result as any).id);
+		}
+		return null;
 	}
 
 	async xgroup(
@@ -219,7 +318,7 @@ class McpRedisClient implements RedisClient {
 		id: string,
 		options?: { MKSTREAM?: boolean },
 	): Promise<"OK"> {
-		await this.callTool("redis_xgroup_create", {
+		await this.callTool("xgroup_create", {
 			key,
 			group,
 			id,
@@ -232,7 +331,7 @@ class McpRedisClient implements RedisClient {
 		// MCP doesn't support MULTI natively — execute sequentially
 		const results: unknown[] = [];
 		for (const [cmd, ...args] of commands) {
-			results.push(await this.callTool(`redis_${cmd.toLowerCase()}`, { args }));
+			results.push(await this.callTool(cmd.toLowerCase(), { args }));
 		}
 		return results;
 	}

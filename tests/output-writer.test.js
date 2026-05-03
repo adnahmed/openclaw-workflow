@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { writeDeclaredOutput } from "../dist/output-writer.js";
+import { FilesystemArtifactStore } from "../dist/state-artifact-stores.js";
 import { createRunState } from "../dist/workflow-state.js";
 import { withTempDir } from "./temp-dir.js";
 
@@ -86,5 +87,35 @@ test("writeDeclaredOutput rejects fail decision and does not commit file", async
 		assert.equal(result.ok, false);
 		assert.equal(result.committed, false);
 		assert.equal(result.decision, "fail");
+	});
+});
+
+test("writeDeclaredOutput forces materialization for legacy path-only output when artifact mode is on_demand", async () => {
+	await withTempDir("output-writer-legacy-materialize", async (dir) => {
+		const outPath = "legacy-materialized.json";
+		const absPath = join(dir, outPath);
+		const workflow = baseWorkflow(dir);
+		const state = runningStateWithDeclaredOutput("run-writer-legacy", outPath);
+		const artifactStore = new FilesystemArtifactStore(dir, dir, "on_demand");
+
+		const result = await writeDeclaredOutput({
+			workflow,
+			state,
+			stepId: "step-a",
+			path: outPath,
+			data: { status: "blocked" },
+			baseDir: dir,
+			workflowsDir: dir,
+			artifactStore,
+			materializeMode: "on_demand",
+		});
+
+		assert.equal(result.ok, true);
+		assert.equal(result.committed, true);
+		assert.equal(result.decision, "blocked");
+
+		const raw = await readFile(absPath, "utf8");
+		const parsed = JSON.parse(raw);
+		assert.equal(parsed.status, "blocked");
 	});
 });

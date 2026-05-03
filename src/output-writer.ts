@@ -123,6 +123,14 @@ export async function writeDeclaredOutput(args: {
 	}
 
 	if (args.artifactStore) {
+		const isLegacyPathOnly =
+			typeof declared === "string" ||
+			(typeof declared === "object" && declared !== null && !declared.id && !!declaredPath);
+
+		const effectiveMaterializeMode = isLegacyPathOnly
+			? "always"
+			: (args.materializeMode || (declaredPath ? "always" : "on_demand"));
+
 		const artifactCommit = await args.artifactStore.commitArtifact({
 			runId: args.state.run_id,
 			stepId: args.stepId,
@@ -139,7 +147,7 @@ export async function writeDeclaredOutput(args: {
 			handoffToken: args.handoff_token ?? stepState.handoff_token,
 			workflowDir: workflowDirOf(args.workflow, args.workflowsDir),
 			baseDir: args.baseDir,
-			materialize: args.materializeMode || (declaredPath ? "always" : "on_demand"),
+			materialize: effectiveMaterializeMode,
 		});
 
 		if (!artifactCommit.ok || !artifactCommit.committed || !artifactCommit.artifact) {

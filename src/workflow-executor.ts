@@ -211,6 +211,7 @@ export async function executeWorkflow(
 		runsDir,
 		baseDir,
 		concurrency,
+		stateStore,
 		notify = () => {},
 		pollIntervalMs = 5000,
 		defaultModel,
@@ -228,6 +229,30 @@ export async function executeWorkflow(
 		pluginRegistry,
 		redis = null,
 	} = config;
+
+	async function mirrorRunState(nextState) {
+		if (stateStore && typeof stateStore.saveRun === "function") {
+			try {
+				await stateStore.saveRun(nextState);
+			} catch (err) {
+				api?.logger?.warn?.(
+					`[workflow:${runId}] failed to mirror state to configured stateStore`,
+					err,
+				);
+			}
+		}
+	}
+
+	async function loadRunStateSnapshot() {
+		if (stateStore && typeof stateStore.loadRun === "function") {
+			try {
+				return await stateStore.loadRun(runId);
+			} catch {
+				// fall back to filesystem snapshot
+			}
+		}
+		return readRunState(runId, runsDir);
+	}
 
 	// Build substitution context once for the entire run
 	const varCtx = buildContext(
@@ -264,6 +289,7 @@ export async function executeWorkflow(
 		{ status: "running", completed_at: null },
 		runsDir,
 	);
+	await mirrorRunState(state);
 
 	// Map of step ID → Promise (for in-flight steps)
 	/** @type {Map<string, Promise<void>>} */
@@ -282,6 +308,7 @@ export async function executeWorkflow(
 				try {
 					nextState = await mutator(state);
 					state = nextState;
+					await mirrorRunState(state);
 				} catch (err) {
 					api?.logger?.error?.(
 						`[workflow:${runId}] state mutation failed`,
@@ -1213,7 +1240,7 @@ export async function executeWorkflow(
 		// Re-read state from disk to pick up external updates (handoff, progress, cancel).
 		if (iterationGuard % 2 === 0) {
 			try {
-				const diskState = await readRunState(runId, runsDir);
+				const diskState = await loadRunStateSnapshot();
 				state = diskState;
 				if (diskState.status === "cancelled") {
 					// External cancel: mark running steps as cancellation-requested, drain active promises, and exit.
@@ -1504,6 +1531,7 @@ export async function executeWorkflow(
 		},
 		runsDir,
 	);
+	await mirrorRunState(state);
 
 	// ── Final notification ─────────────────────────────────────────────────────
 	const okCount = finalStepStatuses.filter((s) => s === "ok").length;
@@ -1581,6 +1609,9 @@ export async function resumeWorkflow(
 
 	// Save the bootstrapped state before running so it's on disk for status checks
 	await saveRunState(state, runsDir);
+	if (config.stateStore && typeof config.stateStore.saveRun === "function") {
+		await config.stateStore.saveRun(state);
+	}
 
 	// Pass initialState so executeWorkflow doesn't overwrite our pre-seeded ok steps
 	return executeWorkflow(

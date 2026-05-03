@@ -70,6 +70,10 @@ State/artifact backend config notes:
 - `filesystemFallback`: fallback to file-backed state/artifacts when Redis is unavailable
 - `materializeOutputs`: `never` \| `on_demand` \| `always`
 
+Redis notes:
+- Native Redis mode uses `ioredis` at runtime (included in this package dependencies).
+- MCP Redis mode expects commands exposed as `<PREFIX>__get`, `<PREFIX>__set`, `<PREFIX>__hset`, etc. (for example `MCP_DOCKER__get`).
+
 Create your workflows directory and restart/verify the gateway:
 
 ```bash

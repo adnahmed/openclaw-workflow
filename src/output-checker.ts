@@ -141,8 +141,8 @@ export async function checkStepContract(args: {
     const validator = validatorId ? validators?.[validatorId] : undefined;
 
     let handledByArtifactStore = false;
-    if (artifactStore && typeof spec.id === 'string' && spec.id.trim().length > 0) {
-      const artifact = await artifactStore.readArtifact(runId, stepId, spec.id);
+    if (artifactStore) {
+      const artifact = await artifactStore.readArtifact(runId, stepId, outputId);
       if (artifact) {
         const validation = await artifactStore.validateArtifact({
           artifact,
