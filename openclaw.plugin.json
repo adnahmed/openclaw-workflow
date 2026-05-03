@@ -13,7 +13,9 @@
       "read_output",
       "list_outputs",
       "materialize_output",
-      "workflow_state_get"
+      "workflow_state_get",
+      "workflow_step_update",
+      "workflow_step_complete"
     ]
   },
   "configSchema": {
