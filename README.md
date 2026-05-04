@@ -183,7 +183,7 @@ workflow_status({ name: "hello" })
 |----------------|-----------|----------|---------|-------------|
 | `id`           | string    | ✅       | —       | Unique step identifier. Must match `[a-zA-Z0-9_-]+`. Used in `depends_on` references and state files. |
 | `name`         | string    | ❌       | Same as `id` | Human display name for notifications. |
-| `kind`         | string    | ❌       | inferred | Step execution kind: `subagent`, `loop_subagent`, or `plugin`. If omitted, loop steps infer `loop_subagent`, otherwise `subagent`. |
+| `kind`         | string    | ❌       | inferred | Step execution kind: `subagent`, `loop_subagent`, `plugin`, or `state_drain`. If omitted, loop steps infer `loop_subagent`, drain-controller steps infer `state_drain`, otherwise `subagent`. |
 | `task`         | string    | ✅*      | —       | The agent prompt / task description. Supports [variable substitution](#variable-substitution). (*Not required for `kind: plugin` steps or loop containers using `for_each`) |
 | `uses`         | string    | ✅**     | —       | Plugin operation ID for `kind: plugin` steps (for example, `workflow.cache_json_document`). |
 | `with`         | object    | ❌       | `{}`    | Parameter map passed to a `kind: plugin` operation. Supports [variable substitution](#variable-substitution). |
@@ -210,6 +210,7 @@ workflow_status({ name: "hello" })
 | `state_consume` | object | ❌ | — | Semantic consume/claim specification for `kind: plugin` steps using `workflow.state_claim`. Resolves a queue or worker group and emits a claim manifest artifact. |
 | `state_reclaim` | object | ❌ | — | Semantic reclaim specification for `kind: plugin` steps using `workflow.state_reclaim_expired`. Requeues expired or orphaned in-flight claims before another worker pass. |
 | `state_complete` | object\|object[] | ❌ | — | Semantic completion specification for `kind: plugin` steps using `workflow.state_complete`. Marks claimed items completed/failed using result artifacts from a prior step. |
+| `drain` | object | ❌ | — | Scheduler/controller spec for `kind: state_drain`. Repeatedly expands nested steps until `workflow.state_claim` returns an empty batch. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 | `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"`, `"outputs"`, `"session_then_outputs"`, `"handoff"`, or `"handoff_or_outputs"`. |
 | `signaling` | string | ❌ | auto for `handoff`/`handoff_or_outputs`, otherwise `off` | Controls plugin-injected signaling instructions. `"auto"` injects `workflow_step_update` + `workflow_step_complete` protocol into the runtime prompt so authors don't need to repeat this boilerplate in every step task. `"off"` disables injection for that step. |
@@ -501,6 +502,71 @@ Both keep Redis details out of worker prompts and YAML-level imperative scripts.
 
 Current limitation:
 - `state_contract` and the explicit plugin-step state operations do **not** currently share the same key naming convention. `state_contract` projects keys using the contract `entity` (for example `queue:alerts:pending`), while explicit plugin steps key by collection/queue names. Until those namespaces are unified, do not mix both approaches for the same records if you need a single canonical queue/state view.
+
+### State Drain Controller (`kind: state_drain`)
+
+Use `state_drain` when you want the orchestrator itself to act as a queue-drain scheduler/controller.
+
+What it does:
+- starts an iteration
+- runs nested steps (which should include a `workflow.state_claim` plugin step)
+- inspects the claim artifact (`claimed_count`, `valid_count`, or `items.length`)
+- if claimed count is `0`, treats the queue as empty for that iteration
+- stops after `max_empty_claims` consecutive empty claims
+- otherwise expands the next iteration and continues
+
+`drain` fields:
+- required: `worker_group`
+- optional: `max_empty_claims` (default `1`)
+- optional: `max_iterations` (`null`/unset = no explicit cap)
+
+Example:
+
+```yaml
+- id: classifier_drain
+  kind: state_drain
+  name: Drain classifier queue
+  depends_on: [publish_task_alert_state]
+  drain:
+    worker_group: task_alert_classifier
+    max_empty_claims: 1
+    max_iterations: 100
+  steps:
+    - id: claim
+      kind: plugin
+      uses: workflow.state_claim
+      state_consume:
+        # worker_group can be omitted here; controller injects drain.worker_group if missing
+        output: claim_manifest
+      outputs:
+        - id: claim_manifest
+
+    - id: classify
+      depends_on: [claim]
+      task: |
+        Read claim_manifest and classify claimed items.
+      outputs:
+        - id: classification_results
+
+    - id: complete
+      kind: plugin
+      uses: workflow.state_complete
+      depends_on: [classify]
+      state_complete:
+        from_step: classify
+        output: classification_results
+        worker_group: task_alert_classifier
+        collection: task_alerts
+        summary_output: state_complete_summary
+      outputs:
+        - id: state_complete_summary
+```
+
+Notes:
+- `state_drain` is a scheduler/controller step, not a plugin operation ID.
+- nested step instances are expanded dynamically as `<drain_step_id>:<iteration>:<child_id>`.
+- non-optional child `failed`/`blocked` statuses fail the controller.
+- on empty claim, pending downstream children in that iteration are marked `skipped`.
 
 ### Automatic Step Signaling (Prompt Injection)
 

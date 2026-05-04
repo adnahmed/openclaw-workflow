@@ -370,13 +370,23 @@ function normalizeAndValidate(raw, filePath) {
 			seenIds.add(step.id);
 
 			// Validate kind
-			const validKinds = new Set(["subagent", "loop_subagent", "plugin"]);
+			const validKinds = new Set([
+				"subagent",
+				"loop_subagent",
+				"plugin",
+				"state_drain",
+			]);
 			const stepKind =
-				step.kind || (step.for_each ? "loop_subagent" : "subagent");
+				step.kind ||
+				(step.for_each
+					? "loop_subagent"
+					: step.drain
+						? "state_drain"
+						: "subagent");
 			if (step.kind !== undefined && !validKinds.has(step.kind)) {
 				throw new Error(
 					`Step "${step.id}" in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
-						`has invalid kind "${step.kind}". Expected: subagent, loop_subagent, plugin.`,
+						`has invalid kind "${step.kind}". Expected: subagent, loop_subagent, plugin, state_drain.`,
 				);
 			}
 
@@ -391,6 +401,49 @@ function normalizeAndValidate(raw, filePath) {
 					throw new Error(
 						`Step "${step.id}" (kind: plugin) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
 							`cannot use "for_each". Loop expansion is only supported for subagent steps.`,
+					);
+				}
+			} else if (stepKind === "state_drain") {
+				const drain = step.drain;
+				if (!drain || typeof drain !== "object") {
+					throw new Error(
+						`Step "${step.id}" (kind: state_drain) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+							`must define "drain" as an object.`,
+					);
+				}
+				if (
+					typeof drain.worker_group !== "string" ||
+					drain.worker_group.trim().length === 0
+				) {
+					throw new Error(
+						`Step "${step.id}" (kind: state_drain) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+							`must define drain.worker_group as a non-empty string.`,
+					);
+				}
+				if (
+					drain.max_empty_claims !== undefined &&
+					(!Number.isInteger(drain.max_empty_claims) ||
+						drain.max_empty_claims < 1)
+				) {
+					throw new Error(
+						`Step "${step.id}" (kind: state_drain) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+							`has invalid drain.max_empty_claims. Expected integer >= 1.`,
+					);
+				}
+				if (
+					drain.max_iterations !== undefined &&
+					drain.max_iterations !== null &&
+					(!Number.isInteger(drain.max_iterations) || drain.max_iterations < 1)
+				) {
+					throw new Error(
+						`Step "${step.id}" (kind: state_drain) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+							`has invalid drain.max_iterations. Expected integer >= 1 or null.`,
+					);
+				}
+				if (!Array.isArray(step.steps) || step.steps.length === 0) {
+					throw new Error(
+						`Step "${step.id}" (kind: state_drain) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
+							`must define a non-empty nested "steps" array.`,
 					);
 				}
 			} else if (!step.task || typeof step.task !== "string") {
@@ -504,10 +557,16 @@ function normalizeAndValidate(raw, filePath) {
 			return {
 				id: step.id,
 				name: step.name || step.id,
-				kind: (step.kind || (step.for_each ? "loop_subagent" : "subagent")) as
+				kind: (step.kind ||
+					(step.for_each
+						? "loop_subagent"
+						: step.drain
+							? "state_drain"
+							: "subagent")) as
 					| "subagent"
 					| "loop_subagent"
-					| "plugin",
+					| "plugin"
+					| "state_drain",
 				uses: typeof step.uses === "string" ? step.uses : undefined,
 				with:
 					step.with &&
@@ -571,6 +630,22 @@ function normalizeAndValidate(raw, filePath) {
 					? step.state_complete
 					: step.state_complete && typeof step.state_complete === "object"
 						? step.state_complete
+						: undefined,
+				drain:
+					step.drain && typeof step.drain === "object"
+						? {
+								worker_group: String(step.drain.worker_group || ""),
+								max_empty_claims:
+									typeof step.drain.max_empty_claims === "number"
+										? step.drain.max_empty_claims
+										: undefined,
+								max_iterations:
+									step.drain.max_iterations === null
+										? null
+										: typeof step.drain.max_iterations === "number"
+											? step.drain.max_iterations
+											: undefined,
+							}
 						: undefined,
 				complete_when: completeWhen,
 				signaling: signalingMode,

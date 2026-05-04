@@ -432,6 +432,491 @@ export async function executeWorkflow(
 		});
 	}
 
+	type DrainControllerRuntime = {
+		iteration: number;
+		empty_claims: number;
+		active_iteration: number | null;
+	};
+
+	const drainRuntime = new Map<string, DrainControllerRuntime>();
+
+	function isStateDrainStep(step: WorkflowStep): boolean {
+		return step.kind === "state_drain" || Boolean(step.drain);
+	}
+
+	function drainSpec(step: WorkflowStep) {
+		const drain = step.drain;
+
+		if (!drain?.worker_group) {
+			throw new Error(
+				`state_drain step "${step.id}" must define drain.worker_group`,
+			);
+		}
+
+		return {
+			worker_group: drain.worker_group,
+			max_empty_claims: Math.max(1, Number(drain.max_empty_claims ?? 1)),
+			max_iterations:
+				drain.max_iterations === undefined ? null : drain.max_iterations,
+		};
+	}
+
+	function findDrainClaimStep(innerSteps: WorkflowStep[]): WorkflowStep {
+		const claimStep =
+			innerSteps.find((s) => s.uses === "workflow.state_claim") ??
+			innerSteps.find((s) => s.id === "claim") ??
+			innerSteps.find((s) => s.id.includes("claim"));
+
+		if (!claimStep) {
+			throw new Error(
+				"state_drain requires one nested claim step using workflow.state_claim",
+			);
+		}
+
+		return claimStep;
+	}
+
+	function outputIdOfLocal(output: unknown): string {
+		if (typeof output === "string") return output;
+		if (output && typeof output === "object") {
+			const record = output as Record<string, unknown>;
+			const id = record.id;
+			const outPath = record.path;
+			if (typeof id === "string") return id;
+			if (typeof outPath === "string") return outPath;
+		}
+		return "";
+	}
+
+	function claimOutputIdOf(claimStep: WorkflowStep): string {
+		const stateConsumeOutput = claimStep.state_consume?.output;
+		if (stateConsumeOutput) return stateConsumeOutput;
+
+		const withRecord =
+			claimStep.with && typeof claimStep.with === "object"
+				? (claimStep.with as Record<string, unknown>)
+				: null;
+
+		const nestedStateConsume =
+			withRecord?.state_consume && typeof withRecord.state_consume === "object"
+				? (withRecord.state_consume as Record<string, unknown>)
+				: null;
+
+		const nestedConsume =
+			withRecord?.consume && typeof withRecord.consume === "object"
+				? (withRecord.consume as Record<string, unknown>)
+				: null;
+
+		const withStateConsume =
+			nestedStateConsume?.output ?? nestedConsume?.output;
+
+		if (withStateConsume) return String(withStateConsume);
+
+		const firstOutput = claimStep.outputs?.[0];
+		const outputId = outputIdOfLocal(firstOutput);
+
+		if (!outputId) {
+			throw new Error(
+				`state_drain claim step "${claimStep.id}" must declare an output or state_consume.output`,
+			);
+		}
+
+		return outputId;
+	}
+
+	function claimCountFromArtifactData(data: unknown): number {
+		if (!data || typeof data !== "object") return 0;
+		const record = data as Record<string, unknown>;
+		const items = record.items;
+
+		const claimed =
+			record.claimed_count ??
+			record.valid_count ??
+			(Array.isArray(items) ? items.length : 0);
+
+		const n = Number(claimed);
+		return Number.isFinite(n) && n > 0 ? n : 0;
+	}
+
+	function drainChildId(
+		parentId: string,
+		iteration: number,
+		childId: string,
+	): string {
+		return `${parentId}:${iteration}:${childId}`;
+	}
+
+	function drainIterationPrefix(parentId: string, iteration: number): string {
+		return `${parentId}:${iteration}:`;
+	}
+
+	function drainChildrenForIteration(
+		parent: WorkflowStep,
+		iteration: number,
+		allSteps: WorkflowStep[],
+	): WorkflowStep[] {
+		const prefix = drainIterationPrefix(parent.id, iteration);
+		return allSteps.filter((s) => s.id.startsWith(prefix));
+	}
+
+	function isTerminalStatusLocal(status?: string | null): boolean {
+		return ["ok", "failed", "blocked", "skipped"].includes(String(status));
+	}
+
+	function remapDrainChildDeps(
+		innerSteps: WorkflowStep[],
+		parentStep: WorkflowStep,
+		iteration: number,
+		substitutedChild: WorkflowStep,
+	): WorkflowStep {
+		const prefix = drainIterationPrefix(parentStep.id, iteration);
+		const innerIds = new Set(innerSteps.map((s) => s.id));
+
+		return {
+			...substitutedChild,
+			depends_on: (substitutedChild.depends_on ?? []).map((depId) => {
+				if (innerIds.has(depId)) return prefix + depId;
+				return depId;
+			}),
+		};
+	}
+
+	async function appendDrainIteration(
+		parentStep: WorkflowStep,
+		iteration: number,
+	): Promise<void> {
+		const innerStepsDef = parentStep.steps ?? [];
+		if (innerStepsDef.length === 0) {
+			throw new Error(
+				`state_drain step "${parentStep.id}" must define nested steps`,
+			);
+		}
+
+		const spec = drainSpec(parentStep);
+		const iterationCtx = {
+			...varCtx,
+			iteration,
+			drain: {
+				worker_group: spec.worker_group,
+				iteration,
+			},
+		};
+
+		const expandedChildren: WorkflowStep[] = [];
+
+		for (const innerDef of innerStepsDef) {
+			const substituted = substituteDeep(
+				innerDef,
+				iterationCtx,
+			) as WorkflowStep;
+			const originalInnerId = substituted.id;
+
+			substituted.id = drainChildId(parentStep.id, iteration, originalInnerId);
+			substituted.original_id = `${parentStep.id}:${originalInnerId}`;
+
+			const remapped = remapDrainChildDeps(
+				innerStepsDef,
+				parentStep,
+				iteration,
+				substituted,
+			);
+
+			if (
+				remapped.kind === "plugin" &&
+				remapped.uses === "workflow.state_claim"
+			) {
+				remapped.state_consume = {
+					...(remapped.state_consume ?? {}),
+					worker_group:
+						remapped.state_consume?.worker_group ?? spec.worker_group,
+				};
+			}
+
+			for (const output of remapped.outputs || []) {
+				assertSafeOutputPath(outputPathOf(output));
+			}
+
+			expandedChildren.push(remapped);
+		}
+
+		for (const child of expandedChildren) {
+			if (stepMap.has(child.id)) continue;
+
+			steps.push(child);
+			stepMap.set(child.id, child);
+
+			await mutateState(() =>
+				persistStepPatch(child.id, {
+					status: "pending",
+					started_at: null,
+					completed_at: null,
+					duration_ms: null,
+					session_key: null,
+					session_id: null,
+					subagent_run_id: null,
+					session_adapter: null,
+					cancel_requested_at: null,
+					cancel_confirmed_at: null,
+					cancel_method: null,
+					cancel_error: null,
+					cancellation_reason: null,
+					retry_not_before: null,
+					output_check: null,
+					declared_outputs: child.outputs || [],
+					handoff: null,
+					cache: null,
+					output_writes: null,
+					counters: null,
+					reported_status: null,
+					last_update_at: null,
+					last_message: null,
+					handoff_token: null,
+					error: null,
+					logs: null,
+					attempts: 0,
+				} as Partial<StepState>),
+			);
+		}
+
+		const runtime = drainRuntime.get(parentStep.id) ?? {
+			iteration,
+			empty_claims: 0,
+			active_iteration: null,
+		};
+
+		runtime.iteration = iteration;
+		runtime.active_iteration = iteration;
+		drainRuntime.set(parentStep.id, runtime);
+
+		await notify(
+			`🔁 Expanded state_drain "${parentStep.id}" iteration ${iteration}`,
+		);
+	}
+
+	async function advanceStateDrainControllers(): Promise<void> {
+		for (const parentStep of steps) {
+			if (!isStateDrainStep(parentStep)) continue;
+
+			const parentState = state.steps[parentStep.id];
+			if (parentState?.status !== "running") continue;
+
+			const runtime = drainRuntime.get(parentStep.id);
+			const activeIteration = runtime?.active_iteration;
+			if (!activeIteration) continue;
+
+			const children = drainChildrenForIteration(
+				parentStep,
+				activeIteration,
+				steps,
+			);
+
+			if (children.length === 0) continue;
+
+			const childStates = children.map((child) => ({
+				step: child,
+				state: state.steps[child.id],
+			}));
+
+			const failedChild = childStates.find(({ step, state: childState }) => {
+				if (!childState) return false;
+				if (step.optional) return false;
+				return (
+					childState.status === "failed" || childState.status === "blocked"
+				);
+			});
+
+			if (failedChild) {
+				const now = getLocalISOString();
+				const msg = `state_drain child "${failedChild.step.id}" ${failedChild.state?.status}: ${failedChild.state?.error ?? "no error"}`;
+
+				await mutateState(() =>
+					persistStepPatch(parentStep.id, {
+						status: "failed",
+						completed_at: now,
+						duration_ms: parentState.started_at
+							? Date.now() - new Date(parentState.started_at).getTime()
+							: 0,
+						error: msg,
+						logs: JSON.stringify(
+							{
+								phase: "state_drain",
+								iteration: activeIteration,
+								failed_child: failedChild.step.id,
+								child_status: failedChild.state?.status,
+								child_error: failedChild.state?.error,
+							},
+							null,
+							2,
+						),
+					}),
+				);
+
+				if (!parentStep.optional) {
+					await cascadeSkip(parentStep.id);
+				}
+
+				continue;
+			}
+
+			const claimTemplate = findDrainClaimStep(parentStep.steps ?? []);
+			const claimChildId = drainChildId(
+				parentStep.id,
+				activeIteration,
+				claimTemplate.id,
+			);
+			const claimState = state.steps[claimChildId];
+
+			if (
+				!claimState ||
+				claimState.status === "pending" ||
+				claimState.status === "running"
+			) {
+				continue;
+			}
+
+			if (claimState.status !== "ok") {
+				continue;
+			}
+
+			const claimOutputId = claimOutputIdOf(claimTemplate);
+			const claimArtifact = await artifactStore.readArtifact(
+				runId,
+				claimChildId,
+				claimOutputId,
+			);
+
+			const claimedCount = claimCountFromArtifactData(claimArtifact?.data);
+
+			if (claimedCount === 0) {
+				const runtimeNext = drainRuntime.get(parentStep.id) ?? {
+					iteration: activeIteration,
+					empty_claims: 0,
+					active_iteration: activeIteration,
+				};
+
+				runtimeNext.empty_claims += 1;
+				drainRuntime.set(parentStep.id, runtimeNext);
+
+				for (const child of children) {
+					if (child.id === claimChildId) continue;
+					const childState = state.steps[child.id];
+					if (childState?.status === "pending") {
+						await mutateState(() =>
+							persistStepPatch(child.id, {
+								status: "skipped",
+								completed_at: getLocalISOString(),
+								duration_ms: 0,
+								error: null,
+								logs: JSON.stringify(
+									{
+										phase: "state_drain",
+										reason: "empty_claim",
+										iteration: activeIteration,
+										claim_step: claimChildId,
+									},
+									null,
+									2,
+								),
+							}),
+						);
+					}
+				}
+
+				if (
+					runtimeNext.empty_claims >= drainSpec(parentStep).max_empty_claims
+				) {
+					const now = getLocalISOString();
+					await mutateState(() =>
+						persistStepPatch(parentStep.id, {
+							status: "ok",
+							completed_at: now,
+							duration_ms: parentState.started_at
+								? Date.now() - new Date(parentState.started_at).getTime()
+								: 0,
+							error: null,
+							logs: JSON.stringify(
+								{
+									phase: "state_drain",
+									reason: "queue_empty",
+									worker_group: drainSpec(parentStep).worker_group,
+									iterations: activeIteration,
+									empty_claims: runtimeNext.empty_claims,
+								},
+								null,
+								2,
+							),
+						}),
+					);
+
+					await notify(
+						`✅ ${parentStep.name} drained queue after ${activeIteration} iteration(s)`,
+					);
+				} else {
+					await appendDrainIteration(parentStep, activeIteration + 1);
+				}
+
+				continue;
+			}
+
+			const allChildrenTerminal = childStates.every(({ state: childState }) =>
+				isTerminalStatusLocal(childState?.status),
+			);
+
+			if (!allChildrenTerminal) continue;
+
+			const spec = drainSpec(parentStep);
+			const runtimeNext = drainRuntime.get(parentStep.id) ?? {
+				iteration: activeIteration,
+				empty_claims: 0,
+				active_iteration: activeIteration,
+			};
+
+			runtimeNext.empty_claims = 0;
+
+			const nextIteration = activeIteration + 1;
+
+			if (
+				spec.max_iterations !== null &&
+				spec.max_iterations !== undefined &&
+				nextIteration > spec.max_iterations
+			) {
+				const msg =
+					`state_drain "${parentStep.id}" reached max_iterations=${spec.max_iterations} ` +
+					`before observing an empty claim`;
+
+				await mutateState(() =>
+					persistStepPatch(parentStep.id, {
+						status: "failed",
+						completed_at: getLocalISOString(),
+						duration_ms: parentState.started_at
+							? Date.now() - new Date(parentState.started_at).getTime()
+							: 0,
+						error: msg,
+						logs: JSON.stringify(
+							{
+								phase: "state_drain",
+								reason: "max_iterations",
+								max_iterations: spec.max_iterations,
+								last_iteration: activeIteration,
+							},
+							null,
+							2,
+						),
+					}),
+				);
+
+				if (!parentStep.optional) {
+					await cascadeSkip(parentStep.id);
+				}
+
+				continue;
+			}
+
+			drainRuntime.set(parentStep.id, runtimeNext);
+			await appendDrainIteration(parentStep, nextIteration);
+		}
+	}
+
 	/**
 	 * Execute a plugin step (kind: plugin) synchronously within the engine process.
 	 * No agent session is allocated. The registered operation runs directly and returns
@@ -1239,6 +1724,8 @@ export async function executeWorkflow(
 		}
 
 		// Check if all steps have reached terminal status
+		await advanceStateDrainControllers();
+
 		const allTerminal = steps.every((s) => {
 			const status = (state as RunState).steps[s.id]?.status;
 			return ["ok", "failed", "blocked", "skipped"].includes(status);
@@ -1281,6 +1768,62 @@ export async function executeWorkflow(
 				}
 
 				if (ready_final) {
+					if (isStateDrainStep(step)) {
+						await mutateState((current) =>
+							persistStepPatch(step.id, {
+								status: "running",
+								started_at:
+									current.steps[step.id]?.started_at ?? getLocalISOString(),
+								attempts: (current.steps[step.id]?.attempts || 0) + 1,
+								error: null,
+								logs: null,
+								counters: {
+									...(current.steps[step.id]?.counters ?? {}),
+									iteration: 1,
+									empty_claims: 0,
+								},
+							}),
+						);
+
+						try {
+							drainSpec(step);
+							findDrainClaimStep(step.steps ?? []);
+							drainRuntime.set(step.id, {
+								iteration: 1,
+								empty_claims: 0,
+								active_iteration: 1,
+							});
+							await appendDrainIteration(step, 1);
+						} catch (err) {
+							const message = err instanceof Error ? err.message : String(err);
+							await mutateState((current) =>
+								persistStepPatch(step.id, {
+									status: step.optional ? "ok" : "failed",
+									completed_at: getLocalISOString(),
+									duration_ms: current.steps[step.id]?.started_at
+										? Date.now() -
+											new Date(current.steps[step.id].started_at).getTime()
+										: 0,
+									error: step.optional ? null : message,
+									logs: JSON.stringify(
+										{
+											phase: "state_drain_expand",
+											error: message,
+										},
+										null,
+										2,
+									),
+								}),
+							);
+
+							if (!step.optional) {
+								await cascadeSkip(step.id);
+							}
+						}
+
+						continue;
+					}
+
 					if (step.for_each) {
 						await mutateState((current) =>
 							persistStepPatch(step.id, {

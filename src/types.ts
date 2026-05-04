@@ -531,7 +531,30 @@ export type StepFailureKind =
 	| "parse"
 	| "other";
 
-export type StepExecutorKind = "subagent" | "loop_subagent" | "plugin";
+export type StepExecutorKind =
+	| "subagent"
+	| "loop_subagent"
+	| "plugin"
+	| "state_drain";
+
+export type StateDrainSpec = {
+	/**
+	 * Worker group to drain. Usually maps to state.worker_groups.<name>.
+	 */
+	worker_group: string;
+
+	/**
+	 * How many consecutive empty claims are required before the drain controller
+	 * finishes. Defaults to 1.
+	 */
+	max_empty_claims?: number;
+
+	/**
+	 * Safety valve for development/testing. null/undefined means no workflow cap;
+	 * termination is queue emptiness.
+	 */
+	max_iterations?: number | null;
+};
 
 export type WorkflowStep = {
 	id: string;
@@ -570,6 +593,12 @@ export type WorkflowStep = {
 	state_consume?: StateConsumeSpec;
 	state_reclaim?: StateReclaimSpec;
 	state_complete?: StateCompleteSpec | StateCompleteSpec[];
+
+	/**
+	 * First-class scheduler controller. Repeatedly expands nested steps until
+	 * the configured worker-group queue returns an empty claim.
+	 */
+	drain?: StateDrainSpec;
 };
 
 /**
