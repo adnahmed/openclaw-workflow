@@ -199,6 +199,7 @@ function keyspace(
 		seenSet: `${prefix}:set:${collection}:seen:${date}`,
 		queuedSet: `${prefix}:set:${queuePart}:queued:${date}`,
 		queue: `${prefix}:queue:${queuePart}:${date}`,
+		processingQueue: `${prefix}:queue:${queuePart}:processing:${date}`,
 		activeHash: `${prefix}:hash:${queuePart}:active:${date}`,
 		stream: `${prefix}:stream:${collection}:${date}`,
 		document: itemKey ? `${prefix}:doc:${entity}:${itemKey}:${date}` : "",
@@ -243,6 +244,88 @@ function isPositive(reply: unknown): boolean {
 	if (typeof reply === "number") return reply > 0;
 	if (typeof reply === "string") return Number(reply) > 0;
 	return false;
+}
+
+function parseLease(value: unknown): JsonObject | null {
+	if (!value) return null;
+	if (typeof value === "object") return value as JsonObject;
+	try {
+		const parsed = JSON.parse(String(value));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as JsonObject)
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+function leaseIdOf(value: unknown): string {
+	const lease = parseLease(value);
+	return lease?.lease_id ? String(lease.lease_id) : "";
+}
+
+async function claimOne(
+	redis: RedisClient,
+	keys: ReturnType<typeof keyspace>,
+): Promise<string | null> {
+	try {
+		const moved = await redisRaw(
+			redis,
+			"LMOVE",
+			keys.queue,
+			keys.processingQueue,
+			"LEFT",
+			"RIGHT",
+		);
+		return moved ? String(moved) : null;
+	} catch {
+		const moved = await redisRaw(
+			redis,
+			"RPOPLPUSH",
+			keys.queue,
+			keys.processingQueue,
+		);
+		return moved ? String(moved) : null;
+	}
+}
+
+async function reclaimExpiredLeases(args: {
+	redis: RedisClient;
+	keys: ReturnType<typeof keyspace>;
+	collection: string;
+	queue: string;
+	runId: string;
+	stepId: string;
+}): Promise<number> {
+	const active = await args.redis.hgetall(args.keys.activeHash);
+	const now = Date.now();
+	let reclaimed = 0;
+
+	for (const [itemKey, rawLease] of Object.entries(active ?? {})) {
+		const lease = parseLease(rawLease);
+		const expiresAt = lease?.lease_expires_at
+			? Date.parse(String(lease.lease_expires_at))
+			: 0;
+
+		if (!expiresAt || expiresAt > now) continue;
+
+		await redisRaw(args.redis, "HDEL", args.keys.activeHash, itemKey);
+		await redisRaw(args.redis, "LREM", args.keys.processingQueue, 0, itemKey);
+		await redisRaw(args.redis, "LPUSH", args.keys.queue, itemKey);
+
+		await args.redis.xadd(args.keys.stream, "*", {
+			event: "lease_expired_requeued",
+			collection: args.collection,
+			item_key: itemKey,
+			queue: args.queue,
+			run_id: args.runId,
+			step_id: args.stepId,
+		});
+
+		reclaimed += 1;
+	}
+
+	return reclaimed;
 }
 
 async function incrBy(
@@ -350,6 +433,10 @@ export const statePublishOperation: WorkflowPluginOperation = {
 			}
 
 			const summaries: JsonObject[] = [];
+			let totalSelected = 0;
+			let totalPublished = 0;
+			let totalUpdated = 0;
+			let totalEnqueued = 0;
 
 			for (const spec of specs) {
 				if (!spec.output)
@@ -392,6 +479,7 @@ export const statePublishOperation: WorkflowPluginOperation = {
 				};
 
 				let published = 0;
+				let updated = 0;
 				let enqueued = 0;
 				const rejected: JsonObject[] = [];
 
@@ -418,9 +506,16 @@ export const statePublishOperation: WorkflowPluginOperation = {
 						}
 
 						const keys = keyspace(ctx, collection, itemKey, queue);
+						let firstSeen = true;
 
 						if (views.seen_index) {
-							await redisRaw(ctx.redis, "SADD", keys.seenSet, itemKey);
+							const addedSeen = await redisRaw(
+								ctx.redis,
+								"SADD",
+								keys.seenSet,
+								itemKey,
+							);
+							firstSeen = isPositive(addedSeen);
 						}
 
 						if (views.document) {
@@ -446,7 +541,7 @@ export const statePublishOperation: WorkflowPluginOperation = {
 
 						if (views.event_stream) {
 							await ctx.redis.xadd(keys.stream, "*", {
-								event: "published",
+								event: firstSeen ? "published" : "updated",
 								collection,
 								item_key: itemKey,
 								lifecycle,
@@ -456,7 +551,8 @@ export const statePublishOperation: WorkflowPluginOperation = {
 							});
 						}
 
-						published += 1;
+						if (firstSeen) published += 1;
+						else updated += 1;
 					}
 
 					if (coll.counters?.published) {
@@ -476,12 +572,18 @@ export const statePublishOperation: WorkflowPluginOperation = {
 					}
 				}
 
+				totalSelected += items.length;
+				totalPublished += published;
+				totalUpdated += updated;
+				totalEnqueued += enqueued;
+
 				summaries.push({
 					collection,
 					from_step: fromStep,
 					output: spec.output,
 					selected_count: items.length,
 					published_count: published,
+					updated_count: updated,
 					enqueued_count: enqueued,
 					rejected_items: rejected,
 					queue: queue ?? null,
@@ -499,11 +601,14 @@ export const statePublishOperation: WorkflowPluginOperation = {
 
 			await commitPluginOutput(ctx, summaryOutput, {
 				status: "ok",
+				backend: ctx.redis ? "redis" : "filesystem",
+				mode: ctx.redis ? "stateful" : "artifact_only",
 				generated_at: getLocalISOString(),
-				valid_count: summaries.reduce(
-					(sum, item) => sum + Number(item.published_count ?? 0),
-					0,
-				),
+				selected_count: totalSelected,
+				published_count: totalPublished,
+				updated_count: totalUpdated,
+				enqueued_count: totalEnqueued,
+				valid_count: totalPublished,
 				items: summaries,
 				rejected_items: summaries.flatMap(
 					(item) => (item.rejected_items as unknown[]) ?? [],
@@ -577,8 +682,12 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 
 				await commitPluginOutput(ctx, outputId, {
 					status: "ok",
+					backend: "filesystem",
+					mode: "artifact_only",
 					generated_at: getLocalISOString(),
 					valid_count: 0,
+					claimed_count: 0,
+					reclaimed_expired_count: 0,
 					items: [],
 					rejected_items: [],
 					workflow_result: {
@@ -596,12 +705,21 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 			}
 
 			const collectionKeys = keyspace(ctx, collection, undefined, queue);
+			const reclaimedExpiredCount = await reclaimExpiredLeases({
+				redis: ctx.redis,
+				keys: collectionKeys,
+				collection,
+				queue,
+				runId: ctx.runId,
+				stepId: ctx.step.id,
+			});
+
 			const claimedItemKeys: string[] = [];
 
 			for (let i = 0; i < batchSize; i += 1) {
-				const popped = await redisRaw(ctx.redis, "LPOP", collectionKeys.queue);
-				if (!popped) break;
-				claimedItemKeys.push(String(popped));
+				const moved = await claimOne(ctx.redis, collectionKeys);
+				if (!moved) break;
+				claimedItemKeys.push(moved);
 			}
 
 			const now = Date.now();
@@ -629,12 +747,16 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 					}
 				}
 
+				const leaseId = `${ctx.runId}:${ctx.step.id}:${itemKey}:${now}`;
 				const lease = {
+					lease_id: leaseId,
 					item_key: itemKey,
 					collection,
 					queue,
+					worker_group: spec.worker_group ?? null,
 					leased_at: getLocalISOString(),
 					lease_expires_at: leaseExpiresAt,
+					lease_seconds: leaseSeconds,
 					run_id: ctx.runId,
 					step_id: ctx.step.id,
 				};
@@ -653,16 +775,20 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 				});
 
 				items.push({
+					...item,
 					item_key: itemKey,
 					lease,
-					item,
 				});
 			}
 
 			await commitPluginOutput(ctx, outputId, {
 				status: "ok",
+				backend: "redis",
+				mode: "stateful",
 				generated_at: getLocalISOString(),
 				valid_count: items.length,
+				claimed_count: items.length,
+				reclaimed_expired_count: reclaimedExpiredCount,
 				items,
 				rejected_items: [],
 				workflow_result: {
@@ -675,7 +801,7 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 
 			return okResult({
 				duration_ms: Date.now() - start,
-				logs: `claimed ${items.length} item(s) from ${queue}`,
+				logs: `claimed ${items.length} item(s) from ${queue} (reclaimed expired: ${reclaimedExpiredCount})`,
 			});
 		} catch (err) {
 			return failResult(
@@ -750,6 +876,7 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 				let completed = 0;
 				let failed = 0;
 				let skipped = 0;
+				let stale = 0;
 
 				if (!ctx.redis) {
 					logs.push(
@@ -770,12 +897,38 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 								: "completed";
 
 						const keys = keyspace(ctx, collection, itemKey, queue);
+						const queueKeys = queue
+							? keyspace(ctx, collection, undefined, queue)
+							: null;
 
-						if (queue) {
+						if (queue && queueKeys) {
+							const active = await ctx.redis.hgetall(queueKeys.activeHash);
+							const activeLeaseRaw = active?.[itemKey];
+							const activeLeaseId = leaseIdOf(activeLeaseRaw);
+							const rowLeaseId = leaseIdOf(row.lease);
+
+							if (activeLeaseId && rowLeaseId && activeLeaseId !== rowLeaseId) {
+								stale += 1;
+
+								await ctx.redis.xadd(keys.stream, "*", {
+									event: "completion_stale_lease_skipped",
+									collection,
+									item_key: itemKey,
+									queue,
+									status,
+									run_id: ctx.runId,
+									step_id: ctx.step.id,
+								});
+
+								continue;
+							}
+
+							await redisRaw(ctx.redis, "HDEL", queueKeys.activeHash, itemKey);
 							await redisRaw(
 								ctx.redis,
-								"HDEL",
-								keyspace(ctx, collection, undefined, queue).activeHash,
+								"LREM",
+								queueKeys.processingQueue,
+								0,
 								itemKey,
 							);
 						}
@@ -825,10 +978,11 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 					completed,
 					failed,
 					skipped,
+					stale_count: stale,
 				});
 
 				logs.push(
-					`completed=${completed} failed=${failed} skipped=${skipped} collection=${collection}`,
+					`completed=${completed} failed=${failed} skipped=${skipped} stale=${stale} collection=${collection}`,
 				);
 			}
 

@@ -41,6 +41,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import {
+	buildIsolatedStepBoundaryPreamble,
+	filterSubagentMcpServers,
+} from "./native-state-boundary.js";
 import { checkOutputs, checkStepContract } from "./output-checker.js";
 import {
 	type CancelResult,
@@ -927,11 +931,10 @@ export async function runStep(step, runId, api, options) {
 		];
 		const uniqueRequiredSkills = [...new Set(combinedSkills)];
 
-		const combinedMcpServers = [
-			...(workflow?.required_mcp_servers ?? []),
-			...(step.required_mcp_servers ?? []),
-		];
-		const uniqueRequiredMcpServers = [...new Set(combinedMcpServers)];
+		const uniqueRequiredMcpServers = filterSubagentMcpServers({
+			workflow,
+			step,
+		});
 
 		// Only OpenClaw skills are checked against the agent skill allowlist.
 		// MCP server names such as MCP_DOCKER are validated/used by the MCP layer,
@@ -943,11 +946,12 @@ export async function runStep(step, runId, api, options) {
 			? `\nRequired skills for this step: ${uniqueRequiredSkills.join(", ")}.\n\nUse these skills directly when relevant.\nDo not substitute host shell commands for these skills.\nIf a required skill is unavailable, write the declared blocked/retryable output artifact explaining which skill was unavailable.\n`
 			: "";
 		const mcpContract = uniqueRequiredMcpServers.length
-			? `\nRequired MCP servers for this step: ${uniqueRequiredMcpServers.join(", ")}.\n\nUse tools from these MCP servers directly when the task names them, for example MCP_DOCKER.hset or MCP_DOCKER.browser_snapshot.\nDo not list MCP server names under required_skills; they are not OpenClaw skills.\nIf a required MCP server/tool is unavailable, write the declared blocked/retryable output artifact explaining which MCP server/tool was unavailable.\n`
+			? `\nExternal tools required for this step are available.\n\nUse external tools only when the task explicitly requires them.\nIf a required external capability is unavailable, produce the declared blocked/retryable output artifact explaining what capability was unavailable.\n`
 			: "";
-		const stateContractPreamble = step.state_contract
-			? `\nState persistence for this step is engine-owned.\nDo not call Redis tools.\nDo not call MCP Redis tools.\nOnly produce the declared outputs.\n`
-			: "";
+		const isolatedStepBoundaryPreamble = buildIsolatedStepBoundaryPreamble({
+			workflow,
+			step,
+		});
 		const signalingPreamble = buildWorkflowSignalingPreamble({
 			step,
 			runId,
@@ -968,7 +972,7 @@ export async function runStep(step, runId, api, options) {
 			writeOutputPreamble +
 			skillContract +
 			mcpContract +
-			stateContractPreamble +
+			isolatedStepBoundaryPreamble +
 			signalingPreamble +
 			step.task;
 

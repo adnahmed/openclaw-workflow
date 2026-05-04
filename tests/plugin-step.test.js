@@ -59,12 +59,13 @@ test("PluginOperationRegistry: list returns all registered operations", () => {
 	assert.deepEqual(ids, ["a", "b"]);
 });
 
-test("createDefaultRegistry includes workflow.cache_json_document and workflow.redis_run_initializer", () => {
+test("createDefaultRegistry includes workflow.cache_json_document, workflow.state_init, and workflow.redis_run_initializer", () => {
 	const registry = createDefaultRegistry();
 	assert.ok(
 		registry.has("workflow.cache_json_document"),
 		"missing cache_json_document",
 	);
+	assert.ok(registry.has("workflow.state_init"), "missing state_init");
 	assert.ok(
 		registry.has("workflow.redis_run_initializer"),
 		"missing redis_run_initializer",

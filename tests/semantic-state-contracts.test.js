@@ -179,6 +179,59 @@ class StatefulFakeRedisClient {
 					results.push(value);
 					break;
 				}
+				case "lmove": {
+					const [fromKey, toKey] = args.map(String);
+					const from = this.lists.get(fromKey) ?? [];
+					const to = this.lists.get(toKey) ?? [];
+					const value = from.length > 0 ? from.shift() : null;
+					this.lists.set(fromKey, from);
+					if (value != null) {
+						to.push(value);
+						this.lists.set(toKey, to);
+					}
+					results.push(value);
+					break;
+				}
+				case "rpoplpush": {
+					const [fromKey, toKey] = args.map(String);
+					const from = this.lists.get(fromKey) ?? [];
+					const to = this.lists.get(toKey) ?? [];
+					const value = from.length > 0 ? from.pop() : null;
+					this.lists.set(fromKey, from);
+					if (value != null) {
+						to.unshift(value);
+						this.lists.set(toKey, to);
+					}
+					results.push(value);
+					break;
+				}
+				case "lrem": {
+					const [key, countRaw, valueRaw] = args;
+					const keyStr = String(key);
+					const value = String(valueRaw);
+					const count = Number(countRaw);
+					const list = this.lists.get(keyStr) ?? [];
+					let removed = 0;
+					const next = [];
+					for (const item of list) {
+						if ((count === 0 || removed < Math.abs(count)) && item === value) {
+							removed += 1;
+							continue;
+						}
+						next.push(item);
+					}
+					this.lists.set(keyStr, next);
+					results.push(removed);
+					break;
+				}
+				case "lpush": {
+					const [key, ...values] = args.map(String);
+					const list = this.lists.get(key) ?? [];
+					list.unshift(...values);
+					this.lists.set(key, list);
+					results.push(list.length);
+					break;
+				}
 				case "hdel": {
 					const [key, ...fields] = args.map(String);
 					const hash = { ...(this.hashes.get(key) ?? {}) };
@@ -250,66 +303,66 @@ steps:
 test("workflow-loader parses collections queues worker_groups and explicit state plugin specs", async () => {
 	await withTempDir("semantic-plugin-loader", async (dir) => {
 		const wfPath = `${dir}/wf.yml`;
-		const yaml = `
-name: Semantic Plugin Workflow
-version: "1.0"
-state:
-	backend: auto
-	collections:
-		alerts:
-			entity: alert
-			item_key: alert_key
-			default_queue: alerts_pending
-	queues:
-		alerts_pending:
-			collection: alerts
-			batch_size: 10
-	worker_groups:
-		classifier:
-			queue: alerts_pending
-			batch_size: 5
-steps:
-	- id: publish
-		kind: plugin
-		uses: workflow.state_publish
-		state_publish:
-			from_step: collect
-			output: alerts_manifest
-			collection: alerts
-		depends_on: [collect]
-		outputs:
-			- id: state_publish_summary
-		timeout: 30
-		retry: 0
-		optional: false
-	- id: claim
-		kind: plugin
-		uses: workflow.state_claim
-		state_consume:
-			worker_group: classifier
-			output: claim_manifest
-		depends_on: [publish]
-		outputs:
-			- id: claim_manifest
-		timeout: 30
-		retry: 0
-		optional: false
-	- id: complete
-		kind: plugin
-		uses: workflow.state_complete
-		state_complete:
-			from_step: classify
-			output: classification_results
-			worker_group: classifier
-		depends_on: [claim]
-		outputs:
-			- id: complete_summary
-		timeout: 30
-		retry: 0
-		optional: false
-	- id: collect
-		task: collect
-`;
+		const yaml = [
+			"name: Semantic Plugin Workflow",
+			'version: "1.0"',
+			"state:",
+			"  backend: auto",
+			"  collections:",
+			"    alerts:",
+			"      entity: alert",
+			"      item_key: alert_key",
+			"      default_queue: alerts_pending",
+			"  queues:",
+			"    alerts_pending:",
+			"      collection: alerts",
+			"      batch_size: 10",
+			"  worker_groups:",
+			"    classifier:",
+			"      queue: alerts_pending",
+			"      batch_size: 5",
+			"steps:",
+			"  - id: publish",
+			"    kind: plugin",
+			"    uses: workflow.state_publish",
+			"    state_publish:",
+			"      from_step: collect",
+			"      output: alerts_manifest",
+			"      collection: alerts",
+			"    depends_on: [collect]",
+			"    outputs:",
+			"      - id: state_publish_summary",
+			"    timeout: 30",
+			"    retry: 0",
+			"    optional: false",
+			"  - id: claim",
+			"    kind: plugin",
+			"    uses: workflow.state_claim",
+			"    state_consume:",
+			"      worker_group: classifier",
+			"      output: claim_manifest",
+			"    depends_on: [publish]",
+			"    outputs:",
+			"      - id: claim_manifest",
+			"    timeout: 30",
+			"    retry: 0",
+			"    optional: false",
+			"  - id: complete",
+			"    kind: plugin",
+			"    uses: workflow.state_complete",
+			"    state_complete:",
+			"      from_step: classify",
+			"      output: classification_results",
+			"      worker_group: classifier",
+			"    depends_on: [claim]",
+			"    outputs:",
+			"      - id: complete_summary",
+			"    timeout: 30",
+			"    retry: 0",
+			"    optional: false",
+			"  - id: collect",
+			"    task: collect",
+		].join("\n");
 		await import("node:fs/promises").then((fs) =>
 			fs.writeFile(wfPath, yaml, "utf8"),
 		);

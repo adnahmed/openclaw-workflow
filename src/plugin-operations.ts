@@ -8,11 +8,13 @@
  *
  * Built-in operations:
  *   - workflow.cache_json_document   — read source JSON, write to RedisJSON + hash
- *   - workflow.redis_run_initializer — idempotent run init: counters, stream groups, locks
+ *   - workflow.state_init            — idempotent run init: counters, stream groups, run metadata
+ *   - workflow.redis_run_initializer — deprecated alias for workflow.state_init
  */
 
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import { workflowUsesNativeState } from "./native-state-boundary.js";
 import {
 	stateClaimOperation,
 	stateCompleteOperation,
@@ -317,7 +319,7 @@ const cacheJsonDocument: WorkflowPluginOperation = {
 	},
 };
 
-// ─── Built-in: workflow.redis_run_initializer ───────────────────────────────────
+// ─── Built-in: workflow.state_init ───────────────────────────────────────────────
 
 /**
  * Idempotent run initialization: creates counters, stream groups, and state hash.
@@ -331,10 +333,10 @@ const cacheJsonDocument: WorkflowPluginOperation = {
  *   metadata?: Record<string,string>  — fields to set in the run hash
  *   ttl_seconds?: number              — optional TTL on all created keys
  */
-const redisRunInitializer: WorkflowPluginOperation = {
-	id: "workflow.redis_run_initializer",
+const stateInitOperation: WorkflowPluginOperation = {
+	id: "workflow.state_init",
 	description:
-		"Idempotent Redis run initialization: state hash, stream group, counters.",
+		"Initialize workflow native state metadata, counters, and stream groups.",
 
 	async run(ctx: PluginOperationContext): Promise<PluginOperationResult> {
 		const start = Date.now();
@@ -355,9 +357,7 @@ const redisRunInitializer: WorkflowPluginOperation = {
 				: undefined;
 
 		if (!runKey)
-			return failResult(
-				"workflow.redis_run_initializer: with.run_key is required",
-			);
+			return failResult("workflow.state_init: with.run_key is required");
 
 		const logs: string[] = [];
 
@@ -402,7 +402,7 @@ const redisRunInitializer: WorkflowPluginOperation = {
 
 			if (!result.committed) {
 				return failResult(
-					`workflow.redis_run_initializer: artifact commit failed — ${result.message ?? result.decision}`,
+					`workflow.state_init: artifact commit failed — ${result.message ?? result.decision}`,
 				);
 			}
 			logs.push(`committed artifact ${outputId} (decision=${result.decision})`);
@@ -465,7 +465,7 @@ const redisRunInitializer: WorkflowPluginOperation = {
 					);
 				} else {
 					return failResult(
-						`workflow.redis_run_initializer: xgroup CREATE failed: ${msg}`,
+						`workflow.state_init: xgroup CREATE failed: ${msg}`,
 						{ duration_ms: Date.now() - start },
 					);
 				}
@@ -491,11 +491,26 @@ const redisRunInitializer: WorkflowPluginOperation = {
 	},
 };
 
+const redisRunInitializer: WorkflowPluginOperation = {
+	id: "workflow.redis_run_initializer",
+	description:
+		"Deprecated alias for workflow.state_init when native state is configured.",
+
+	async run(ctx: PluginOperationContext): Promise<PluginOperationResult> {
+		if (workflowUsesNativeState(ctx.workflow)) {
+			return stateInitOperation.run(ctx);
+		}
+
+		return stateInitOperation.run(ctx);
+	},
+};
+
 // ─── Default registry factory ───────────────────────────────────────────────────
 
 export function createDefaultRegistry(): PluginOperationRegistry {
 	const registry = new PluginOperationRegistry();
 	registry.register(cacheJsonDocument);
+	registry.register(stateInitOperation);
 	registry.register(redisRunInitializer);
 	registry.register(statePublishOperation);
 	registry.register(stateClaimOperation);
