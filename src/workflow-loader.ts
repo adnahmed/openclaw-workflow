@@ -554,6 +554,20 @@ function normalizeAndValidate(raw, filePath) {
 					: typeof step.state_contract === "string"
 						? step.state_contract
 						: undefined,
+				state_publish: Array.isArray(step.state_publish)
+					? step.state_publish
+					: step.state_publish && typeof step.state_publish === "object"
+						? step.state_publish
+						: undefined,
+				state_consume:
+					step.state_consume && typeof step.state_consume === "object"
+						? step.state_consume
+						: undefined,
+				state_complete: Array.isArray(step.state_complete)
+					? step.state_complete
+					: step.state_complete && typeof step.state_complete === "object"
+						? step.state_complete
+						: undefined,
 				complete_when: completeWhen,
 				signaling: signalingMode,
 			};
@@ -637,6 +651,19 @@ function normalizeAndValidate(raw, filePath) {
 						contracts:
 							raw.state.contracts && typeof raw.state.contracts === "object"
 								? raw.state.contracts
+								: undefined,
+						collections:
+							raw.state.collections && typeof raw.state.collections === "object"
+								? raw.state.collections
+								: undefined,
+						queues:
+							raw.state.queues && typeof raw.state.queues === "object"
+								? raw.state.queues
+								: undefined,
+						worker_groups:
+							raw.state.worker_groups &&
+							typeof raw.state.worker_groups === "object"
+								? raw.state.worker_groups
 								: undefined,
 					}
 				: undefined,

@@ -13,6 +13,11 @@
 
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import {
+	stateClaimOperation,
+	stateCompleteOperation,
+	statePublishOperation,
+} from "./state-plugin-operations.js";
 import type {
 	OutputCheckResult,
 	OutputValidationResult,
@@ -492,5 +497,8 @@ export function createDefaultRegistry(): PluginOperationRegistry {
 	const registry = new PluginOperationRegistry();
 	registry.register(cacheJsonDocument);
 	registry.register(redisRunInitializer);
+	registry.register(statePublishOperation);
+	registry.register(stateClaimOperation);
+	registry.register(stateCompleteOperation);
 	return registry;
 }

@@ -172,6 +172,10 @@ workflow_status({ name: "hello" })
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for the entire workflow. Steps without their own `required_skills` inherit these. Injected as instructions into step prompts and verified against agent config. |
 | `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by the workflow (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
 
+`state.contracts` lets you define **semantic state contracts** (for example, collection lifecycle semantics) that the runtime projects to Redis/native state views after outputs validate.
+
+`state.collections`, `state.queues`, and `state.worker_groups` let you define the same lifecycle as named semantic resources for explicit plugin-step state operations such as `workflow.state_publish`, `workflow.state_claim`, and `workflow.state_complete`.
+
 
 ### Step fields
 
@@ -201,6 +205,10 @@ workflow_status({ name: "hello" })
 | `on_block`     | string    | ❌       | `"block_run"` | Behavior when blocked: `"block_run"` (fails pipeline) or `"continue"`. |
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for this specific step. Overrides workflow-level `required_skills`. Injected as instructions into the step prompt and verified against agent config. |
 | `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by this step (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
+| `state_contract` | string\|string[] | ❌ | — | Semantic state contract name(s) to project after step outputs validate. The worker only produces outputs; runtime handles Redis/state materialization. |
+| `state_publish` | object\|object[] | ❌ | — | Semantic publish specification for `kind: plugin` steps using `workflow.state_publish`. Reads a prior artifact and publishes items into a configured collection/queue. |
+| `state_consume` | object | ❌ | — | Semantic consume/claim specification for `kind: plugin` steps using `workflow.state_claim`. Resolves a queue or worker group and emits a claim manifest artifact. |
+| `state_complete` | object\|object[] | ❌ | — | Semantic completion specification for `kind: plugin` steps using `workflow.state_complete`. Marks claimed items completed/failed using result artifacts from a prior step. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 | `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"`, `"outputs"`, `"session_then_outputs"`, `"handoff"`, or `"handoff_or_outputs"`. |
 | `signaling` | string | ❌ | auto for `handoff`/`handoff_or_outputs`, otherwise `off` | Controls plugin-injected signaling instructions. `"auto"` injects `workflow_step_update` + `workflow_step_complete` protocol into the runtime prompt so authors don't need to repeat this boilerplate in every step task. `"off"` disables injection for that step. |
@@ -223,6 +231,9 @@ Rules:
 Built-in operation IDs:
 - `workflow.cache_json_document`
 - `workflow.redis_run_initializer`
+- `workflow.state_publish`
+- `workflow.state_claim`
+- `workflow.state_complete`
 
 #### `workflow.cache_json_document`
 
@@ -279,6 +290,166 @@ Example:
     - id: run_config
 ```
 
+#### Semantic state resources for explicit plugin steps
+
+Use these top-level blocks when you want workflow YAML to describe *what* state exists while the plugin decides *how* it maps to Redis-backed views.
+
+```yaml
+state:
+  backend: auto
+  collections:
+    task_alerts:
+      entity: alert
+      item_key: alert_key
+      default_queue: task_alerts_pending
+      views:
+        document: true
+        metadata_hash: true
+        seen_index: true
+        pending_queue: true
+        event_stream: true
+      counters:
+        published: task_alerts_published
+        completed: task_alerts_completed
+        failed: task_alerts_failed
+  queues:
+    task_alerts_pending:
+      collection: task_alerts
+      batch_size: 25
+      visibility_timeout_s: 900
+  worker_groups:
+    task_alert_classifier:
+      queue: task_alerts_pending
+      batch_size: 10
+      lease_seconds: 900
+```
+
+Semantic resource notes:
+- `collections.<name>` defines the entity model and keying rules.
+- `queues.<name>` defines batching / pending-work semantics for a collection.
+- `worker_groups.<name>` defines how claimers resolve a queue plus lease behavior.
+
+#### `workflow.state_publish`
+
+Publishes items from a prior step artifact into a semantic collection and queue, then writes a summary artifact.
+
+Use when:
+- a worker step already produced a manifest artifact
+- you want the orchestrator/plugin to materialize queue/state views
+- you do **not** want subagents hand-writing Redis commands
+
+`state_publish` fields:
+- required: `from_step`, `output`
+- recommended: `collection`
+- optional: `queue`, `select`, `item_key`, `summary_output`
+
+Example:
+
+```yaml
+- id: publish_task_alert_state
+  kind: plugin
+  uses: workflow.state_publish
+  state_publish:
+    from_step: collect_task_alerts
+    output: alerts_manifest
+    collection: task_alerts
+    queue: task_alerts_pending
+    item_key: alert_key
+    summary_output: state_publish_summary
+  depends_on: [collect_task_alerts]
+  outputs:
+    - id: state_publish_summary
+```
+
+Behavior:
+- reads the declared artifact from `from_step` / `output`
+- selects items from the artifact payload (default root item list)
+- publishes documents / hashes / queue entries / stream events according to the collection config
+- increments configured counters when present
+- commits a summary artifact for downstream auditing
+
+#### `workflow.state_claim`
+
+Claims work from a semantic queue or worker group and writes a claim manifest artifact for downstream worker steps.
+
+`state_consume` fields:
+- required: one of `queue` or `worker_group`
+- required: `output`
+- optional: `batch_size`, `lease_seconds`
+
+Example:
+
+```yaml
+- id: claim_task_alert_batch
+  kind: plugin
+  uses: workflow.state_claim
+  state_consume:
+    worker_group: task_alert_classifier
+    output: claim_manifest
+  depends_on: [publish_task_alert_state]
+  outputs:
+    - id: claim_manifest
+
+- id: classify_claimed_alerts
+  depends_on: [claim_task_alert_batch]
+  task: |
+    Read the claimed alert batch from the claim_manifest artifact and classify each item.
+  outputs:
+    - id: classification_results
+```
+
+Behavior:
+- resolves the queue from `state_consume.queue` or the declared worker group
+- claims up to the configured batch size
+- records active leases in semantic state
+- appends claim events when event streams are enabled
+- commits a manifest artifact containing the claimed items for downstream steps
+
+#### `workflow.state_complete`
+
+Marks claimed items as completed or failed based on a result artifact written by a downstream worker step.
+
+`state_complete` fields:
+- required: `from_step`, `output`
+- required: one of `collection`, `queue`, or `worker_group`
+- optional: `select`, `item_key`, `status_field`, `summary_output`
+
+Example:
+
+```yaml
+- id: complete_task_alert_batch
+  kind: plugin
+  uses: workflow.state_complete
+  state_complete:
+    from_step: classify_claimed_alerts
+    output: classification_results
+    worker_group: task_alert_classifier
+    collection: task_alerts
+    select: $.items
+    item_key: alert_key
+    status_field: status
+    summary_output: state_complete_summary
+  depends_on: [classify_claimed_alerts]
+  outputs:
+    - id: state_complete_summary
+```
+
+Behavior:
+- reads result items from the upstream artifact
+- removes matching active leases
+- places items into semantic completed/failed membership sets
+- appends lifecycle events to the collection stream when configured
+- increments completion/failure counters and writes a summary artifact
+
+#### Explicit plugin flow vs. `state_contract`
+
+There are now two complementary semantic patterns:
+
+- `state_contract`: best when a normal worker step should produce outputs and the runtime should project state automatically after validation.
+- `workflow.state_publish` / `workflow.state_claim` / `workflow.state_complete`: best when you want the workflow graph to model publish/claim/complete as explicit orchestration steps.
+
+Both keep Redis details out of worker prompts and YAML-level imperative scripts.
+
 ### Automatic Step Signaling (Prompt Injection)
 
 When signaling is enabled for a step, the plugin injects a runtime protocol into the spawned step prompt so workflow authors do **not** need to embed signaling boilerplate in every `task`.
@@ -315,6 +486,65 @@ You can override per-step:
 Migration note:
 - Existing workflows that already include manual “Workflow signaling protocol” text in `task` will continue to work.
 - You can safely remove most of that repeated text and rely on `signaling: auto` for cleaner workflow files.
+
+### Semantic State Contracts (runtime-projected)
+
+Use semantic contracts when a step output should be interpreted as operational state (for example, a pending queue of alerts) without exposing Redis commands in YAML or prompts.
+
+How it works:
+1. Worker writes declared outputs (`write_output` / normal output contract path).
+2. Orchestrator validates outputs.
+3. If `state_contract` is declared, runtime projects the validated artifact to state views.
+4. If Redis is unavailable and policy is `artifact_only`, outputs still pass and remain usable.
+
+Example:
+
+```yaml
+state:
+  backend: auto
+  fallback: filesystem
+  materialize_outputs: on_demand
+  redis:
+    provider: auto
+    tool_prefix: MCP_DOCKER
+  contracts:
+    task_alert_collection:
+      kind: collection
+      entity: alert
+      item_key: alert_key
+      source_output: alerts_manifest
+      raw_output: alerts_raw
+      metadata_output: alerts_metadata
+      summary_output: alerts_summary
+      lifecycle: pending
+      dedupe:
+        by: [saved_search_id, href, query]
+      state_views:
+        document: true
+        metadata_hash: true
+        seen_index: true
+        pending_queue: true
+        event_stream: true
+      counters:
+        collected: alerts_collected
+        rejected: alerts_rejected
+      on_no_redis: artifact_only
+
+steps:
+  - id: collect_task_alerts
+    task: Collect task alert notifications.
+    state_contract: task_alert_collection
+    outputs:
+      - id: alerts_raw
+      - id: alerts_metadata
+      - id: alerts_manifest
+      - id: alerts_summary
+```
+
+Notes:
+- `state_contract` is semantic metadata, not an imperative Redis script.
+- Runtime prompt injection tells workers not to call Redis/MCP Redis for these steps.
+- Current runtime projector supports `kind: collection` and safely scalarizes hash fields.
 
 ### Automatic Declared Output Handling
 
@@ -933,7 +1163,7 @@ The engine resolves the list based on the format of the `for_each` value:
   Use `item_schema` to ensure the resolved list contains the expected data before expanding the loop:
   ```yaml
   - id: process_alerts
-    for_each: "data/linkedin/job-alerts/alerts-execution-manifest-{date}.json"
+    for_each: "data/alerts/alerts-execution-manifest-{date}.json"
     parser: "json"
     item_schema:
       type: object
@@ -1052,6 +1282,7 @@ interface PluginApi {
 | `src/workflow-executor.ts` | Core execution engine: scheduling, deps, retry, resume, dry run |
 | `src/workflow-state.ts` | Atomic state file R/W, run listing |
 | `src/state-artifact-stores.ts` | Filesystem-backed `WorkflowStateStore` / `WorkflowArtifactStore` implementations + `resolveStateBackend()` resolver |
+| `src/state-contract-projector.ts` | Semantic state contract projector that maps validated artifacts to runtime Redis/state views |
 | `src/step-runner.ts` | Session lifecycle: spawn, poll, output check. Includes MockAdapter |
 | `src/output-checker.ts` | File existence validation for output gates |
 | `src/output-validator.ts` | Advanced output content validation |

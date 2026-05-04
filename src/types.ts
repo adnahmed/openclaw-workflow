@@ -79,6 +79,84 @@ export type WorkflowStateConfig = {
 		tool_prefix?: string;
 	};
 	contracts?: Record<string, StateContractSpec>;
+	collections?: Record<string, StateCollectionSpec>;
+	queues?: Record<string, StateQueueSpec>;
+	worker_groups?: Record<string, StateWorkerGroupSpec>;
+};
+
+export type StateCollectionSpec = {
+	/** Singular entity name. Example: collection "alerts" -> entity "alert". */
+	entity?: string;
+	/** Field on each item containing the durable id. */
+	item_key?: string;
+	/** Default lifecycle used for event stream entries. */
+	lifecycle?: string;
+	/** Optional default queue for newly published items. */
+	default_queue?: string;
+	views?: {
+		document?: boolean;
+		metadata_hash?: boolean;
+		seen_index?: boolean;
+		event_stream?: boolean;
+		pending_queue?: boolean;
+	};
+	counters?: {
+		published?: string;
+		rejected?: string;
+		completed?: string;
+		failed?: string;
+	};
+	on_no_redis?: "artifact_only" | "fail";
+};
+
+export type StateQueueSpec = {
+	collection: string;
+	lifecycle?: string;
+	batch_size?: number;
+	visibility_timeout_s?: number;
+	suffix?: string;
+};
+
+export type StateWorkerGroupSpec = {
+	queue: string;
+	batch_size?: number;
+	lease_seconds?: number;
+	drain_after?: string | string[];
+	caps?: string[];
+};
+
+export type StatePublishSpec = {
+	from_step?: string;
+	output: string;
+	select?: string;
+	collection: string;
+	queue?: string;
+	item_key?: string;
+	lifecycle?: string;
+	summary_output?: string;
+	on_no_redis?: "artifact_only" | "fail";
+};
+
+export type StateConsumeSpec = {
+	queue?: string;
+	worker_group?: string;
+	collection?: string;
+	batch_size?: number;
+	lease_seconds?: number;
+	output?: string;
+	on_empty?: "pass" | "fail";
+};
+
+export type StateCompleteSpec = {
+	from_step?: string;
+	output: string;
+	select?: string;
+	queue?: string;
+	worker_group?: string;
+	collection?: string;
+	item_key?: string;
+	status_field?: string;
+	summary_output?: string;
 };
 
 export type StateContractSpec = {
@@ -462,6 +540,9 @@ export type WorkflowStep = {
 	signaling?: StepSignalingMode;
 	original_id?: string;
 	state_contract?: string | string[];
+	state_publish?: StatePublishSpec | StatePublishSpec[];
+	state_consume?: StateConsumeSpec;
+	state_complete?: StateCompleteSpec | StateCompleteSpec[];
 };
 
 /**

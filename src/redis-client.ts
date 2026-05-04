@@ -766,6 +766,23 @@ class McporterRedisClient implements RedisClient {
 					break;
 				}
 
+				case "lpop": {
+					const [key] = args;
+					results.push(await this.callTool("lpop", { key }));
+					break;
+				}
+
+				case "hdel": {
+					const [key, ...fields] = args;
+					results.push(
+						await this.callTool("hdel", {
+							key,
+							fields: fields.map((field) => String(field)),
+						}),
+					);
+					break;
+				}
+
 				case "exists":
 					results.push(await this.callTool("exists", { keys: args }));
 					break;
@@ -779,6 +796,12 @@ class McporterRedisClient implements RedisClient {
 				case "incr": {
 					const [key] = args;
 					results.push(await this.callTool("incr", { key }));
+					break;
+				}
+
+				case "incrby": {
+					const [key, amount] = args;
+					results.push(await this.callTool("incrby", { key, amount }));
 					break;
 				}
 
