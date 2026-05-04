@@ -114,6 +114,10 @@ export type StateQueueSpec = {
 	lifecycle?: string;
 	batch_size?: number;
 	visibility_timeout_s?: number;
+	/**
+	 * Optional stable key suffix. Example:
+	 * suffix: jobs:needs_classification
+	 */
 	suffix?: string;
 };
 
@@ -169,8 +173,22 @@ export type StateCompleteSpec = {
 
 export type StateContractSpec = {
 	kind: "collection" | "document" | "counter" | "queue";
+	/**
+	 * Canonical semantic collection name. If omitted, collection defaults to
+	 * pluralized entity, e.g. entity: "alert" -> collection: "alerts".
+	 */
+	collection?: string;
 	entity: string;
 	item_key?: string;
+	/**
+	 * Optional semantic queue name. If omitted and pending_queue is enabled,
+	 * the canonical queue key uses "<collection>:pending".
+	 */
+	queue?: string;
+	/**
+	 * Optional queue suffix override. Mirrors state.queues.<queue>.suffix.
+	 */
+	queue_suffix?: string;
 
 	source_output?: string;
 	raw_output?: string;

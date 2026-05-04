@@ -1,5 +1,11 @@
+import {
+	buildSemanticStateKeyspace,
+	pluralize,
+	redisRaw,
+	redisReplyIsPositive,
+	scalarizeForHash,
+} from "./state-keyspace.js";
 import type {
-	PluginOperationContext,
 	RedisClient,
 	StateContractSpec,
 	StoredArtifact,
@@ -11,63 +17,6 @@ type JsonRecord = Record<string, unknown>;
 function normalizeArray<T>(value: T | T[] | undefined | null): T[] {
 	if (value == null) return [];
 	return Array.isArray(value) ? value : [value];
-}
-
-function scalarizeForHash(obj: JsonRecord): Record<string, string> {
-	const out: Record<string, string> = {};
-
-	for (const [key, value] of Object.entries(obj)) {
-		if (value === undefined || value === null) {
-			out[key] = "";
-		} else if (typeof value === "string") {
-			out[key] = value;
-		} else if (typeof value === "number" || typeof value === "boolean") {
-			out[key] = String(value);
-		} else {
-			out[key] = JSON.stringify(value);
-		}
-	}
-
-	return out;
-}
-
-async function raw(redis: RedisClient, command: string, ...args: unknown[]) {
-	const result = await redis.multi([[command, ...args]]);
-	if (Array.isArray(result) && result.length === 1) {
-		const first = result[0] as unknown;
-		if (Array.isArray(first) && first.length === 2) {
-			const [err, value] = first as [unknown, unknown];
-			if (err) throw err instanceof Error ? err : new Error(String(err));
-			return value;
-		}
-		return first;
-	}
-	return result;
-}
-
-function buildStateKeyspace(
-	ctx: Pick<PluginOperationContext, "config" | "date">,
-	contract: StateContractSpec,
-) {
-	const prefix = String(
-		ctx.config["redis_prefix"] ||
-			ctx.config["state_key"] ||
-			"openclaw:workflow",
-	)
-		.trim()
-		.replace(/\s+/g, "_");
-	const date = ctx.date;
-	const entity = contract.entity;
-
-	return {
-		seenIndex: `${prefix}:set:${entity}s:seen:${date}`,
-		pendingQueue: `${prefix}:queue:${entity}s:pending:${date}`,
-		stream: `${prefix}:stream:${entity}s:${date}`,
-
-		document: (itemKey: string) => `${prefix}:doc:${entity}:${itemKey}:${date}`,
-
-		hash: (itemKey: string) => `${prefix}:hash:${entity}:${itemKey}:${date}`,
-	};
 }
 
 function itemArrayFromArtifact(artifact: StoredArtifact | null): JsonRecord[] {
@@ -156,45 +105,63 @@ export async function projectStateContracts(args: {
 			continue;
 		}
 
-		const keyspace = buildStateKeyspace(
-			{
-				config: {
-					...args.config,
-					state_key: args.workflow.state?.key,
-				},
-				date: args.date,
-			},
-			contract,
-		);
-
+		const collection = contract.collection ?? pluralize(contract.entity);
+		const queue = contract.queue;
 		for (const item of items) {
 			const itemField = contract.item_key || "id";
 			const itemValue = item[itemField];
 			const itemKey = itemValue == null ? "" : String(itemValue);
 			if (!itemKey) continue;
 
+			const itemKeys = buildSemanticStateKeyspace({
+				config: {
+					...args.config,
+					state_key: args.workflow.state?.key,
+				},
+				stateKey: args.workflow.state?.key,
+				workflowName: null,
+				date: args.date,
+				collection,
+				entity: contract.entity,
+				itemKey,
+				queue,
+				queueSuffix: contract.queue_suffix,
+			});
+
 			if (contract.state_views?.seen_index) {
-				await raw(args.redis, "sadd", keyspace.seenIndex, itemKey);
+				await redisRaw(args.redis, "SADD", itemKeys.seenSet, itemKey);
 			}
 
 			if (contract.state_views?.document) {
-				await args.redis.set(keyspace.document(itemKey), JSON.stringify(item));
+				await args.redis.set(itemKeys.document, JSON.stringify(item));
 			}
 
 			if (contract.state_views?.metadata_hash) {
-				await args.redis.hset(keyspace.hash(itemKey), scalarizeForHash(item));
+				await args.redis.hset(itemKeys.hash, scalarizeForHash(item));
 			}
 
 			if (contract.state_views?.pending_queue) {
-				await raw(args.redis, "rpush", keyspace.pendingQueue, itemKey);
+				const added = await redisRaw(
+					args.redis,
+					"SADD",
+					itemKeys.queuedSet,
+					itemKey,
+				);
+				if (redisReplyIsPositive(added)) {
+					await redisRaw(args.redis, "RPUSH", itemKeys.queue, itemKey);
+				}
 			}
 
 			if (contract.state_views?.event_stream) {
-				await args.redis.xadd(keyspace.stream, "*", {
+				await args.redis.xadd(itemKeys.stream, "*", {
+					event: "published",
+					collection,
 					entity: contract.entity,
 					item_key: itemKey,
 					lifecycle: contract.lifecycle || "pending",
+					queue: queue ?? "",
 					run_id: args.runId,
+					step_id: args.step.id,
 				});
 			}
 		}

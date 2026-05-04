@@ -6,6 +6,12 @@
  * claims, and completions without exposing Redis commands to workflow authors.
  */
 
+import {
+	buildSemanticStateKeyspace,
+	redisRaw,
+	redisReplyIsPositive,
+	scalarizeForHash,
+} from "./state-keyspace.js";
 import type {
 	OutputCheckResult,
 	OutputSpec,
@@ -154,22 +160,6 @@ function selectItems(value: unknown, selector?: string): JsonObject[] {
 	return [];
 }
 
-function singularize(name: string): string {
-	if (name.endsWith("ies")) return `${name.slice(0, -3)}y`;
-	if (name.endsWith("s") && name.length > 1) return name.slice(0, -1);
-	return name;
-}
-
-function statePrefix(ctx: PluginOperationContext): string {
-	const configured =
-		ctx.config.redis_prefix ??
-		ctx.workflow.state?.key ??
-		ctx.workflow.name ??
-		"workflow";
-
-	return String(configured).trim().replace(/\s+/g, "_");
-}
-
 function collectionSpec(
 	ctx: PluginOperationContext,
 	collection: string,
@@ -193,73 +183,26 @@ function resolveCollectionFromQueue(
 	return queueSpec(ctx, queue)?.collection;
 }
 
-function queueKeyPart(ctx: PluginOperationContext, queue: string): string {
-	const suffix = queueSpec(ctx, queue)?.suffix;
-	if (suffix) return suffix;
-	return queue.replace(/_/g, ":");
-}
-
 function keyspace(
 	ctx: PluginOperationContext,
 	collection: string,
 	itemKey?: string,
 	queue?: string,
 ) {
-	const prefix = statePrefix(ctx);
-	const date = ctx.date;
 	const coll = collectionSpec(ctx, collection);
-	const entity = coll.entity ?? singularize(collection);
-	const queuePart = queue ? queueKeyPart(ctx, queue) : `${collection}:pending`;
+	const qSpec = queueSpec(ctx, queue);
 
-	return {
-		seenSet: `${prefix}:set:${collection}:seen:${date}`,
-		queuedSet: `${prefix}:set:${queuePart}:queued:${date}`,
-		queue: `${prefix}:queue:${queuePart}:${date}`,
-		processingQueue: `${prefix}:queue:${queuePart}:processing:${date}`,
-		activeHash: `${prefix}:hash:${queuePart}:active:${date}`,
-		stream: `${prefix}:stream:${collection}:${date}`,
-		document: itemKey ? `${prefix}:doc:${entity}:${itemKey}:${date}` : "",
-		hash: itemKey ? `${prefix}:hash:${entity}:${itemKey}:${date}` : "",
-		terminalSet: (status: string) =>
-			`${prefix}:set:${collection}:${status}:${date}`,
-		counter: (name: string) => `${prefix}:counter:${name}:${date}`,
-	};
-}
-
-function scalarizeForHash(item: JsonObject): Record<string, string> {
-	const out: Record<string, string> = {};
-	for (const [key, value] of Object.entries(item)) {
-		if (value == null) out[key] = "";
-		else if (typeof value === "string") out[key] = value;
-		else if (typeof value === "number" || typeof value === "boolean")
-			out[key] = String(value);
-		else out[key] = JSON.stringify(value);
-	}
-	return out;
-}
-
-async function redisRaw(
-	redis: RedisClient,
-	command: string,
-	...args: unknown[]
-): Promise<unknown> {
-	const reply = await redis.multi([[command, ...args]]);
-	if (Array.isArray(reply) && reply.length === 1) {
-		const first = reply[0] as unknown;
-		if (Array.isArray(first) && first.length === 2) {
-			const [err, result] = first as [unknown, unknown];
-			if (err) throw err instanceof Error ? err : new Error(String(err));
-			return result;
-		}
-		return first;
-	}
-	return reply;
-}
-
-function isPositive(reply: unknown): boolean {
-	if (typeof reply === "number") return reply > 0;
-	if (typeof reply === "string") return Number(reply) > 0;
-	return false;
+	return buildSemanticStateKeyspace({
+		config: ctx.config,
+		stateKey: ctx.workflow.state?.key,
+		workflowName: ctx.workflow.name,
+		date: ctx.date,
+		collection,
+		entity: coll.entity,
+		itemKey,
+		queue,
+		queueSuffix: qSpec?.suffix,
+	});
 }
 
 function parseLease(value: unknown): JsonObject | null {
@@ -672,7 +615,7 @@ export const statePublishOperation: WorkflowPluginOperation = {
 								keys.seenSet,
 								itemKey,
 							);
-							firstSeen = isPositive(addedSeen);
+							firstSeen = redisReplyIsPositive(addedSeen);
 						}
 
 						if (views.document) {
@@ -690,7 +633,7 @@ export const statePublishOperation: WorkflowPluginOperation = {
 								keys.queuedSet,
 								itemKey,
 							);
-							if (isPositive(added)) {
+							if (redisReplyIsPositive(added)) {
 								await redisRaw(ctx.redis, "RPUSH", keys.queue, itemKey);
 								enqueued += 1;
 							}
