@@ -211,3 +211,73 @@ test("state_publish is idempotent for published counters and queueing", async ()
 		assert.equal(redis.counters.get(counterKey), 1);
 	});
 });
+
+test("state_publish fails without redis when the publish requires a queue", async () => {
+	await withTempDir("state-publish-no-redis-queue", async (dir) => {
+		const artifactStore = new FilesystemArtifactStore(dir, dir, "on_demand");
+		const registry = createDefaultRegistry();
+		const publish = registry.get("workflow.state_publish");
+		assert.ok(publish);
+
+		const workflow = {
+			name: "Publish Workflow",
+			version: "1.0",
+			description: "",
+			config: { redis_prefix: "wf:test" },
+			state: {
+				collections: {
+					jobs: {
+						entity: "job",
+						item_key: "job_id",
+						default_queue: "jobs_pending",
+					},
+				},
+				queues: {
+					jobs_pending: {
+						collection: "jobs",
+					},
+				},
+			},
+		};
+
+		await artifactStore.commitArtifact({
+			runId: "run-publish-no-redis",
+			stepId: "collect",
+			outputId: "jobs_manifest",
+			declaredOutput: { id: "jobs_manifest" },
+			data: [{ job_id: "job_123", title: "Backend Engineer" }],
+			validators: {},
+			attempt: 1,
+		});
+
+		const result = await publish.run({
+			workflow,
+			step: {
+				id: "publish",
+				uses: "workflow.state_publish",
+				with: {
+					state_publish: {
+						from_step: "collect",
+						output: "jobs_manifest",
+						collection: "jobs",
+						queue: "jobs_pending",
+						item_key: "job_id",
+						summary_output: "state_publish_summary",
+					},
+				},
+				depends_on: ["collect"],
+				outputs: [{ id: "state_publish_summary" }],
+			},
+			config: workflow.config,
+			runId: "run-publish-no-redis",
+			date: "2026-05-04",
+			stateStore: null,
+			artifactStore,
+			redis: null,
+			validators: {},
+		});
+
+		assert.equal(result.status, "failed");
+		assert.match(result.error, /requires Redis/i);
+	});
+});

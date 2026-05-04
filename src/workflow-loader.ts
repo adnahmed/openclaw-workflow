@@ -563,6 +563,10 @@ function normalizeAndValidate(raw, filePath) {
 					step.state_consume && typeof step.state_consume === "object"
 						? step.state_consume
 						: undefined,
+				state_reclaim:
+					step.state_reclaim && typeof step.state_reclaim === "object"
+						? step.state_reclaim
+						: undefined,
 				state_complete: Array.isArray(step.state_complete)
 					? step.state_complete
 					: step.state_complete && typeof step.state_complete === "object"

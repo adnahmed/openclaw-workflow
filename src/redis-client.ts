@@ -39,6 +39,8 @@ type NativeRedisDriver = {
 	exists(...keys: string[]): Promise<number>;
 	expire(key: string, seconds: number): Promise<number>;
 	incr(key: string): Promise<number>;
+	lrange(key: string, start: number, stop: number): Promise<string[]>;
+	eval(script: string, numKeys: number, ...args: string[]): Promise<unknown>;
 	xadd(key: string, id: string, ...pairs: string[]): Promise<string | null>;
 	xgroup(
 		command: "CREATE",
@@ -290,6 +292,10 @@ class NativeRedisClient implements RedisClient {
 		return this.client.incr(key);
 	}
 
+	async lrange(key: string, start: number, stop: number): Promise<string[]> {
+		return this.client.lrange(key, start, stop);
+	}
+
 	async xadd(
 		key: string,
 		id: string,
@@ -313,6 +319,10 @@ class NativeRedisClient implements RedisClient {
 		return options?.MKSTREAM
 			? this.client.xgroup(command, key, group, id, "MKSTREAM")
 			: this.client.xgroup(command, key, group, id);
+	}
+
+	async eval(script: string, keys: string[], args: string[]): Promise<unknown> {
+		return this.client.eval(script, keys.length, ...keys, ...args);
 	}
 
 	async multi(commands: Array<[string, ...unknown[]]>): Promise<unknown[]> {
@@ -637,6 +647,25 @@ class McporterRedisClient implements RedisClient {
 		return this.asNumber(result, 0);
 	}
 
+	async lrange(key: string, start: number, stop: number): Promise<string[]> {
+		const result = this.parseToolPayload(
+			await this.callTool("lrange", { key, start, stop }),
+		);
+
+		if (Array.isArray(result)) {
+			return result.map((value) => String(value));
+		}
+
+		const objectResult = asObject(result);
+		const values = Array.isArray(objectResult?.values)
+			? objectResult.values
+			: Array.isArray(objectResult?.items)
+				? objectResult.items
+				: [];
+
+		return values.map((value) => String(value));
+	}
+
 	async xadd(
 		key: string,
 		id: string,
@@ -671,6 +700,16 @@ class McporterRedisClient implements RedisClient {
 			mkstream: options?.MKSTREAM ?? false,
 		});
 		return "OK";
+	}
+
+	async eval(script: string, keys: string[], args: string[]): Promise<unknown> {
+		return this.parseToolPayload(
+			await this.callTool("eval", {
+				script,
+				keys,
+				args,
+			}),
+		);
 	}
 
 	async multi(commands: Array<[string, ...unknown[]]>): Promise<unknown[]> {
@@ -796,6 +835,12 @@ class McporterRedisClient implements RedisClient {
 				case "incr": {
 					const [key] = args;
 					results.push(await this.callTool("incr", { key }));
+					break;
+				}
+
+				case "lrange": {
+					const [key, start, stop] = args;
+					results.push(await this.callTool("lrange", { key, start, stop }));
 					break;
 				}
 

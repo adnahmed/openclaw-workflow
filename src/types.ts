@@ -147,6 +147,14 @@ export type StateConsumeSpec = {
 	on_empty?: "pass" | "fail";
 };
 
+export type StateReclaimSpec = {
+	queue?: string;
+	worker_group?: string;
+	collection?: string;
+	output?: string;
+	on_no_redis?: "fail";
+};
+
 export type StateCompleteSpec = {
 	from_step?: string;
 	output: string;
@@ -542,6 +550,7 @@ export type WorkflowStep = {
 	state_contract?: string | string[];
 	state_publish?: StatePublishSpec | StatePublishSpec[];
 	state_consume?: StateConsumeSpec;
+	state_reclaim?: StateReclaimSpec;
 	state_complete?: StateCompleteSpec | StateCompleteSpec[];
 };
 
@@ -604,11 +613,13 @@ export interface RedisClient {
 	exists(...keys: string[]): Promise<number>;
 	expire(key: string, seconds: number): Promise<number>;
 	incr(key: string): Promise<number>;
+	lrange?(key: string, start: number, stop: number): Promise<string[]>;
 	xadd(
 		key: string,
 		id: string,
 		fields: Record<string, string>,
 	): Promise<string | null>;
+	eval?(script: string, keys: string[], args: string[]): Promise<unknown>;
 	xgroup(
 		command: "CREATE",
 		key: string,

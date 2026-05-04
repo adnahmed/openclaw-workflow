@@ -208,6 +208,7 @@ workflow_status({ name: "hello" })
 | `state_contract` | string\|string[] | ❌ | — | Semantic state contract name(s) to project after step outputs validate. The worker only produces outputs; runtime handles Redis/state materialization. |
 | `state_publish` | object\|object[] | ❌ | — | Semantic publish specification for `kind: plugin` steps using `workflow.state_publish`. Reads a prior artifact and publishes items into a configured collection/queue. |
 | `state_consume` | object | ❌ | — | Semantic consume/claim specification for `kind: plugin` steps using `workflow.state_claim`. Resolves a queue or worker group and emits a claim manifest artifact. |
+| `state_reclaim` | object | ❌ | — | Semantic reclaim specification for `kind: plugin` steps using `workflow.state_reclaim_expired`. Requeues expired or orphaned in-flight claims before another worker pass. |
 | `state_complete` | object\|object[] | ❌ | — | Semantic completion specification for `kind: plugin` steps using `workflow.state_complete`. Marks claimed items completed/failed using result artifacts from a prior step. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 | `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"`, `"outputs"`, `"session_then_outputs"`, `"handoff"`, or `"handoff_or_outputs"`. |
@@ -234,6 +235,7 @@ Built-in operation IDs:
 - `workflow.redis_run_initializer`
 - `workflow.state_publish`
 - `workflow.state_claim`
+- `workflow.state_reclaim_expired`
 - `workflow.state_complete`
 
 #### `workflow.cache_json_document`
@@ -373,6 +375,9 @@ Behavior:
 - increments configured counters when present
 - commits a summary artifact for downstream auditing
 
+Important:
+- artifact-only fallback is only safe for non-queue projections. If the publish writes to a queue, Redis is required because there is no filesystem-backed queue consumer yet.
+
 #### `workflow.state_claim`
 
 Claims work from a semantic queue or worker group and writes a claim manifest artifact for downstream worker steps.
@@ -406,11 +411,46 @@ Example:
 Behavior:
 - resolves the queue from `state_consume.queue` or the declared worker group
 - reclaims expired leases back to pending before new claims
-- claims up to the configured batch size using pending → processing queue movement
-- records active leases with a concrete `lease_id`
+- also reclaims orphaned processing entries that have no active lease record (for example, after a crash between queue move and lease bookkeeping)
+- claims up to the configured batch size using atomic pending → processing movement
+- writes active leases during claim; when Lua/eval is available this happens in the same Redis operation as the queue move
 - appends claim events when event streams are enabled
 - commits a manifest artifact containing flattened claimed items (plus `item_key` and `lease`) for downstream steps
-- includes deterministic summary fields such as `claimed_count` and `reclaimed_expired_count`
+- includes deterministic summary fields such as `claimed_count`, `reclaimed_expired_count`, and `reclaimed_orphaned_count`
+
+Important:
+- `workflow.state_claim` requires Redis. There is currently no filesystem-backed queue implementation, so artifact-only mode is intentionally rejected for queue claims.
+
+#### `workflow.state_reclaim_expired`
+
+Requeues expired leases — and orphaned processing entries without a matching lease record — without claiming new work.
+
+Use when:
+- you want an explicit recovery/repair step in the workflow graph
+- you want lease cleanup to run on a schedule or before a specific worker wave
+
+`state_reclaim` fields:
+- required: one of `queue` or `worker_group`
+- optional: `output`
+
+Example:
+
+```yaml
+- id: reclaim_task_alert_batch
+  kind: plugin
+  uses: workflow.state_reclaim_expired
+  state_reclaim:
+    worker_group: task_alert_classifier
+    output: reclaim_summary
+  outputs:
+    - id: reclaim_summary
+```
+
+Behavior:
+- scans the queue's processing list and active lease hash
+- requeues expired active leases back to pending
+- requeues orphaned processing entries that have no active lease record
+- writes a recovery summary artifact with `reclaimed_expired_count`, `reclaimed_orphaned_count`, and `reclaimed_count`
 
 #### `workflow.state_complete`
 
@@ -458,6 +498,9 @@ There are now two complementary semantic patterns:
 - `workflow.state_publish` / `workflow.state_claim` / `workflow.state_complete`: best when you want the workflow graph to model publish/claim/complete as explicit orchestration steps.
 
 Both keep Redis details out of worker prompts and YAML-level imperative scripts.
+
+Current limitation:
+- `state_contract` and the explicit plugin-step state operations do **not** currently share the same key naming convention. `state_contract` projects keys using the contract `entity` (for example `queue:alerts:pending`), while explicit plugin steps key by collection/queue names. Until those namespaces are unified, do not mix both approaches for the same records if you need a single canonical queue/state view.
 
 ### Automatic Step Signaling (Prompt Injection)
 

@@ -360,6 +360,18 @@ test("workflow-loader parses collections queues worker_groups and explicit state
 			"    timeout: 30",
 			"    retry: 0",
 			"    optional: false",
+			"  - id: reclaim",
+			"    kind: plugin",
+			"    uses: workflow.state_reclaim_expired",
+			"    state_reclaim:",
+			"      worker_group: classifier",
+			"      output: reclaim_summary",
+			"    depends_on: [claim]",
+			"    outputs:",
+			"      - id: reclaim_summary",
+			"    timeout: 30",
+			"    retry: 0",
+			"    optional: false",
 			"  - id: collect",
 			"    task: collect",
 		].join("\n");
@@ -374,13 +386,15 @@ test("workflow-loader parses collections queues worker_groups and explicit state
 		assert.equal(wf.steps[0].state_publish.collection, "alerts");
 		assert.equal(wf.steps[1].state_consume.worker_group, "classifier");
 		assert.equal(wf.steps[2].state_complete.output, "classification_results");
+		assert.equal(wf.steps[3].state_reclaim.output, "reclaim_summary");
 	});
 });
 
-test("createDefaultRegistry includes workflow.state_publish/claim/complete", () => {
+test("createDefaultRegistry includes workflow.state_publish/claim/reclaim/complete", () => {
 	const registry = createDefaultRegistry();
 	assert.equal(registry.has("workflow.state_publish"), true);
 	assert.equal(registry.has("workflow.state_claim"), true);
+	assert.equal(registry.has("workflow.state_reclaim_expired"), true);
 	assert.equal(registry.has("workflow.state_complete"), true);
 });
 

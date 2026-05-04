@@ -10,6 +10,10 @@
  *   - workflow.cache_json_document   — read source JSON, write to RedisJSON + hash
  *   - workflow.state_init            — idempotent run init: counters, stream groups, run metadata
  *   - workflow.redis_run_initializer — deprecated alias for workflow.state_init
+ *   - workflow.state_publish         — publish artifact rows into semantic collection/queue state
+ *   - workflow.state_claim           — claim a leased batch from a semantic queue
+ *   - workflow.state_reclaim_expired — requeue expired or orphaned in-flight claims
+ *   - workflow.state_complete        — complete claimed items into terminal state
  */
 
 import { readFile } from "node:fs/promises";
@@ -19,6 +23,7 @@ import {
 	stateClaimOperation,
 	stateCompleteOperation,
 	statePublishOperation,
+	stateReclaimExpiredOperation,
 } from "./state-plugin-operations.js";
 import type {
 	OutputCheckResult,
@@ -514,6 +519,7 @@ export function createDefaultRegistry(): PluginOperationRegistry {
 	registry.register(redisRunInitializer);
 	registry.register(statePublishOperation);
 	registry.register(stateClaimOperation);
+	registry.register(stateReclaimExpiredOperation);
 	registry.register(stateCompleteOperation);
 	return registry;
 }

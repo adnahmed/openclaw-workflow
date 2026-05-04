@@ -18,11 +18,27 @@ import type {
 	StateConsumeSpec,
 	StatePublishSpec,
 	StateQueueSpec,
+	StateReclaimSpec,
 	WorkflowPluginOperation,
 } from "./types.js";
 import { getLocalISOString } from "./workflow-state.js";
 
 type JsonObject = Record<string, unknown>;
+type ReclaimStats = {
+	reclaimedExpiredCount: number;
+	reclaimedOrphanedCount: number;
+};
+
+const CLAIM_WITH_LEASE_SCRIPT = `
+local item = redis.call('LMOVE', KEYS[1], KEYS[2], 'LEFT', 'RIGHT')
+if not item then
+  return nil
+end
+
+local lease = string.gsub(ARGV[1], '"__ITEM_KEY_PLACEHOLDER__"', cjson.encode(item), 1)
+redis.call('HSET', KEYS[3], item, lease)
+return item
+`;
 
 function emptyOutputCheck(): OutputCheckResult {
 	return {
@@ -289,6 +305,88 @@ async function claimOne(
 	}
 }
 
+function buildLeaseRecord(args: {
+	ctx: PluginOperationContext;
+	collection: string;
+	queue: string;
+	workerGroup?: string;
+	leaseSeconds: number;
+	leaseId: string;
+	leasedAt: string;
+	leaseExpiresAt: string;
+}): JsonObject {
+	return {
+		lease_id: args.leaseId,
+		item_key: "__ITEM_KEY_PLACEHOLDER__",
+		collection: args.collection,
+		queue: args.queue,
+		worker_group: args.workerGroup ?? null,
+		leased_at: args.leasedAt,
+		lease_expires_at: args.leaseExpiresAt,
+		lease_seconds: args.leaseSeconds,
+		run_id: args.ctx.runId,
+		step_id: args.ctx.step.id,
+	};
+}
+
+async function claimOneWithLease(args: {
+	redis: RedisClient;
+	keys: ReturnType<typeof keyspace>;
+	leaseJson: string;
+}): Promise<string | null> {
+	if (typeof args.redis.eval === "function") {
+		try {
+			const claimed = await args.redis.eval(
+				CLAIM_WITH_LEASE_SCRIPT,
+				[args.keys.queue, args.keys.processingQueue, args.keys.activeHash],
+				[args.leaseJson],
+			);
+			return claimed ? String(claimed) : null;
+		} catch {
+			// Fall through to compatibility mode.
+		}
+	}
+
+	const moved = await claimOne(args.redis, args.keys);
+	if (!moved) return null;
+
+	await args.redis.hset(args.keys.activeHash, {
+		[moved]: args.leaseJson.replace(
+			'"__ITEM_KEY_PLACEHOLDER__"',
+			JSON.stringify(moved),
+		),
+	});
+
+	return moved;
+}
+
+function resolveQueueContext(
+	ctx: PluginOperationContext,
+	spec: {
+		queue?: string;
+		worker_group?: string;
+		collection?: string;
+	},
+) {
+	const workerGroup = spec.worker_group
+		? ctx.workflow.state?.worker_groups?.[spec.worker_group]
+		: undefined;
+	const queue = spec.queue ?? workerGroup?.queue;
+	if (!queue) {
+		return { error: "queue or worker_group is required" } as const;
+	}
+
+	const qSpec = queueSpec(ctx, queue);
+	const collection = spec.collection ?? qSpec?.collection;
+	if (!collection) {
+		return {
+			error: `collection could not be resolved for queue "${queue}"`,
+		} as const;
+	}
+
+	return { workerGroup, queue, collection } as const;
+}
+
 async function reclaimExpiredLeases(args: {
 	redis: RedisClient;
 	keys: ReturnType<typeof keyspace>;
@@ -296,10 +394,34 @@ async function reclaimExpiredLeases(args: {
 	queue: string;
 	runId: string;
 	stepId: string;
-}): Promise<number> {
+}): Promise<ReclaimStats> {
 	const active = await args.redis.hgetall(args.keys.activeHash);
+	const processingItems =
+		typeof args.redis.lrange === "function"
+			? await args.redis.lrange(args.keys.processingQueue, 0, -1)
+			: [];
 	const now = Date.now();
-	let reclaimed = 0;
+	let reclaimedExpiredCount = 0;
+	let reclaimedOrphanedCount = 0;
+	const processingSet = new Set(processingItems);
+
+	for (const itemKey of processingItems) {
+		if (active?.[itemKey]) continue;
+
+		await redisRaw(args.redis, "LREM", args.keys.processingQueue, 0, itemKey);
+		await redisRaw(args.redis, "LPUSH", args.keys.queue, itemKey);
+
+		await args.redis.xadd(args.keys.stream, "*", {
+			event: "claim_orphan_requeued",
+			collection: args.collection,
+			item_key: itemKey,
+			queue: args.queue,
+			run_id: args.runId,
+			step_id: args.stepId,
+		});
+
+		reclaimedOrphanedCount += 1;
+	}
 
 	for (const [itemKey, rawLease] of Object.entries(active ?? {})) {
 		const lease = parseLease(rawLease);
@@ -307,7 +429,27 @@ async function reclaimExpiredLeases(args: {
 			? Date.parse(String(lease.lease_expires_at))
 			: 0;
 
-		if (!expiresAt || expiresAt > now) continue;
+		if (expiresAt && expiresAt > now) continue;
+
+		if (!expiresAt && processingSet.has(itemKey)) {
+			await redisRaw(args.redis, "HDEL", args.keys.activeHash, itemKey);
+			await redisRaw(args.redis, "LREM", args.keys.processingQueue, 0, itemKey);
+			await redisRaw(args.redis, "LPUSH", args.keys.queue, itemKey);
+
+			await args.redis.xadd(args.keys.stream, "*", {
+				event: "lease_missing_requeued",
+				collection: args.collection,
+				item_key: itemKey,
+				queue: args.queue,
+				run_id: args.runId,
+				step_id: args.stepId,
+			});
+
+			reclaimedOrphanedCount += 1;
+			continue;
+		}
+
+		if (!expiresAt) continue;
 
 		await redisRaw(args.redis, "HDEL", args.keys.activeHash, itemKey);
 		await redisRaw(args.redis, "LREM", args.keys.processingQueue, 0, itemKey);
@@ -322,10 +464,13 @@ async function reclaimExpiredLeases(args: {
 			step_id: args.stepId,
 		});
 
-		reclaimed += 1;
+		reclaimedExpiredCount += 1;
 	}
 
-	return reclaimed;
+	return {
+		reclaimedExpiredCount,
+		reclaimedOrphanedCount,
+	};
 }
 
 async function incrBy(
@@ -399,6 +544,15 @@ function consumeSpec(ctx: PluginOperationContext): StateConsumeSpec {
 		withObject(ctx).consume ??
 		stepSpec ??
 		{}) as unknown as StateConsumeSpec;
+}
+
+function reclaimSpec(ctx: PluginOperationContext): StateReclaimSpec {
+	const stepSpec = (ctx.step as unknown as { state_reclaim?: StateReclaimSpec })
+		.state_reclaim;
+	return (withObject(ctx).state_reclaim ??
+		withObject(ctx).reclaim ??
+		stepSpec ??
+		{}) as unknown as StateReclaimSpec;
 }
 
 function completeSpecs(ctx: PluginOperationContext): StateCompleteSpec[] {
@@ -486,9 +640,12 @@ export const statePublishOperation: WorkflowPluginOperation = {
 				if (!ctx.redis) {
 					const policy =
 						spec.on_no_redis ?? coll.on_no_redis ?? "artifact_only";
-					if (policy === "fail") {
+					const requiresQueue = Boolean(queue && views.pending_queue);
+					if (policy === "fail" || requiresQueue) {
 						return failResult(
-							`workflow.state_publish: no Redis client for collection "${collection}"`,
+							requiresQueue
+								? `workflow.state_publish: queue-backed publish for collection "${collection}" requires Redis; artifact_only does not provide a consumable queue`
+								: `workflow.state_publish: no Redis client for collection "${collection}"`,
 						);
 					}
 					logs.push(`no redis client; ${collection} publish is artifact-only`);
@@ -646,24 +803,13 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 
 		try {
 			const spec = consumeSpec(ctx);
-			const workerGroup = spec.worker_group
-				? ctx.workflow.state?.worker_groups?.[spec.worker_group]
-				: undefined;
-
-			const queue = spec.queue ?? workerGroup?.queue;
-			if (!queue) {
-				return failResult(
-					"workflow.state_claim: queue or worker_group is required",
-				);
+			const resolved = resolveQueueContext(ctx, spec);
+			if ("error" in resolved) {
+				return failResult(`workflow.state_claim: ${resolved.error}`);
 			}
 
+			const { workerGroup, queue, collection } = resolved;
 			const qSpec = queueSpec(ctx, queue);
-			const collection = spec.collection ?? qSpec?.collection;
-			if (!collection) {
-				return failResult(
-					`workflow.state_claim: collection could not be resolved for queue "${queue}"`,
-				);
-			}
 
 			const batchSize =
 				spec.batch_size ?? workerGroup?.batch_size ?? qSpec?.batch_size ?? 1;
@@ -676,36 +822,17 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 			const outputId = spec.output ?? "state_claim_manifest";
 
 			if (!ctx.redis) {
-				if (spec.on_empty === "fail") {
-					return failResult("workflow.state_claim: no Redis client available");
-				}
-
-				await commitPluginOutput(ctx, outputId, {
-					status: "ok",
-					backend: "filesystem",
-					mode: "artifact_only",
-					generated_at: getLocalISOString(),
-					valid_count: 0,
-					claimed_count: 0,
-					reclaimed_expired_count: 0,
-					items: [],
-					rejected_items: [],
-					workflow_result: {
-						ok: true,
+				return failResult(
+					"workflow.state_claim: Redis is required for queue claims; artifact_only does not provide a consumable queue backend",
+					{
+						duration_ms: Date.now() - start,
 						retryable: false,
-						blocked: false,
-						failed: false,
 					},
-				});
-
-				return okResult({
-					duration_ms: Date.now() - start,
-					logs: "no redis client; committed empty claim manifest",
-				});
+				);
 			}
 
 			const collectionKeys = keyspace(ctx, collection, undefined, queue);
-			const reclaimedExpiredCount = await reclaimExpiredLeases({
+			const reclaimStats = await reclaimExpiredLeases({
 				redis: ctx.redis,
 				keys: collectionKeys,
 				collection,
@@ -715,15 +842,35 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 			});
 
 			const claimedItemKeys: string[] = [];
+			const claimedLeases = new Map<string, JsonObject>();
 
 			for (let i = 0; i < batchSize; i += 1) {
-				const moved = await claimOne(ctx.redis, collectionKeys);
+				const leaseNow = Date.now();
+				const lease = buildLeaseRecord({
+					ctx,
+					collection,
+					queue,
+					workerGroup: spec.worker_group,
+					leaseSeconds,
+					leaseId: `${ctx.runId}:${ctx.step.id}:${leaseNow}:${i}`,
+					leasedAt: new Date(leaseNow).toISOString(),
+					leaseExpiresAt: new Date(
+						leaseNow + leaseSeconds * 1000,
+					).toISOString(),
+				});
+				const moved = await claimOneWithLease({
+					redis: ctx.redis,
+					keys: collectionKeys,
+					leaseJson: JSON.stringify(lease),
+				});
 				if (!moved) break;
 				claimedItemKeys.push(moved);
+				claimedLeases.set(moved, {
+					...lease,
+					item_key: moved,
+				});
 			}
 
-			const now = Date.now();
-			const leaseExpiresAt = new Date(now + leaseSeconds * 1000).toISOString();
 			const itemKeyField = collectionSpec(ctx, collection).item_key ?? "id";
 			const items: JsonObject[] = [];
 
@@ -747,23 +894,7 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 					}
 				}
 
-				const leaseId = `${ctx.runId}:${ctx.step.id}:${itemKey}:${now}`;
-				const lease = {
-					lease_id: leaseId,
-					item_key: itemKey,
-					collection,
-					queue,
-					worker_group: spec.worker_group ?? null,
-					leased_at: getLocalISOString(),
-					lease_expires_at: leaseExpiresAt,
-					lease_seconds: leaseSeconds,
-					run_id: ctx.runId,
-					step_id: ctx.step.id,
-				};
-
-				await ctx.redis.hset(collectionKeys.activeHash, {
-					[itemKey]: JSON.stringify(lease),
-				});
+				const lease = claimedLeases.get(itemKey) ?? { item_key: itemKey };
 
 				await ctx.redis.xadd(keyspace(ctx, collection).stream, "*", {
 					event: "claimed",
@@ -788,7 +919,11 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 				generated_at: getLocalISOString(),
 				valid_count: items.length,
 				claimed_count: items.length,
-				reclaimed_expired_count: reclaimedExpiredCount,
+				reclaimed_expired_count: reclaimStats.reclaimedExpiredCount,
+				reclaimed_orphaned_count: reclaimStats.reclaimedOrphanedCount,
+				reclaimed_count:
+					reclaimStats.reclaimedExpiredCount +
+					reclaimStats.reclaimedOrphanedCount,
 				items,
 				rejected_items: [],
 				workflow_result: {
@@ -801,11 +936,92 @@ export const stateClaimOperation: WorkflowPluginOperation = {
 
 			return okResult({
 				duration_ms: Date.now() - start,
-				logs: `claimed ${items.length} item(s) from ${queue} (reclaimed expired: ${reclaimedExpiredCount})`,
+				logs:
+					`claimed ${items.length} item(s) from ${queue} ` +
+					`(reclaimed expired: ${reclaimStats.reclaimedExpiredCount}, orphaned: ${reclaimStats.reclaimedOrphanedCount})`,
 			});
 		} catch (err) {
 			return failResult(
 				`workflow.state_claim: ${err instanceof Error ? err.message : String(err)}`,
+				{
+					duration_ms: Date.now() - start,
+				},
+			);
+		}
+	},
+};
+
+export const stateReclaimExpiredOperation: WorkflowPluginOperation = {
+	id: "workflow.state_reclaim_expired",
+	description:
+		"Requeue expired or orphaned in-flight claims for a semantic workflow queue.",
+
+	async run(ctx: PluginOperationContext): Promise<PluginOperationResult> {
+		const start = Date.now();
+
+		try {
+			const spec = reclaimSpec(ctx);
+			const resolved = resolveQueueContext(ctx, spec);
+			if ("error" in resolved) {
+				return failResult(`workflow.state_reclaim_expired: ${resolved.error}`);
+			}
+
+			const { queue, collection } = resolved;
+			const outputId = spec.output ?? "state_reclaim_summary";
+
+			if (!ctx.redis) {
+				return failResult(
+					"workflow.state_reclaim_expired: Redis is required for queue lease recovery",
+					{
+						duration_ms: Date.now() - start,
+						retryable: false,
+					},
+				);
+			}
+
+			const reclaimStats = await reclaimExpiredLeases({
+				redis: ctx.redis,
+				keys: keyspace(ctx, collection, undefined, queue),
+				collection,
+				queue,
+				runId: ctx.runId,
+				stepId: ctx.step.id,
+			});
+
+			await commitPluginOutput(ctx, outputId, {
+				status: "ok",
+				backend: "redis",
+				mode: "stateful",
+				generated_at: getLocalISOString(),
+				queue,
+				collection,
+				reclaimed_expired_count: reclaimStats.reclaimedExpiredCount,
+				reclaimed_orphaned_count: reclaimStats.reclaimedOrphanedCount,
+				reclaimed_count:
+					reclaimStats.reclaimedExpiredCount +
+					reclaimStats.reclaimedOrphanedCount,
+				items: [],
+				rejected_items: [],
+				valid_count:
+					reclaimStats.reclaimedExpiredCount +
+					reclaimStats.reclaimedOrphanedCount,
+				workflow_result: {
+					ok: true,
+					retryable: false,
+					blocked: false,
+					failed: false,
+				},
+			});
+
+			return okResult({
+				duration_ms: Date.now() - start,
+				logs:
+					`reclaimed queue=${queue} expired=${reclaimStats.reclaimedExpiredCount} ` +
+					`orphaned=${reclaimStats.reclaimedOrphanedCount}`,
+			});
+		} catch (err) {
+			return failResult(
+				`workflow.state_reclaim_expired: ${err instanceof Error ? err.message : String(err)}`,
 				{
 					duration_ms: Date.now() - start,
 				},
