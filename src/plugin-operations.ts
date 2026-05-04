@@ -11,10 +11,8 @@
  *   - workflow.redis_run_initializer — idempotent run init: counters, stream groups, locks
  */
 
-import { createHash } from "node:crypto";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { getLocalISOString } from "./workflow-state.js";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import type {
 	OutputCheckResult,
 	OutputValidationResult,
@@ -22,6 +20,8 @@ import type {
 	PluginOperationResult,
 	WorkflowPluginOperation,
 } from "./types.js";
+import { buildContext, substituteVars } from "./variable-substitution.js";
+import { getLocalISOString } from "./workflow-state.js";
 
 // ─── Registry ──────────────────────────────────────────────────────────────────
 
@@ -73,7 +73,9 @@ function failedOutputCheck(message: string): OutputCheckResult {
 	};
 }
 
-function okResult(extra: Partial<PluginOperationResult> = {}): PluginOperationResult {
+function okResult(
+	extra: Partial<PluginOperationResult> = {},
+): PluginOperationResult {
 	return {
 		status: "ok",
 		output_check: emptyOutputCheck(),
@@ -84,7 +86,10 @@ function okResult(extra: Partial<PluginOperationResult> = {}): PluginOperationRe
 	};
 }
 
-function failResult(message: string, extra: Partial<PluginOperationResult> = {}): PluginOperationResult {
+function failResult(
+	message: string,
+	extra: Partial<PluginOperationResult> = {},
+): PluginOperationResult {
 	return {
 		status: "failed",
 		retryable: true,
@@ -96,27 +101,48 @@ function failResult(message: string, extra: Partial<PluginOperationResult> = {})
 	};
 }
 
-function resolveWith<T = Record<string, unknown>>(ctx: PluginOperationContext): T {
+function resolveWith<T = Record<string, unknown>>(
+	ctx: PluginOperationContext,
+): T {
 	return (ctx.step.with ?? {}) as T;
 }
 
-function substituteString(value: string, ctx: PluginOperationContext): string {
-	return value
-		.replace(/\{date\}/g, ctx.date)
-		.replace(/\{run_id\}/g, ctx.runId)
-		.replace(/\{config\.([^}]+)\}/g, (_, key) => {
-			const v = (ctx.config as Record<string, unknown>)[key];
-			return v !== undefined ? String(v) : `{config.${key}}`;
-		});
+function buildPluginSubstitutionContext(
+	ctx: PluginOperationContext,
+): Record<string, unknown> {
+	if (ctx.substitutionContext && typeof ctx.substitutionContext === "object") {
+		return ctx.substitutionContext;
+	}
+
+	return buildContext(
+		ctx.runId,
+		ctx.config,
+		new Date(),
+		"UTC",
+		null,
+		ctx.workflow?.name ?? null,
+	) as Record<string, unknown>;
+}
+
+function substituteString(
+	value: string,
+	subCtx: Record<string, unknown>,
+): string {
+	return String(
+		substituteVars(value, subCtx, {
+			unknown: "throw",
+		}),
+	);
 }
 
 function substituteWith(
 	obj: Record<string, unknown>,
 	ctx: PluginOperationContext,
 ): Record<string, unknown> {
+	const subCtx = buildPluginSubstitutionContext(ctx);
 	const out: Record<string, unknown> = {};
 	for (const [k, v] of Object.entries(obj)) {
-		out[k] = typeof v === "string" ? substituteString(v, ctx) : v;
+		out[k] = typeof v === "string" ? substituteString(v, subCtx) : v;
 	}
 	return out;
 }
@@ -147,15 +173,33 @@ const cacheJsonDocument: WorkflowPluginOperation = {
 		const sourcePath = rawWith["source_path"] as string | undefined;
 		const jsonKey = rawWith["json_key"] as string | undefined;
 		const hashKey = rawWith["hash_key"] as string | undefined;
-		const allowedHashFields = (rawWith["allowed_hash_fields"] as string[] | undefined) ?? [];
-		const ttlSeconds = typeof rawWith["ttl_seconds"] === "number" ? rawWith["ttl_seconds"] : undefined;
-		const baseDir = (rawWith["base_dir"] as string | undefined) ?? ctx.config["baseDir"] as string ?? process.cwd();
+		const allowedHashFields =
+			(rawWith["allowed_hash_fields"] as string[] | undefined) ?? [];
+		const ttlSeconds =
+			typeof rawWith["ttl_seconds"] === "number"
+				? rawWith["ttl_seconds"]
+				: undefined;
+		const baseDir =
+			(rawWith["base_dir"] as string | undefined) ??
+			(ctx.config["baseDir"] as string) ??
+			process.cwd();
 
-		if (!sourcePath) return failResult("workflow.cache_json_document: with.source_path is required");
-		if (!jsonKey) return failResult("workflow.cache_json_document: with.json_key is required");
-		if (!hashKey && ctx.redis) return failResult("workflow.cache_json_document: with.hash_key is required");
+		if (!sourcePath)
+			return failResult(
+				"workflow.cache_json_document: with.source_path is required",
+			);
+		if (!jsonKey)
+			return failResult(
+				"workflow.cache_json_document: with.json_key is required",
+			);
+		if (!hashKey && ctx.redis)
+			return failResult(
+				"workflow.cache_json_document: with.hash_key is required",
+			);
 
-		const absSourcePath = isAbsolute(sourcePath) ? sourcePath : resolve(baseDir, sourcePath);
+		const absSourcePath = isAbsolute(sourcePath)
+			? sourcePath
+			: resolve(baseDir, sourcePath);
 
 		let doc: Record<string, unknown>;
 		try {
@@ -166,22 +210,27 @@ const cacheJsonDocument: WorkflowPluginOperation = {
 				`workflow.cache_json_document: failed to read/parse source file "${absSourcePath}": ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
-		const logs: string[] = [`read ${absSourcePath} (${Object.keys(doc).length} top-level keys)`];
+		const logs: string[] = [
+			`read ${absSourcePath} (${Object.keys(doc).length} top-level keys)`,
+		];
 
 		// Commit to artifact store as the declared output
-		let artifactResult: unknown = null;
 		const declaredOutputs = ctx.step.outputs ?? [];
 		const firstOutput = declaredOutputs[0];
 		const outputId =
 			firstOutput && typeof firstOutput === "object" && firstOutput.id
 				? firstOutput.id
-				: (rawWith["output_id"] as string | undefined) ?? "applicant_profile_cache";
+				: ((rawWith["output_id"] as string | undefined) ??
+					"applicant_profile_cache");
 
 		if (ctx.artifactStore) {
-			const validator = firstOutput && typeof firstOutput === "object" && firstOutput.validate
-				? firstOutput.validate
+			const validator =
+				firstOutput && typeof firstOutput === "object" && firstOutput.validate
+					? firstOutput.validate
+					: undefined;
+			const validatorSpec = validator
+				? (ctx.validators[validator] ?? undefined)
 				: undefined;
-			const validatorSpec = validator ? (ctx.validators[validator] ?? undefined) : undefined;
 
 			const result = await ctx.artifactStore.commitArtifact({
 				runId: ctx.runId,
@@ -201,12 +250,13 @@ const cacheJsonDocument: WorkflowPluginOperation = {
 				);
 			}
 			logs.push(`committed artifact ${outputId} (decision=${result.decision})`);
-			artifactResult = result.artifact;
 		}
 
-				// Redis path (optional — fall through to filesystem-only if no redis client)
+		// Redis path (optional — fall through to filesystem-only if no redis client)
 		if (!ctx.redis) {
-			logs.push("no redis client — skipping RedisJSON/hash write (filesystem artifact only)");
+			logs.push(
+				"no redis client — skipping RedisJSON/hash write (filesystem artifact only)",
+			);
 		} else {
 			// Write full JSON document to RedisJSON
 			try {
@@ -228,16 +278,19 @@ const cacheJsonDocument: WorkflowPluginOperation = {
 				const hashFields: Record<string, string> = {};
 				for (const field of allowedHashFields) {
 					if (field in doc) {
-						hashFields[field] = typeof doc[field] === "string"
-							? doc[field] as string
-							: JSON.stringify(doc[field]);
+						hashFields[field] =
+							typeof doc[field] === "string"
+								? (doc[field] as string)
+								: JSON.stringify(doc[field]);
 					}
 				}
 
 				if (Object.keys(hashFields).length > 0) {
 					try {
 						await ctx.redis.hset(hashKey, hashFields);
-						logs.push(`hset ${hashKey} (${Object.keys(hashFields).length} fields)`);
+						logs.push(
+							`hset ${hashKey} (${Object.keys(hashFields).length} fields)`,
+						);
 						if (ttlSeconds) {
 							await ctx.redis.expire(hashKey, ttlSeconds);
 							logs.push(`expire ${hashKey} ${ttlSeconds}s`);
@@ -281,15 +334,25 @@ const redisRunInitializer: WorkflowPluginOperation = {
 	async run(ctx: PluginOperationContext): Promise<PluginOperationResult> {
 		const start = Date.now();
 		const rawWith = substituteWith(resolveWith(ctx), ctx);
+		const subCtx = buildPluginSubstitutionContext(ctx);
 
 		const runKey = rawWith["run_key"] as string | undefined;
 		const streamKey = rawWith["stream_key"] as string | undefined;
-		const streamGroup = (rawWith["stream_group"] as string | undefined) ?? "workers";
-		const counterKeys = rawWith["counter_keys"] as Record<string, number> | undefined;
+		const streamGroup =
+			(rawWith["stream_group"] as string | undefined) ?? "workers";
+		const counterKeys = rawWith["counter_keys"] as
+			| Record<string, number>
+			| undefined;
 		const metadata = rawWith["metadata"] as Record<string, string> | undefined;
-		const ttlSeconds = typeof rawWith["ttl_seconds"] === "number" ? rawWith["ttl_seconds"] : undefined;
+		const ttlSeconds =
+			typeof rawWith["ttl_seconds"] === "number"
+				? rawWith["ttl_seconds"]
+				: undefined;
 
-		if (!runKey) return failResult("workflow.redis_run_initializer: with.run_key is required");
+		if (!runKey)
+			return failResult(
+				"workflow.redis_run_initializer: with.run_key is required",
+			);
 
 		const logs: string[] = [];
 
@@ -299,7 +362,7 @@ const redisRunInitializer: WorkflowPluginOperation = {
 		const outputId =
 			firstOutput && typeof firstOutput === "object" && firstOutput.id
 				? firstOutput.id
-				: (rawWith["output_id"] as string | undefined) ?? "run_config";
+				: ((rawWith["output_id"] as string | undefined) ?? "run_config");
 
 		const initRecord = {
 			run_id: ctx.runId,
@@ -312,10 +375,13 @@ const redisRunInitializer: WorkflowPluginOperation = {
 		};
 
 		if (ctx.artifactStore) {
-			const validator = firstOutput && typeof firstOutput === "object" && firstOutput.validate
-				? firstOutput.validate
+			const validator =
+				firstOutput && typeof firstOutput === "object" && firstOutput.validate
+					? firstOutput.validate
+					: undefined;
+			const validatorSpec = validator
+				? (ctx.validators[validator] ?? undefined)
 				: undefined;
-			const validatorSpec = validator ? (ctx.validators[validator] ?? undefined) : undefined;
 
 			const result = await ctx.artifactStore.commitArtifact({
 				runId: ctx.runId,
@@ -338,8 +404,13 @@ const redisRunInitializer: WorkflowPluginOperation = {
 		}
 
 		if (!ctx.redis) {
-			logs.push("no redis client — skipping Redis initialization (filesystem artifact only)");
-			return okResult({ duration_ms: Date.now() - start, logs: logs.join("\n") });
+			logs.push(
+				"no redis client — skipping Redis initialization (filesystem artifact only)",
+			);
+			return okResult({
+				duration_ms: Date.now() - start,
+				logs: logs.join("\n"),
+			});
 		}
 
 		// Write run hash (idempotent: merge new metadata without overwriting existing)
@@ -360,7 +431,9 @@ const redisRunInitializer: WorkflowPluginOperation = {
 			}
 			if (Object.keys(newFields).length > 0) {
 				await ctx.redis.hset(runKey, newFields);
-				logs.push(`hset ${runKey} (${Object.keys(newFields).length} new fields)`);
+				logs.push(
+					`hset ${runKey} (${Object.keys(newFields).length} new fields)`,
+				);
 			} else {
 				logs.push(`hset ${runKey} (already initialized — skipped)`);
 			}
@@ -374,13 +447,17 @@ const redisRunInitializer: WorkflowPluginOperation = {
 		// Create stream + consumer group (idempotent)
 		if (streamKey) {
 			try {
-				await ctx.redis.xgroup("CREATE", streamKey, streamGroup, "0", { MKSTREAM: true });
+				await ctx.redis.xgroup("CREATE", streamKey, streamGroup, "0", {
+					MKSTREAM: true,
+				});
 				logs.push(`xgroup CREATE ${streamKey} ${streamGroup} (created)`);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				// BUSYGROUP is the expected error when group already exists
 				if (msg.includes("BUSYGROUP") || msg.includes("already exists")) {
-					logs.push(`xgroup CREATE ${streamKey} ${streamGroup} (already exists — skipped)`);
+					logs.push(
+						`xgroup CREATE ${streamKey} ${streamGroup} (already exists — skipped)`,
+					);
 				} else {
 					return failResult(
 						`workflow.redis_run_initializer: xgroup CREATE failed: ${msg}`,
@@ -392,7 +469,7 @@ const redisRunInitializer: WorkflowPluginOperation = {
 
 		// Initialize counters (only if key does not exist)
 		for (const [key, initial] of Object.entries(counterKeys ?? {})) {
-			const fullKey = substituteString(key, ctx);
+			const fullKey = substituteString(key, subCtx);
 			const exists = await ctx.redis.exists(fullKey);
 			if (!exists) {
 				await ctx.redis.set(fullKey, String(initial));

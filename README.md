@@ -411,6 +411,7 @@ The following `{variable}` tokens are substituted in `task` and `outputs` fields
 | `{run_state_path}` | `/home/user/.openclaw/workflow-runs/seo-pipeline-20260309T082000.json` | Path to the run state JSON file |
 | `{item}`      | `Song-1.mp3`                    | Current loop iteration value (only available inside `for_each` steps) |
 | `{config.X}`  | `my-custom-value`               | Value of variable `X` from the top-level `config` block |
+| `{env.X}`     | `/home/user`                    | Value of environment variable `X` (for example `{env.HOME}`) |
 | `\{variable}`  | `{date}`                       | Literal text (escaped). Prevents substitution. |
   
   Unknown `{variables}` are typically left as-is, except in `for_each` path templates where they cause an immediate error.

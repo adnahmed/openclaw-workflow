@@ -442,6 +442,7 @@ export type PluginOperationContext = {
 	config: Record<string, unknown>;
 	runId: string;
 	date: string;
+	substitutionContext?: Record<string, unknown> | null;
 	stateStore: WorkflowStateStore;
 	artifactStore: WorkflowArtifactStore;
 	redis: RedisClient | null;
