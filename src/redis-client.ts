@@ -744,6 +744,28 @@ class McporterRedisClient implements RedisClient {
 					break;
 				}
 
+				case "sadd": {
+					const [key, ...members] = args;
+					results.push(
+						await this.callTool("sadd", {
+							key,
+							members: members.map((m) => String(m)),
+						}),
+					);
+					break;
+				}
+
+				case "rpush": {
+					const [key, ...values] = args;
+					results.push(
+						await this.callTool("rpush", {
+							key,
+							values: values.map((v) => String(v)),
+						}),
+					);
+					break;
+				}
+
 				case "exists":
 					results.push(await this.callTool("exists", { keys: args }));
 					break;

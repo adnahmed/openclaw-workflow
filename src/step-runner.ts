@@ -945,6 +945,9 @@ export async function runStep(step, runId, api, options) {
 		const mcpContract = uniqueRequiredMcpServers.length
 			? `\nRequired MCP servers for this step: ${uniqueRequiredMcpServers.join(", ")}.\n\nUse tools from these MCP servers directly when the task names them, for example MCP_DOCKER.hset or MCP_DOCKER.browser_snapshot.\nDo not list MCP server names under required_skills; they are not OpenClaw skills.\nIf a required MCP server/tool is unavailable, write the declared blocked/retryable output artifact explaining which MCP server/tool was unavailable.\n`
 			: "";
+		const stateContractPreamble = step.state_contract
+			? `\nState persistence for this step is engine-owned.\nDo not call Redis tools.\nDo not call MCP Redis tools.\nOnly produce the declared outputs.\n`
+			: "";
 		const signalingPreamble = buildWorkflowSignalingPreamble({
 			step,
 			runId,
@@ -965,6 +968,7 @@ export async function runStep(step, runId, api, options) {
 			writeOutputPreamble +
 			skillContract +
 			mcpContract +
+			stateContractPreamble +
 			signalingPreamble +
 			step.task;
 

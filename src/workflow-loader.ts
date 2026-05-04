@@ -549,6 +549,11 @@ function normalizeAndValidate(raw, filePath) {
 				required_mcp_servers: Array.isArray(step.required_mcp_servers)
 					? step.required_mcp_servers
 					: [],
+				state_contract: Array.isArray(step.state_contract)
+					? step.state_contract
+					: typeof step.state_contract === "string"
+						? step.state_contract
+						: undefined,
 				complete_when: completeWhen,
 				signaling: signalingMode,
 			};
@@ -628,6 +633,10 @@ function normalizeAndValidate(raw, filePath) {
 												: "auto") as "auto" | "native" | "mcp",
 										tool_prefix: raw.state.redis.tool_prefix || undefined,
 									}
+								: undefined,
+						contracts:
+							raw.state.contracts && typeof raw.state.contracts === "object"
+								? raw.state.contracts
 								: undefined,
 					}
 				: undefined,

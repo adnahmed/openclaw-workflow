@@ -19,6 +19,8 @@ test("manifest exposes only the workflow tool contract and strict config schema"
 		"list_outputs",
 		"materialize_output",
 		"workflow_state_get",
+		"workflow_step_update",
+		"workflow_step_complete",
 	]);
 
 	assert.equal(manifest.configSchema.type, "object");

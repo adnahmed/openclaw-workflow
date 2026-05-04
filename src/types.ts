@@ -78,6 +78,36 @@ export type WorkflowStateConfig = {
 		server?: string;
 		tool_prefix?: string;
 	};
+	contracts?: Record<string, StateContractSpec>;
+};
+
+export type StateContractSpec = {
+	kind: "collection" | "document" | "counter" | "queue";
+	entity: string;
+	item_key?: string;
+
+	source_output?: string;
+	raw_output?: string;
+	metadata_output?: string;
+	summary_output?: string;
+
+	lifecycle?: "pending" | "ready" | "classified" | "submitted" | "failed";
+
+	dedupe?: {
+		by: string[];
+	};
+
+	state_views?: {
+		document?: boolean;
+		metadata_hash?: boolean;
+		seen_index?: boolean;
+		pending_queue?: boolean;
+		event_stream?: boolean;
+	};
+
+	counters?: Record<string, string>;
+
+	on_no_redis?: "artifact_only" | "fail";
 };
 
 export type StateBackendResolution = {
@@ -431,6 +461,7 @@ export type WorkflowStep = {
 	required_mcp_servers?: string[];
 	signaling?: StepSignalingMode;
 	original_id?: string;
+	state_contract?: string | string[];
 };
 
 /**

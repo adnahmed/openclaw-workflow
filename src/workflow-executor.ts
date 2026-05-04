@@ -52,6 +52,7 @@ import {
 } from "./list-resolver.js";
 import type { PluginOperationRegistry } from "./plugin-operations.js";
 import { FilesystemStateStore } from "./state-artifact-stores.js";
+import { projectStateContracts } from "./state-contract-projector.js";
 import {
 	adoptStepContract,
 	buildStepHandoffToken,
@@ -737,6 +738,34 @@ export async function executeWorkflow(
 				const liveStepState = state.steps[step.id];
 				if (liveStepState && liveStepState.status !== "running") {
 					return;
+				}
+
+				if (result.status === "ok" && step.state_contract) {
+					try {
+						await projectStateContracts({
+							workflow,
+							step,
+							runId,
+							date:
+								typeof varCtx?.date === "string"
+									? varCtx.date
+									: new Date().toISOString().slice(0, 10),
+							artifactStore,
+							redis,
+							config: workflow.config || {},
+						});
+					} catch (projectionErr) {
+						const projectionMsg =
+							projectionErr instanceof Error
+								? projectionErr.message
+								: String(projectionErr);
+						result = {
+							...result,
+							status: "failed",
+							retryable: true,
+							error: `State contract projection failed: ${projectionMsg}`,
+						};
+					}
 				}
 
 				if (result.status === "ok") {

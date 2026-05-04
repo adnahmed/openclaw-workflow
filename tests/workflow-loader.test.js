@@ -626,3 +626,39 @@ steps:
 		assert.equal(wf.steps[0].outputs[0].path, undefined);
 	});
 });
+
+test("parses semantic state contracts and step state_contract", async () => {
+	await withTempDir("wf-test", async (dir) => {
+		await writeFile(
+			join(dir, "state-contract.yml"),
+			`
+name: State Contract
+state:
+  backend: auto
+  contracts:
+    linkedin_alert_collection:
+      kind: collection
+      entity: alert
+      item_key: alert_key
+      source_output: alerts_manifest
+steps:
+  - id: collect
+    task: collect alerts
+    state_contract: linkedin_alert_collection
+    outputs:
+      - id: alerts_manifest
+`,
+		);
+
+		const wf = await loadWorkflow("state-contract", dir);
+		assert.equal(wf.steps[0].state_contract, "linkedin_alert_collection");
+		assert.equal(
+			wf.state.contracts.linkedin_alert_collection.kind,
+			"collection",
+		);
+		assert.equal(
+			wf.state.contracts.linkedin_alert_collection.source_output,
+			"alerts_manifest",
+		);
+	});
+});
