@@ -48,11 +48,29 @@ function artifactRoot(runsDir: string): string {
 	return join(runsDir, ".artifacts");
 }
 
+function encodeFsComponent(value: string): string {
+	return encodeURIComponent(value);
+}
+
 function lockPath(runsDir: string, runId: string): string {
 	return join(runsDir, ".locks", `${runId}.lock.json`);
 }
 
 function artifactFilePath(
+	runsDir: string,
+	runId: string,
+	stepId: string,
+	outputId: string,
+): string {
+	return join(
+		artifactRoot(runsDir),
+		runId,
+		encodeFsComponent(stepId),
+		`${encodeFsComponent(outputId)}.json`,
+	);
+}
+
+function legacyArtifactFilePath(
 	runsDir: string,
 	runId: string,
 	stepId: string,
@@ -102,8 +120,8 @@ function normalizeMaterializeTarget(args: {
 		"data",
 		"materialized",
 		args.runId,
-		args.stepId,
-		`${args.outputId}.json`,
+		encodeFsComponent(args.stepId),
+		`${encodeFsComponent(args.outputId)}.json`,
 	);
 }
 
@@ -416,13 +434,24 @@ export class FilesystemArtifactStore implements WorkflowArtifactStore {
 		stepId: string,
 		outputId: string,
 	): Promise<StoredArtifact | null> {
-		const filePath = artifactFilePath(this.runsDir, runId, stepId, outputId);
-		try {
-			const raw = await readFile(filePath, "utf8");
-			return JSON.parse(raw) as StoredArtifact;
-		} catch {
-			return null;
+		const primaryPath = artifactFilePath(this.runsDir, runId, stepId, outputId);
+		const fallbackPath = legacyArtifactFilePath(
+			this.runsDir,
+			runId,
+			stepId,
+			outputId,
+		);
+
+		for (const filePath of [primaryPath, fallbackPath]) {
+			try {
+				const raw = await readFile(filePath, "utf8");
+				return JSON.parse(raw) as StoredArtifact;
+			} catch {
+				// try next path
+			}
 		}
+
+		return null;
 	}
 
 	async validateArtifact(args: {
@@ -448,10 +477,15 @@ export class FilesystemArtifactStore implements WorkflowArtifactStore {
 		runId: string,
 		stepId?: string,
 	): Promise<StoredArtifactMeta[]> {
-		const root = stepId
-			? join(artifactRoot(this.runsDir), runId, stepId)
-			: join(artifactRoot(this.runsDir), runId);
-		const files = await listJsonFiles(root);
+		const roots = stepId
+			? [
+					join(artifactRoot(this.runsDir), runId, encodeFsComponent(stepId)),
+					join(artifactRoot(this.runsDir), runId, stepId),
+				]
+			: [join(artifactRoot(this.runsDir), runId)];
+		const files = (
+			await Promise.all(roots.map((root) => listJsonFiles(root)))
+		).flat();
 		const metas: StoredArtifactMeta[] = [];
 
 		for (const filePath of files) {
@@ -504,8 +538,8 @@ export class FilesystemArtifactStore implements WorkflowArtifactStore {
 					"data",
 					"materialized",
 					args.runId,
-					args.stepId,
-					`${args.outputId}.json`,
+					encodeFsComponent(args.stepId),
+					`${encodeFsComponent(args.outputId)}.json`,
 				);
 
 		await mkdir(dirname(target), { recursive: true });
