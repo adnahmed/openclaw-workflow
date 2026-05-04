@@ -170,7 +170,7 @@ workflow_status({ name: "hello" })
 | `config`       | object    | ❌       | `{}`     | Top-level configuration variables accessible via `{config.X}` substitution. |
 | `validators`    | object    | ❌       | `{}`     | Custom validation rules for output checks, supporting schemas and conditional outcomes (`pass_when`, `retry_when`, `block_when`, `fail_when`). |
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for the entire workflow. Steps without their own `required_skills` inherit these. Injected as instructions into step prompts and verified against agent config. |
-| `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by the workflow (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
+| `required_mcp_servers` | string[] | ❌       | `[]`     | External capability servers required by worker steps. Do not list engine-native state backends here. |
 
 `state.contracts` lets you define **semantic state contracts** (for example, collection lifecycle semantics) that the runtime projects to Redis/native state views after outputs validate.
 
@@ -204,7 +204,7 @@ workflow_status({ name: "hello" })
 | `always_run`   | boolean   | ❌       | `false` | If `true`, step runs regardless of dependency failure. |
 | `on_block`     | string    | ❌       | `"block_run"` | Behavior when blocked: `"block_run"` (fails pipeline) or `"continue"`. |
 | `required_skills` | string[]  | ❌       | `[]`     | Skills required for this specific step. Overrides workflow-level `required_skills`. Injected as instructions into the step prompt and verified against agent config. |
-| `required_mcp_servers` | string[] | ❌       | `[]`     | MCP server names required by this step (e.g. `MCP_DOCKER`). Not OpenClaw skills. |
+| `required_mcp_servers` | string[] | ❌       | `[]`     | External capability servers required by this worker step. Use `required_skills` (for example `browser-harness`) for skill-level capabilities. |
 | `state_contract` | string\|string[] | ❌ | — | Semantic state contract name(s) to project after step outputs validate. The worker only produces outputs; runtime handles Redis/state materialization. |
 | `state_publish` | object\|object[] | ❌ | — | Semantic publish specification for `kind: plugin` steps using `workflow.state_publish`. Reads a prior artifact and publishes items into a configured collection/queue. |
 | `state_consume` | object | ❌ | — | Semantic consume/claim specification for `kind: plugin` steps using `workflow.state_claim`. Resolves a queue or worker group and emits a claim manifest artifact. |
@@ -230,6 +230,7 @@ Rules:
 
 Built-in operation IDs:
 - `workflow.cache_json_document`
+- `workflow.state_init`
 - `workflow.redis_run_initializer`
 - `workflow.state_publish`
 - `workflow.state_claim`
@@ -261,9 +262,11 @@ Example:
       validate: profile_schema
 ```
 
-#### `workflow.redis_run_initializer`
+#### `workflow.state_init`
 
 Initializes run metadata/counters/stream-group idempotently, and commits an initialization artifact even when Redis is unavailable.
+
+`workflow.redis_run_initializer` remains supported as a backward-compatible alias.
 
 `with` fields:
 - required: `run_key`
@@ -274,7 +277,7 @@ Example:
 ```yaml
 - id: init_run_state
   kind: plugin
-  uses: workflow.redis_run_initializer
+  uses: workflow.state_init
   with:
     run_key: runs:{run_id}
     stream_key: events:{run_id}
@@ -365,6 +368,8 @@ Behavior:
 - reads the declared artifact from `from_step` / `output`
 - selects items from the artifact payload (default root item list)
 - publishes documents / hashes / queue entries / stream events according to the collection config
+- first-seen items increment `published_count`; previously-seen items increment `updated_count`
+- queue enqueue remains idempotent (no duplicate pending entries for the same item key)
 - increments configured counters when present
 - commits a summary artifact for downstream auditing
 
@@ -400,10 +405,12 @@ Example:
 
 Behavior:
 - resolves the queue from `state_consume.queue` or the declared worker group
-- claims up to the configured batch size
-- records active leases in semantic state
+- reclaims expired leases back to pending before new claims
+- claims up to the configured batch size using pending → processing queue movement
+- records active leases with a concrete `lease_id`
 - appends claim events when event streams are enabled
-- commits a manifest artifact containing the claimed items for downstream steps
+- commits a manifest artifact containing flattened claimed items (plus `item_key` and `lease`) for downstream steps
+- includes deterministic summary fields such as `claimed_count` and `reclaimed_expired_count`
 
 #### `workflow.state_complete`
 
@@ -436,7 +443,9 @@ Example:
 
 Behavior:
 - reads result items from the upstream artifact
-- removes matching active leases
+- verifies lease identity when lease metadata is present
+- skips stale lease completions (records `stale_count`) rather than incorrectly completing newer claims
+- removes matching active leases and processing-queue entries for accepted completions
 - places items into semantic completed/failed membership sets
 - appends lifecycle events to the collection stream when configured
 - increments completion/failure counters and writes a summary artifact
@@ -543,7 +552,7 @@ steps:
 
 Notes:
 - `state_contract` is semantic metadata, not an imperative Redis script.
-- Runtime prompt injection tells workers not to call Redis/MCP Redis for these steps.
+- Worker prompts are isolated to declared inputs/outputs and avoid backend implementation details.
 - Current runtime projector supports `kind: collection` and safely scalarizes hash fields.
 
 ### Automatic Declared Output Handling
