@@ -296,7 +296,7 @@ outputs:
 
 `state.contracts` lets you define **semantic state contracts** (for example, collection lifecycle semantics) that the runtime projects to Redis/native state views after outputs validate.
 
-`state.collections`, `state.queues`, and `state.worker_groups` let you define the same lifecycle as named semantic resources for explicit plugin-step state operations such as `workflow.state_publish`, `workflow.state_claim`, and `workflow.state_complete`.
+`state.collections`, `state.queues`, and `state.worker_groups` let you define the same lifecycle as named semantic resources for explicit plugin-step state operations such as `workflow.state_publish`, `workflow.state_claim`, `workflow.state_complete`, `workflow.state_query`, `workflow.state_patch_outputs`, `workflow.state_partition`, and `workflow.state_report`.
 
 
 ### Step fields
@@ -332,6 +332,10 @@ outputs:
 | `state_consume` | object | ❌ | — | Semantic consume/claim specification for `kind: plugin` steps using `workflow.state_claim`. Resolves a queue or worker group and emits a claim manifest artifact. |
 | `state_reclaim` | object | ❌ | — | Semantic reclaim specification for `kind: plugin` steps using `workflow.state_reclaim_expired`. Requeues expired or orphaned in-flight claims before another worker pass. |
 | `state_complete` | object\|object[] | ❌ | — | Semantic completion specification for `kind: plugin` steps using `workflow.state_complete`. Marks claimed items completed/failed using result artifacts from a prior step. |
+| `state_query` | object | ❌ | — | Query specification for `kind: plugin` steps using `workflow.state_query`. Produces bounded artifacts from semantic Redis state. |
+| `state_partition` | object | ❌ | — | Partition specification for `kind: plugin` steps using `workflow.state_partition`. Splits semantic items into bounded outputs and optional queues. |
+| `state_patch_outputs` | object | ❌ | — | Patch specification for `kind: plugin` steps using `workflow.state_patch_outputs`. Merges result artifacts back into semantic Redis documents. |
+| `state_report` | object | ❌ | — | Report specification for `kind: plugin` steps using `workflow.state_report`. Produces bounded JSON/Markdown reports from semantic state. |
 | `drain` | object | ❌ | — | Scheduler/controller spec for `kind: state_drain`. Repeatedly expands nested steps until `workflow.state_claim` returns an empty batch. |
 | `sealed` | object | ✅* | — | Configuration for `kind: sealed` execution boundary. Required for `kind: sealed`. Supports command-mode execution and worker-mode context-firewall policies. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
@@ -491,6 +495,10 @@ Built-in operation IDs:
 - `workflow.state_claim`
 - `workflow.state_reclaim_expired`
 - `workflow.state_complete`
+- `workflow.state_query`
+- `workflow.state_patch_outputs`
+- `workflow.state_partition`
+- `workflow.state_report`
 
 #### `workflow.cache_json_document`
 
@@ -561,6 +569,7 @@ state:
       entity: alert
       item_key: alert_key
       default_queue: task_alerts_pending
+      indexes: [route, status, submitted]
       views:
         document: true
         metadata_hash: true
@@ -587,6 +596,7 @@ Semantic resource notes:
 - `collections.<name>` defines the entity model and keying rules.
 - `queues.<name>` defines batching / pending-work semantics for a collection.
 - `worker_groups.<name>` defines how claimers resolve a queue plus lease behavior.
+- `collections.<name>.indexes` defines secondary index fields maintained as sets (`{prefix}:set:{collection}:idx:{field}:{value}:{date}`).
 
 #### `workflow.state_publish`
 
@@ -713,7 +723,7 @@ Marks claimed items as completed or failed based on a result artifact written by
 `state_complete` fields:
 - required: `from_step`, `output`
 - required: one of `collection`, `queue`, or `worker_group`
-- optional: `select`, `item_key`, `status_field`, `summary_output`
+- optional: `select`, `item_key`, `status_field`, `summary_output`, `merge_document`, `merge_fields`, `indexes`
 
 Example:
 
@@ -741,8 +751,145 @@ Behavior:
 - skips stale lease completions (records `stale_count`) rather than incorrectly completing newer claims
 - removes matching active leases and processing-queue entries for accepted completions
 - places items into semantic completed/failed membership sets
+- optionally merges completion/result fields back into Redis document/hash state (`merge_document` / `merge_fields`)
+- maintains configured secondary indexes during merge (`collections.<name>.indexes` plus per-step `indexes`)
 - appends lifecycle events to the collection stream when configured
 - increments completion/failure counters and writes a summary artifact
+
+#### `workflow.state_query`
+
+Queries a semantic collection from Redis and writes bounded query results as an artifact.
+
+`state_query` fields:
+- required: `collection`, `output`
+- optional: `where`, `projection`, `limit`, `offset`, `summary_output`
+
+Example:
+
+```yaml
+- id: query_ready_alerts
+  kind: plugin
+  uses: workflow.state_query
+  state_query:
+    collection: task_alerts
+    where:
+      all:
+        status: ready
+    projection: [item_key, status, route]
+    limit: 500
+    output: ready_alerts
+    summary_output: state_query_summary
+  outputs:
+    - id: ready_alerts
+    - id: state_query_summary
+```
+
+Behavior:
+- uses collection secondary indexes for simple equality where possible
+- falls back to collection seen-set scan + predicate matching when needed
+- commits query output and optional summary artifact
+
+#### `workflow.state_patch_outputs`
+
+Merges rows from one or more artifacts into semantic Redis documents/hashes without exposing those rows to model context.
+
+`state_patch_outputs` fields:
+- required: `collection`, `output`
+- required in practice: `from_step` (or plugin step dependency)
+- optional: `select`, `item_key`, `merge_fields`, `status_field`, `indexes`, `summary_output`
+
+Example:
+
+```yaml
+- id: patch_classification_back
+  kind: plugin
+  uses: workflow.state_patch_outputs
+  state_patch_outputs:
+    from_step: classify_claimed_alerts
+    output: classification_results
+    collection: task_alerts
+    item_key: alert_key
+    merge_fields: [route, status, submitted]
+    indexes: [route, status, submitted]
+    summary_output: state_patch_outputs_summary
+  outputs:
+    - id: state_patch_outputs_summary
+```
+
+Behavior:
+- reads matching artifacts from `from_step` (including loop child artifacts)
+- merges selected fields into Redis document + hash records
+- updates secondary indexes for merged fields
+- commits a summary artifact with patched/skipped counts
+
+#### `workflow.state_partition`
+
+Partitions collection items into named bounded outputs and can optionally enqueue each partition into a semantic queue.
+
+`state_partition` fields:
+- required: `collection`, `partitions`
+- optional: `projection`, `limit_per_partition`, `item_key`, `summary_output`
+
+Example:
+
+```yaml
+- id: partition_alerts
+  kind: plugin
+  uses: workflow.state_partition
+  state_partition:
+    collection: task_alerts
+    projection: [item_key, status, route]
+    partitions:
+      ready:
+        where: { status: ready }
+        output: alerts_ready
+        queue: task_alerts_pending
+      blocked:
+        where: { status: blocked }
+        output: alerts_blocked
+    summary_output: state_partition_summary
+  outputs:
+    - id: alerts_ready
+    - id: alerts_blocked
+    - id: state_partition_summary
+```
+
+Behavior:
+- resolves each partition independently via semantic query filters
+- commits one output artifact per partition
+- optionally enqueues each partitioned item and writes partition events to stream
+- commits aggregate partition summary
+
+#### `workflow.state_report`
+
+Generates bounded final reporting artifacts directly from semantic Redis state.
+
+`state_report` fields:
+- required: `json_output`
+- optional: `collections`, `counters`, `include_samples`, `markdown_output`
+
+Example:
+
+```yaml
+- id: final_state_report
+  kind: plugin
+  uses: workflow.state_report
+  state_report:
+    collections: [task_alerts]
+    counters: [task_alerts_published, task_alerts_completed, task_alerts_failed]
+    include_samples: 25
+    json_output: final_report_json
+    markdown_output: final_report_md
+  outputs:
+    - id: final_report_json
+    - id: final_report_md
+```
+
+Behavior:
+- reports seen/completed/failed totals by collection
+- optionally includes bounded sample items per collection
+- optionally resolves configured counters
+- emits JSON report and optional Markdown report artifacts
 
 #### Explicit plugin flow vs. `state_contract`
 
