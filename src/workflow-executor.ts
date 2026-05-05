@@ -65,7 +65,11 @@ import {
 	validateStepContract,
 	writeStepCacheManifest,
 } from "./step-contract.js";
-import { emptyOutputCheck, runStep } from "./step-runner.js";
+import {
+	assertWorkflowSessionAdapter,
+	emptyOutputCheck,
+	runStep,
+} from "./step-runner.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import type { RunState, StepState, WorkflowStep } from "./types.js";
 import {
@@ -179,6 +183,11 @@ export async function executeWorkflow(
 ) {
 	let planningError: unknown = null;
 	try {
+		assertWorkflowSessionAdapter(
+			api,
+			config.sessionAdapter || "auto",
+			workflow,
+		);
 		await fs.mkdir(config.runsDir, { recursive: true });
 		const plan = await compileWorkflow(workflow, runId, config);
 		await writeJsonAtomic(join(config.runsDir, `${runId}.plan.json`), plan);

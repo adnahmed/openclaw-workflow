@@ -54,12 +54,14 @@ import {
 	type OutputSpec,
 	type OutputValidationResult,
 	type SessionAdapter,
+	type SessionAdapterCapabilities,
 	type SpawnOptions,
 	type StepFailureKind,
 	StepRunResult,
 	type StepState,
 	type ValidationDecision,
 	type ValidatorSpec,
+	type WorkflowDefinition,
 } from "./types.js";
 import { getLocalISOString } from "./workflow-state.js";
 
@@ -677,6 +679,111 @@ ${tokenLine}
 `;
 }
 
+const REQUIRED_SEALED_RUNTIME_CAPABILITIES: SessionAdapterCapabilities = {
+	toolResultInterception: true,
+	transcriptFirewall: true,
+	artifactSink: true,
+	abortRun: false,
+};
+
+function requiresSealedRuntime(step, sealed = step?.sealed): boolean {
+	return (
+		step?.kind === "sealed" &&
+		sealed?.mode === "tool_worker" &&
+		sealed?.context_firewall?.enabled !== false
+	);
+}
+
+function missingAdapterCapabilities(
+	adapter: SessionAdapter,
+	required: Partial<SessionAdapterCapabilities>,
+): string[] {
+	const capabilities = adapter.capabilities || {
+		toolResultInterception: false,
+		transcriptFirewall: false,
+		artifactSink: false,
+		abortRun: false,
+	};
+
+	return Object.entries(required)
+		.filter(([, enabled]) => enabled)
+		.filter(([name]) => !capabilities[name as keyof SessionAdapterCapabilities])
+		.map(([name]) => name);
+}
+
+function formatCapabilityName(name: string): string {
+	switch (name) {
+		case "toolResultInterception":
+			return "tool-result interception";
+		case "transcriptFirewall":
+			return "transcript firewall";
+		case "artifactSink":
+			return "artifact sink";
+		case "abortRun":
+			return "abort-run support";
+		default:
+			return name;
+	}
+}
+
+function assertAdapterCapabilities(
+	adapter: SessionAdapter,
+	required: Partial<SessionAdapterCapabilities>,
+	errorContext: string,
+) {
+	const missing = missingAdapterCapabilities(adapter, required);
+	if (missing.length === 0) return;
+
+	throw new Error(
+		`${errorContext}: selected adapter does not support ${missing
+			.map(formatCapabilityName)
+			.join(", ")}.`,
+	);
+}
+
+function assertAdapterCanRunSealedToolWorker(
+	adapter: SessionAdapter,
+	step,
+	sealed = step?.sealed,
+) {
+	if (!requiresSealedRuntime(step, sealed)) return;
+
+	assertAdapterCapabilities(
+		adapter,
+		REQUIRED_SEALED_RUNTIME_CAPABILITIES,
+		`Cannot run sealed tool_worker "${step.id}"`,
+	);
+}
+
+export function workflowRequiresSealedRuntime(
+	workflow: WorkflowDefinition,
+): boolean {
+	const visit = (steps = []) =>
+		steps.some((step) => {
+			if (requiresSealedRuntime(step, step.sealed)) return true;
+			return Array.isArray(step.steps) && step.steps.length > 0
+				? visit(step.steps)
+				: false;
+		});
+
+	return visit(workflow.steps || []);
+}
+
+export function assertWorkflowSessionAdapter(
+	api,
+	requestedAdapter = "auto",
+	workflow: WorkflowDefinition,
+) {
+	if (!workflowRequiresSealedRuntime(workflow)) return;
+
+	selectAdapter(
+		api,
+		requestedAdapter,
+		REQUIRED_SEALED_RUNTIME_CAPABILITIES,
+		"Cannot run workflow requiring sealed tool_worker enforcement",
+	);
+}
+
 /**
  * @typedef {Object} StepRunOptions
  * @property {number}  pollIntervalMs  - How often to poll for session completion (ms)
@@ -919,7 +1026,6 @@ export async function runStep(step, runId, api, options) {
 	}
 
 	const startTime = Date.now();
-	const adapter = selectAdapter(api, options.sessionAdapter || "auto");
 	let sessionKey = null;
 
 	try {
@@ -927,6 +1033,14 @@ export async function runStep(step, runId, api, options) {
 		const sealed =
 			(options as any).sealed ||
 			(step.kind === "sealed" ? normalizeSealedSpec(step.sealed) : undefined);
+		const adapter = selectAdapter(
+			api,
+			options.sessionAdapter || "auto",
+			requiresSealedRuntime(step, sealed)
+				? REQUIRED_SEALED_RUNTIME_CAPABILITIES
+				: undefined,
+			`Cannot run step "${step.id}"`,
+		);
 
 		const workflow = options.workflow;
 		const combinedSkills = [
@@ -980,16 +1094,7 @@ export async function runStep(step, runId, api, options) {
 			signalingPreamble +
 			step.task;
 
-		if (
-			step.kind === "sealed" &&
-			sealed?.context_firewall?.enabled &&
-			!(adapter as any).supportsResultPolicy &&
-			sealed.mode !== "command"
-		) {
-			api?.logger?.warn?.(
-				`sealed tool_worker "${step.id}" is running without core tool-result interception; falling back to prompt/output-contract enforcement only.`,
-			);
-		}
+		assertAdapterCanRunSealedToolWorker(adapter, step, sealed);
 
 		const spawnResult = await adapter.spawn(taskWithPreamble, {
 			model,
@@ -1331,7 +1436,7 @@ function splitModelRef(modelRef) {
  * launch and manage isolated subagent runs.
  */
 class RuntimeSubagentAdapter implements SessionAdapter {
-	supportsResultPolicy = true;
+	capabilities: SessionAdapterCapabilities;
 	runtime: any;
 	api: any;
 	subagent: any;
@@ -1348,6 +1453,12 @@ class RuntimeSubagentAdapter implements SessionAdapter {
 		this.api = api;
 		this.subagent = runtime.subagent;
 		this.logger = logger;
+		this.capabilities = {
+			toolResultInterception: true,
+			transcriptFirewall: true,
+			artifactSink: true,
+			abortRun: true,
+		};
 		this.sessionsByRunId = new Map();
 	}
 
@@ -1609,7 +1720,12 @@ class RuntimeSubagentAdapter implements SessionAdapter {
  * @param {string} [requestedAdapter="auto"] - The adapter to use
  * @returns {SessionAdapter}
  */
-function selectAdapter(api, requestedAdapter = "auto"): SessionAdapter {
+function selectAdapter(
+	api,
+	requestedAdapter = "auto",
+	requiredCapabilities?: Partial<SessionAdapterCapabilities>,
+	errorContext = "Cannot select session adapter",
+): SessionAdapter {
 	const logger = api?.logger;
 
 	const hasRuntimeSubagent =
@@ -1628,53 +1744,112 @@ function selectAdapter(api, requestedAdapter = "auto"): SessionAdapter {
 		hasLegacyApi,
 	});
 
-	if (requestedAdapter === "runtime-subagent") {
-		if (!hasRuntimeSubagent) {
-			throw new Error(
-				"sessionAdapter=runtime-subagent requested, but api.runtime.subagent.run/waitForRun is unavailable",
-			);
-		}
-
-		logger?.info?.("[workflow] using RuntimeSubagentAdapter");
-		return new RuntimeSubagentAdapter(api.runtime, api, logger);
-	}
-
-	if (requestedAdapter === "legacy-api") {
-		if (!hasLegacyApi) {
-			throw new Error(
-				"sessionAdapter=legacy-api requested, but api.sessions.spawn/getStatus is unavailable",
-			);
-		}
-
-		logger?.info?.("[workflow] using legacy ApiAdapter");
-		return new ApiAdapter(api.sessions);
-	}
-
-	if (requestedAdapter === "cli") {
-		logger?.warn?.("[workflow] using CliAdapter because sessionAdapter=cli");
-		return new CliAdapter();
-	}
-
 	if (requestedAdapter !== "auto") {
-		throw new Error(
-			`Invalid sessionAdapter "${requestedAdapter}". Expected auto, runtime-subagent, legacy-api, or cli.`,
-		);
+		const allowed = new Set(["auto", "runtime-subagent", "legacy-api", "cli"]);
+		if (!allowed.has(requestedAdapter)) {
+			throw new Error(
+				`Invalid sessionAdapter "${requestedAdapter}". Expected auto, runtime-subagent, legacy-api, or cli.`,
+			);
+		}
 	}
 
-	if (hasRuntimeSubagent) {
-		logger?.info?.("[workflow] using RuntimeSubagentAdapter");
-		return new RuntimeSubagentAdapter(api.runtime, api, logger);
+	const candidates: Array<{
+		name: string;
+		available: boolean;
+		create: () => SessionAdapter;
+		unavailableMessage?: string;
+	}> =
+		requestedAdapter === "runtime-subagent"
+			? [
+					{
+						name: "runtime-subagent",
+						available: hasRuntimeSubagent,
+						create: () => new RuntimeSubagentAdapter(api.runtime, api, logger),
+						unavailableMessage:
+							"sessionAdapter=runtime-subagent requested, but api.runtime.subagent.run/waitForRun is unavailable",
+					},
+				]
+			: requestedAdapter === "legacy-api"
+				? [
+						{
+							name: "legacy-api",
+							available: hasLegacyApi,
+							create: () => new ApiAdapter(api.sessions),
+							unavailableMessage:
+								"sessionAdapter=legacy-api requested, but api.sessions.spawn/getStatus is unavailable",
+						},
+					]
+				: requestedAdapter === "cli"
+					? [
+							{
+								name: "cli",
+								available: true,
+								create: () => new CliAdapter(),
+							},
+						]
+					: [
+							{
+								name: "runtime-subagent",
+								available: hasRuntimeSubagent,
+								create: () =>
+									new RuntimeSubagentAdapter(api.runtime, api, logger),
+							},
+							{
+								name: "legacy-api",
+								available: hasLegacyApi,
+								create: () => new ApiAdapter(api.sessions),
+							},
+							{
+								name: "cli",
+								available: true,
+								create: () => new CliAdapter(),
+							},
+						];
+
+	const capabilityErrors: string[] = [];
+
+	for (const candidate of candidates) {
+		if (!candidate.available) {
+			if (candidate.unavailableMessage) {
+				throw new Error(candidate.unavailableMessage);
+			}
+			continue;
+		}
+
+		const adapter = candidate.create();
+		const missing = requiredCapabilities
+			? missingAdapterCapabilities(adapter, requiredCapabilities)
+			: [];
+
+		if (missing.length > 0) {
+			capabilityErrors.push(
+				`${candidate.name}: missing ${missing.map(formatCapabilityName).join(", ")}`,
+			);
+			continue;
+		}
+
+		if (candidate.name === "runtime-subagent") {
+			logger?.info?.("[workflow] using RuntimeSubagentAdapter");
+		} else if (candidate.name === "legacy-api") {
+			logger?.info?.("[workflow] using legacy ApiAdapter");
+		} else {
+			logger?.warn?.(
+				requestedAdapter === "cli"
+					? "[workflow] using CliAdapter because sessionAdapter=cli"
+					: "[workflow] using CliAdapter fallback; steps will run through cron",
+			);
+		}
+
+		return adapter;
 	}
 
-	if (hasLegacyApi) {
-		logger?.info?.("[workflow] using legacy ApiAdapter");
-		return new ApiAdapter(api.sessions);
+	if (capabilityErrors.length > 0) {
+		throw new Error(`${errorContext}: ${capabilityErrors.join("; ")}`);
 	}
 
-	logger?.warn?.(
-		"[workflow] using CliAdapter fallback; steps will run through cron",
+	throw new Error(
+		`${errorContext}: no compatible session adapter is available.`,
 	);
-	return new CliAdapter();
 }
 
 /**
@@ -1704,7 +1879,7 @@ function selectAdapter(api, requestedAdapter = "auto"): SessionAdapter {
  *   getStatus(sessionId)   → Promise<{ status: 'running'|'done'|'error', error? }>
  */
 class ApiAdapter implements SessionAdapter {
-	supportsResultPolicy = true;
+	capabilities: SessionAdapterCapabilities;
 	sessions: any;
 
 	/**
@@ -1712,6 +1887,12 @@ class ApiAdapter implements SessionAdapter {
 	 */
 	constructor(sessions) {
 		this.sessions = sessions;
+		this.capabilities = {
+			toolResultInterception: true,
+			transcriptFirewall: true,
+			artifactSink: true,
+			abortRun: typeof sessions?.abort === "function",
+		};
 	}
 
 	/**
@@ -1831,7 +2012,7 @@ function parseCronRunsOutput(raw) {
 }
 
 export class CliAdapter implements SessionAdapter {
-	supportsResultPolicy = false;
+	capabilities: SessionAdapterCapabilities;
 	executor: any;
 	_jobs: Map<string, { status: string }> | null = null;
 
@@ -1841,6 +2022,12 @@ export class CliAdapter implements SessionAdapter {
 	 */
 	constructor(executor = runOpenClaw) {
 		this.executor = executor;
+		this.capabilities = {
+			toolResultInterception: false,
+			transcriptFirewall: false,
+			artifactSink: false,
+			abortRun: true,
+		};
 	}
 
 	/**
@@ -2017,7 +2204,7 @@ export class CliAdapter implements SessionAdapter {
  * // Steps using this adapter will complete in 100ms
  */
 export class MockAdapter implements SessionAdapter {
-	supportsResultPolicy = true;
+	capabilities: SessionAdapterCapabilities;
 	resolveIn: number;
 	shouldFail: boolean;
 	failMessage: string;
@@ -2034,6 +2221,12 @@ export class MockAdapter implements SessionAdapter {
 		this.resolveIn = options.resolveIn ?? 100;
 		this.shouldFail = options.shouldFail ?? false;
 		this.failMessage = options.failMessage || "Mock step failure";
+		this.capabilities = {
+			toolResultInterception: true,
+			transcriptFirewall: true,
+			artifactSink: true,
+			abortRun: false,
+		};
 		this._sessions = new Map();
 		this._counter = 0;
 	}
@@ -2099,6 +2292,7 @@ export function createStepRunner(adapter) {
 			const sealed =
 				(options as any).sealed ||
 				(step.kind === "sealed" ? normalizeSealedSpec(step.sealed) : undefined);
+			assertAdapterCanRunSealedToolWorker(adapter, step, sealed);
 			const signalingPreamble = buildWorkflowSignalingPreamble({
 				step,
 				runId,

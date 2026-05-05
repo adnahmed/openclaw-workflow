@@ -343,17 +343,33 @@ export type CancelResult = {
 	error?: string;
 };
 
+export type SessionAdapterCapabilities = {
+	toolResultInterception: boolean;
+	transcriptFirewall: boolean;
+	artifactSink: boolean;
+	abortRun: boolean;
+};
+
+export type SessionStatusResult = {
+	status: string;
+	error?: string;
+	logs?: string | null;
+};
+
 export interface SessionAdapter {
-	supportsResultPolicy?: boolean;
+	capabilities: SessionAdapterCapabilities;
 	spawn(
 		prompt: string,
 		options: SpawnOptions,
 	): Promise<{ sessionId: string; sessionKey: string }>;
 	getStatus(
 		sessionId: string,
-		options?: any,
-	): Promise<{ status: string; error?: string; logs?: string }>;
-	cancel?(sessionId: string, options?: any): Promise<CancelResult>;
+		options?: Record<string, unknown>,
+	): Promise<SessionStatusResult>;
+	cancel?(
+		sessionId: string,
+		options?: Record<string, unknown>,
+	): Promise<CancelResult>;
 }
 
 export type MockAdapterOptions = {

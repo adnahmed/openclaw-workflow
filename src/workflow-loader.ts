@@ -34,11 +34,19 @@ import { compileAuthoringWorkflow } from "./authoring-compiler.js";
 import { isAuthoringWorkflow } from "./authoring-loader.js";
 import { normalizeSealedSpec } from "./sealed-policy.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
-import {
-	type ReuseOutputsSpec,
+import type {
+	ReuseOutputsSpec,
 	WorkflowDefinition,
 	WorkflowStep,
 } from "./types.js";
+
+type WorkflowLoadOptions = {
+	allowLegacyExecutionSchema?: boolean;
+};
+
+type WorkflowValidationOptions = WorkflowLoadOptions & {
+	trustedCompiledExecution: boolean;
+};
 
 /**
  * @typedef {import('./types.js').WorkflowStep} WorkflowStep
@@ -69,7 +77,11 @@ import {
  * const wf = await loadWorkflow('seo-pipeline', '/home/user/.openclaw/workflows');
  * console.log(wf.steps.length); // 3
  */
-export async function loadWorkflow(name, workflowsDir) {
+export async function loadWorkflow(
+	name,
+	workflowsDir,
+	options: WorkflowLoadOptions = {},
+) {
 	const candidates = [
 		join(workflowsDir, `${name}.yml`),
 		join(workflowsDir, `${name}.yaml`),
@@ -95,7 +107,7 @@ export async function loadWorkflow(name, workflowsDir) {
 	}
 
 	const parsed = parseWorkflowFile(raw, filePath);
-	return normalizeAndValidate(parsed, filePath);
+	return normalizeAndValidateEntry(parsed, filePath, options);
 }
 
 /**
@@ -108,10 +120,42 @@ export async function loadWorkflow(name, workflowsDir) {
  * @example
  * const wf = await loadWorkflowFromFile('/tmp/test-workflow.yml');
  */
-export async function loadWorkflowFromFile(filePath) {
+export async function loadWorkflowFromFile(
+	filePath,
+	options: WorkflowLoadOptions = {},
+) {
 	const raw = await readFile(filePath, "utf8");
 	const parsed = parseWorkflowFile(raw, filePath);
-	return normalizeAndValidate(parsed, filePath);
+	return normalizeAndValidateEntry(parsed, filePath, options);
+}
+
+function normalizeAndValidateEntry(
+	raw,
+	filePath,
+	options: WorkflowLoadOptions,
+) {
+	if (isAuthoringWorkflow(raw)) {
+		const compiled = compileAuthoringWorkflow(raw, {
+			workflowDir: dirname(filePath),
+			strict: true,
+		});
+
+		return normalizeAndValidate(compiled, filePath, {
+			trustedCompiledExecution: true,
+			allowLegacyExecutionSchema: options.allowLegacyExecutionSchema === true,
+		});
+	}
+
+	if (!options.allowLegacyExecutionSchema) {
+		throw new Error(
+			"Raw execution-schema workflows are disabled. Use authoring schema instead, or explicitly enable allowLegacyExecutionSchema for migration/testing.",
+		);
+	}
+
+	return normalizeAndValidate(raw, filePath, {
+		trustedCompiledExecution: false,
+		allowLegacyExecutionSchema: true,
+	});
 }
 
 /**
@@ -198,14 +242,11 @@ function validateValidators(rawValidators = {}) {
 	}
 }
 
-function normalizeAndValidate(raw, filePath) {
-	raw = isAuthoringWorkflow(raw)
-		? compileAuthoringWorkflow(raw, {
-				workflowDir: dirname(filePath),
-				strict: true,
-			})
-		: raw;
-
+function normalizeAndValidate(
+	raw,
+	filePath,
+	options: WorkflowValidationOptions,
+) {
 	// ── Top-level required fields ──────────────────────────────────────────────
 	if (!raw.name || typeof raw.name !== "string") {
 		throw new Error(
@@ -810,9 +851,53 @@ function normalizeAndValidate(raw, filePath) {
 		__dir: dirname(filePath),
 	};
 
+	validateExecutionSafety(normalizedWorkflow, options);
 	validateWorkflowTemplates(normalizedWorkflow);
 
 	return normalizedWorkflow;
+}
+
+function validateExecutionSafety(
+	workflow: WorkflowDefinition,
+	options: WorkflowValidationOptions,
+) {
+	const visit = (steps: WorkflowStep[], path = "steps") => {
+		for (const step of steps) {
+			const stepPath = `${path}.${step.id}`;
+
+			if (
+				!options.trustedCompiledExecution &&
+				!options.allowLegacyExecutionSchema &&
+				(step.kind === "subagent" || step.kind === "loop_subagent")
+			) {
+				throw new Error(
+					`${stepPath}: raw ${step.kind} is not allowed. Use authoring schema; browser/model work must compile to sealed tool_worker.`,
+				);
+			}
+
+			if (!options.trustedCompiledExecution && step.kind === "state_drain") {
+				throw new Error(
+					`${stepPath}: raw state_drain is internal compiler output, not authoring YAML.`,
+				);
+			}
+
+			if (
+				step.kind === "sealed" &&
+				step.sealed?.mode === "tool_worker" &&
+				(!Array.isArray(step.outputs) || step.outputs.length === 0)
+			) {
+				throw new Error(
+					`${stepPath}: sealed tool_worker must declare outputs.`,
+				);
+			}
+
+			if (Array.isArray(step.steps) && step.steps.length > 0) {
+				visit(step.steps, `${stepPath}.steps`);
+			}
+		}
+	};
+
+	visit(workflow.steps);
 }
 
 /**
