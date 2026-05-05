@@ -9,6 +9,7 @@ type WorkflowStepLike = {
 	id: string;
 	kind?: unknown;
 	task?: unknown;
+	sealed?: unknown;
 	outputs?: unknown;
 	skip_if_empty?: unknown;
 	for_each?: unknown;
@@ -104,14 +105,17 @@ function validateStepShape(
 		"loop_subagent",
 		"plugin",
 		"state_drain",
+		"sealed",
 	]);
 	if (step.kind !== undefined) {
 		if (typeof step.kind !== "string" || !validKinds.has(step.kind)) {
 			throw new WorkflowTemplateValidationError(
-				`${step.id}.kind: invalid kind "${String(step.kind)}". Expected one of: subagent, loop_subagent, plugin, state_drain.`,
+				`${step.id}.kind: invalid kind "${String(step.kind)}". Expected one of: subagent, loop_subagent, plugin, state_drain, sealed.`,
 			);
 		}
 	}
+
+	validateSealedStep(step, where);
 
 	if (step.drain === undefined) return;
 
@@ -166,6 +170,44 @@ function validateStepShape(
 	) {
 		throw new WorkflowTemplateValidationError(
 			`${step.id}.drain.max_iterations: must be integer >= 1 or null in ${where}`,
+		);
+	}
+}
+
+function validateSealedStep(step: WorkflowStepLike, where: string): void {
+	if (step.kind !== "sealed") return;
+
+	if (
+		!step.sealed ||
+		typeof step.sealed !== "object" ||
+		Array.isArray(step.sealed)
+	) {
+		throw new WorkflowTemplateValidationError(
+			`${step.id}.sealed: required object in ${where}`,
+		);
+	}
+
+	const sealed = step.sealed as Record<string, unknown>;
+	const mode =
+		typeof sealed.mode === "string" && sealed.mode.length > 0
+			? sealed.mode
+			: "tool_worker";
+	const allowedModes = new Set([
+		"command",
+		"tool_worker",
+		"skill_worker",
+		"adapter",
+	]);
+
+	if (!allowedModes.has(mode)) {
+		throw new WorkflowTemplateValidationError(
+			`${step.id}.sealed.mode: expected command, tool_worker, skill_worker, or adapter`,
+		);
+	}
+
+	if (mode === "command" && !sealed.command) {
+		throw new WorkflowTemplateValidationError(
+			`${step.id}.sealed.command: required when sealed.mode=command`,
 		);
 	}
 }

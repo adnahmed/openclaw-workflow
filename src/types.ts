@@ -344,6 +344,7 @@ export type CancelResult = {
 };
 
 export interface SessionAdapter {
+	supportsResultPolicy?: boolean;
 	spawn(
 		prompt: string,
 		options: SpawnOptions,
@@ -374,6 +375,14 @@ export type SpawnOptions = {
 	cronRunTimeoutMs?: number;
 	cronPollTimeoutMs?: number;
 	sessionKey?: string;
+	sealed?: SealedStepSpec;
+	resultPolicy?: SealedToolResultPolicy;
+	transcriptPolicy?: SealedContextFirewall;
+	artifactSink?: {
+		runId: string;
+		stepId: string;
+		spoolPrefix: string;
+	};
 };
 
 /**
@@ -535,7 +544,92 @@ export type StepExecutorKind =
 	| "subagent"
 	| "loop_subagent"
 	| "plugin"
-	| "state_drain";
+	| "state_drain"
+	| "sealed";
+
+export type SealedMode = "command" | "tool_worker" | "skill_worker" | "adapter";
+
+export type SealedOverflowMode = "fail" | "truncate" | "spool_and_summarize";
+
+export type SealedResultVisibility = {
+	mode?: "auto";
+	inline_when_safe?: boolean;
+	preserve_full_results?: boolean;
+	spool_when_large?: boolean;
+	return_refs?: boolean;
+	lazy_read?: boolean;
+	expose_preview?: boolean;
+};
+
+export type SealedContextFirewall = {
+	enabled?: boolean;
+	strategy?: "adaptive";
+	on_context_pressure?: "spool_and_compact" | "fail";
+};
+
+export type SealedStdStreamPolicy = {
+	max_stdout_bytes?: number;
+	max_stderr_bytes?: number;
+	max_process_output_bytes?: number;
+	mode?: SealedOverflowMode;
+};
+
+export type SealedToolResultPolicy = {
+	max_context_injection_bytes?: number | "auto";
+	max_single_result_bytes_before_spool?: number | "auto";
+	include_head_bytes?: number;
+	include_tail_bytes?: number;
+	preserve_full_result?: boolean;
+	mode?: "auto" | SealedOverflowMode;
+};
+
+export type SealedWatchdogPolicy = {
+	mode?: "progress_based" | "limits";
+	max_turns?: number;
+	max_tool_calls?: number;
+	max_wall_seconds?: number;
+	max_idle_seconds?: number;
+	repeated_tool_call_threshold?: number;
+	require_declared_outputs?: boolean;
+	detect_repeated_tool_calls?: boolean;
+	detect_repeated_navigation?: boolean;
+	on_no_progress?: "fail" | "blocked";
+};
+
+export type SealedCommandSpec = {
+	argv?: string[];
+	cwd?: string;
+	env?: Record<string, string>;
+};
+
+export type SealedReturnContract = {
+	max_context_bytes?: number | "auto";
+	type?: "json";
+	schema?: object;
+};
+
+export type SealedStepSpec = {
+	mode?: SealedMode;
+	command?: SealedCommandSpec | string;
+	no_model?: boolean;
+
+	tools?: {
+		allow?: string[];
+		deny?: string[];
+	};
+
+	result_visibility?: SealedResultVisibility;
+	context_firewall?: SealedContextFirewall;
+	tool_result_policy?: SealedToolResultPolicy;
+	stdout_policy?: SealedStdStreamPolicy;
+	watchdog?: SealedWatchdogPolicy;
+	return_contract?: SealedReturnContract;
+
+	artifact_spool?: {
+		enabled?: boolean;
+		path?: string;
+	};
+};
 
 export type StateDrainSpec = {
 	/**
@@ -593,6 +687,7 @@ export type WorkflowStep = {
 	state_consume?: StateConsumeSpec;
 	state_reclaim?: StateReclaimSpec;
 	state_complete?: StateCompleteSpec | StateCompleteSpec[];
+	sealed?: SealedStepSpec;
 
 	/**
 	 * First-class scheduler controller. Repeatedly expands nested steps until

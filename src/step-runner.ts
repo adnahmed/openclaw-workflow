@@ -46,6 +46,7 @@ import {
 	filterSubagentMcpServers,
 } from "./native-state-boundary.js";
 import { checkOutputs, checkStepContract } from "./output-checker.js";
+import { normalizeSealedSpec } from "./sealed-policy.js";
 import {
 	type CancelResult,
 	type MockAdapterOptions,
@@ -923,6 +924,9 @@ export async function runStep(step, runId, api, options) {
 
 	try {
 		const model = step.model || defaultModel || null;
+		const sealed =
+			(options as any).sealed ||
+			(step.kind === "sealed" ? normalizeSealedSpec(step.sealed) : undefined);
 
 		const workflow = options.workflow;
 		const combinedSkills = [
@@ -976,11 +980,32 @@ export async function runStep(step, runId, api, options) {
 			signalingPreamble +
 			step.task;
 
+		if (
+			step.kind === "sealed" &&
+			sealed?.context_firewall?.enabled &&
+			!(adapter as any).supportsResultPolicy &&
+			sealed.mode !== "command"
+		) {
+			api?.logger?.warn?.(
+				`sealed tool_worker "${step.id}" is running without core tool-result interception; falling back to prompt/output-contract enforcement only.`,
+			);
+		}
+
 		const spawnResult = await adapter.spawn(taskWithPreamble, {
 			model,
 			timeout: step.timeout,
 			sessionTarget: "isolated",
 			label: `wf:${runId}:${step.id}`,
+			sealed,
+			resultPolicy: sealed?.tool_result_policy,
+			transcriptPolicy: sealed?.context_firewall,
+			artifactSink: sealed
+				? {
+						runId,
+						stepId: step.id,
+						spoolPrefix: `__sealed_spool/${step.id}`,
+					}
+				: undefined,
 			cronDeliveryMode,
 			cronDeliveryChannel,
 			cronDeliveryTo,
@@ -1306,6 +1331,7 @@ function splitModelRef(modelRef) {
  * launch and manage isolated subagent runs.
  */
 class RuntimeSubagentAdapter implements SessionAdapter {
+	supportsResultPolicy = true;
 	runtime: any;
 	api: any;
 	subagent: any;
@@ -1346,6 +1372,10 @@ class RuntimeSubagentAdapter implements SessionAdapter {
 			deliver: false,
 			...modelFields,
 			timeoutMs: options.timeout ? options.timeout * 1000 : undefined,
+			sealed: options.sealed,
+			resultPolicy: options.resultPolicy,
+			transcriptPolicy: options.transcriptPolicy,
+			artifactSink: options.artifactSink,
 		};
 
 		const result = await this.subagent.run(args);
@@ -1674,6 +1704,7 @@ function selectAdapter(api, requestedAdapter = "auto"): SessionAdapter {
  *   getStatus(sessionId)   → Promise<{ status: 'running'|'done'|'error', error? }>
  */
 class ApiAdapter implements SessionAdapter {
+	supportsResultPolicy = true;
 	sessions: any;
 
 	/**
@@ -1800,6 +1831,7 @@ function parseCronRunsOutput(raw) {
 }
 
 export class CliAdapter implements SessionAdapter {
+	supportsResultPolicy = false;
 	executor: any;
 	_jobs: Map<string, { status: string }> | null = null;
 
@@ -1985,6 +2017,7 @@ export class CliAdapter implements SessionAdapter {
  * // Steps using this adapter will complete in 100ms
  */
 export class MockAdapter implements SessionAdapter {
+	supportsResultPolicy = true;
 	resolveIn: number;
 	shouldFail: boolean;
 	failMessage: string;
@@ -2063,6 +2096,9 @@ export function createStepRunner(adapter) {
 
 		try {
 			const model = step.model || options.defaultModel || null;
+			const sealed =
+				(options as any).sealed ||
+				(step.kind === "sealed" ? normalizeSealedSpec(step.sealed) : undefined);
 			const signalingPreamble = buildWorkflowSignalingPreamble({
 				step,
 				runId,
@@ -2088,6 +2124,16 @@ export function createStepRunner(adapter) {
 				timeout: step.timeout,
 				sessionTarget: "isolated",
 				label: `wf:${runId}:${step.id}`,
+				sealed,
+				resultPolicy: sealed?.tool_result_policy,
+				transcriptPolicy: sealed?.context_firewall,
+				artifactSink: sealed
+					? {
+							runId,
+							stepId: step.id,
+							spoolPrefix: `__sealed_spool/${step.id}`,
+						}
+					: undefined,
 			});
 			sessionKey = spawnResult.sessionKey;
 

@@ -30,6 +30,7 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import yaml from "js-yaml";
+import { normalizeSealedSpec } from "./sealed-policy.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import {
 	type ReuseOutputsSpec,
@@ -375,6 +376,7 @@ function normalizeAndValidate(raw, filePath) {
 				"loop_subagent",
 				"plugin",
 				"state_drain",
+				"sealed",
 			]);
 			const stepKind =
 				step.kind ||
@@ -386,7 +388,7 @@ function normalizeAndValidate(raw, filePath) {
 			if (step.kind !== undefined && !validKinds.has(step.kind)) {
 				throw new Error(
 					`Step "${step.id}" in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
-						`has invalid kind "${step.kind}". Expected: subagent, loop_subagent, plugin, state_drain.`,
+						`has invalid kind "${step.kind}". Expected: subagent, loop_subagent, plugin, state_drain, sealed.`,
 				);
 			}
 
@@ -445,6 +447,30 @@ function normalizeAndValidate(raw, filePath) {
 						`Step "${step.id}" (kind: state_drain) in ${isInner ? "loop" : "workflow"} "${parentName}" ` +
 							`must define a non-empty nested "steps" array.`,
 					);
+				}
+			} else if (stepKind === "sealed") {
+				if (!step.sealed || typeof step.sealed !== "object") {
+					throw new Error(
+						`Step "${step.id}" kind: sealed must define sealed: { ... }`,
+					);
+				}
+
+				const mode = step.sealed.mode || "tool_worker";
+
+				if (mode === "command") {
+					const command = step.sealed.command;
+					if (!command) {
+						throw new Error(
+							`Sealed command step "${step.id}" must define sealed.command`,
+						);
+					}
+				}
+
+				if (
+					mode !== "command" &&
+					(!step.task || typeof step.task !== "string")
+				) {
+					throw new Error(`Sealed worker step "${step.id}" must define task`);
 				}
 			} else if (!step.task || typeof step.task !== "string") {
 				if (!step.for_each) {
@@ -566,7 +592,8 @@ function normalizeAndValidate(raw, filePath) {
 					| "subagent"
 					| "loop_subagent"
 					| "plugin"
-					| "state_drain",
+					| "state_drain"
+					| "sealed",
 				uses: typeof step.uses === "string" ? step.uses : undefined,
 				with:
 					step.with &&
@@ -631,6 +658,12 @@ function normalizeAndValidate(raw, filePath) {
 					: step.state_complete && typeof step.state_complete === "object"
 						? step.state_complete
 						: undefined,
+				sealed:
+					step.sealed && typeof step.sealed === "object"
+						? normalizeSealedSpec(step.sealed)
+						: step.kind === "sealed"
+							? normalizeSealedSpec({})
+							: undefined,
 				drain:
 					step.drain && typeof step.drain === "object"
 						? {

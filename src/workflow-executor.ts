@@ -51,6 +51,7 @@ import {
 	validateLoopItems,
 } from "./list-resolver.js";
 import type { PluginOperationRegistry } from "./plugin-operations.js";
+import { runSealedStep } from "./sealed-step-runner.js";
 import { FilesystemStateStore } from "./state-artifact-stores.js";
 import { projectStateContracts } from "./state-contract-projector.js";
 import {
@@ -1154,6 +1155,42 @@ export async function executeWorkflow(
 						artifactStore,
 						pluginRegistry,
 						redis,
+					});
+				} else if (step.kind === "sealed") {
+					result = await runSealedStep(step, runId, api, {
+						pollIntervalMs,
+						baseDir,
+						defaultModel,
+						attempts,
+						handoffToken,
+						runStartedAtMs: new Date(state.started_at).getTime(),
+						cronDeliveryMode,
+						cronDeliveryChannel,
+						cronDeliveryTo,
+						cliTimeoutMs,
+						cronAddTimeoutMs,
+						cronRunTimeoutMs,
+						cronPollTimeoutMs,
+						cancelGraceMs,
+						sessionAdapter,
+						validators: workflow.validators || {},
+						workflowDir: workflow.__dir || workflowsDir,
+						artifactStore,
+						filesystemFallback: config.filesystemFallback !== false,
+						workflow,
+						getStepState: () => state.steps[step.id],
+						onSpawn: async (spawn) => {
+							await mutateState(() =>
+								persistStepPatch(step.id, {
+									status: "running",
+									session_key: spawn.sessionKey,
+									session_id: spawn.sessionId,
+									subagent_run_id: spawn.sessionId,
+									session_adapter: spawn.sessionAdapter,
+									spawned_at: spawn.spawnedAt,
+								}),
+							);
+						},
 					});
 				} else {
 					try {
