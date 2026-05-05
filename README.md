@@ -176,7 +176,7 @@ Authoring workflows are compiled into execution workflows before validation and 
 
 `authoring YAML -> authoring-loader -> authoring-compiler -> execution WorkflowDefinition -> workflow-loader normalize/validate -> template-schema-validator -> workflow-executor`
 
-Raw execution-schema workflow files are disabled by default at load time. They are only accepted when `allowLegacyExecutionSchema` is explicitly enabled (migration/testing scenarios).
+Raw execution-schema workflow files are disabled in the public load path. For migration-only workflows, use the internal migration loader (`loadLegacyExecutionWorkflowForMigrationOnly`) rather than normal `loadWorkflow` / `loadWorkflowFromFile`.
 
 Security note: trust is based on in-memory compilation, not on YAML metadata. A hand-written `__compiled_from` field in input YAML is not treated as trusted compiler output.
 
@@ -195,6 +195,31 @@ pipeline:
   - collect_jobs:
       uses: browser
       writes: jobs.pending
+
+  - classify_jobs:
+      uses: model
+      for_each: jobs_ready
+      parser: json
+      outputs:
+        - id: classification_results
+
+  - publish_state:
+      uses: plugin
+      operation: workflow.state_publish
+      state_publish:
+        from_step: collect_jobs
+        output: jobs_pending
+        collection: jobs
+        queue: jobs_pending
+
+  - classify_all_jobs:
+      uses: drain
+      worker_group: classification
+      worker:
+        uses: model
+        task: Classify claimed jobs.
+        outputs:
+          - id: classified_jobs
 ```
 
 Compiled execution outline (abridged):
@@ -213,6 +238,43 @@ steps:
     kind: plugin
     uses: workflow.state_publish
     ...
+  - id: classify_jobs
+    kind: loop_subagent
+    ...
+  - id: classify_all_jobs
+    kind: state_drain
+    ...
+
+### Authoring-specific fields (public schema)
+
+In addition to `resources`, `collections`, `profiles`, and `pipeline`, the authoring schema supports:
+
+- top-level `state` (merged with compiler-generated collection state)
+- top-level `required_skills` (public skills only; engine-native state backends remain internal)
+- top-level `concurrency` and `version`
+- `defaults.sealed` to set global sealed-worker policy overrides
+
+Authoring step additions:
+
+- `outputs` supports rich arrays:
+  - string entries (`- jobs_ready`)
+  - objects with `id`, `path`, `validate`, `optional`, and `materialize.{path,mode}`
+- plugin op shorthand via top-level `operation` (preferred over `with.operation`, still backward-compatible)
+- public sealed-loop authoring via `for_each` (+ `parser`, `item_schema`) for browser/model steps
+- named drain controller authoring via `uses: drain` + `worker_group`, `claim`, `worker`, `complete`
+- step-level `sealed` overrides merged over defaults/profile
+
+Example rich output object:
+
+```yaml
+outputs:
+  - id: jobs_ready
+    path: data/linkedin/job-alerts/jobs-ready-{date}.json
+    validate: jobs_array
+    materialize:
+      path: data/linkedin/job-alerts/jobs-ready-{date}.json
+      mode: always
+```
 ```
 
 ## Workflow YAML Schema Reference
