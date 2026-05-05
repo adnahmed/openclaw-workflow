@@ -30,6 +30,7 @@ import type {
 	StateQueueSpec,
 	StateReclaimSpec,
 	StateReportSpec,
+	StateRouteQueueSpec,
 	StateWhereSpec,
 	WorkflowPluginOperation,
 } from "./types.js";
@@ -973,6 +974,156 @@ async function loadQueryItems(args: {
 	return out;
 }
 
+type EnqueueStateItemResult = {
+	queued: boolean;
+	duplicate: boolean;
+	queue_key: string;
+};
+
+type RouteQueueResult = {
+	item_key: string;
+	queue: string;
+	lifecycle: string | null;
+};
+
+/**
+ * Shared helper: enqueue a single item key into a semantic queue with optional
+ * dedupe via a :seen Redis set. Used by state_complete route_queues and
+ * state_partition queue routing.
+ */
+async function enqueueStateItem(args: {
+	ctx: PluginOperationContext;
+	collectionName: string;
+	queueName: string;
+	queueSpec: StateQueueSpec;
+	itemKey: string;
+	lifecycle?: string;
+	dedupe?: boolean;
+	documentPatch?: JsonObject;
+}): Promise<EnqueueStateItemResult> {
+	const redis = args.ctx.redis;
+	if (!redis) throw new Error("Redis is required for enqueueStateItem");
+
+	const qKeys = keyspace(
+		args.ctx,
+		args.collectionName,
+		undefined,
+		args.queueName,
+	);
+	const queueKey = qKeys.queue;
+
+	if (args.dedupe !== false) {
+		// Use the existing queuedSet as the dedupe guard (same key used by state_publish/state_partition).
+		if (typeof redis.sadd === "function") {
+			const added = await redis.sadd(qKeys.queuedSet, args.itemKey);
+			if (added === 0) {
+				return { queued: false, duplicate: true, queue_key: queueKey };
+			}
+		} else {
+			// Fallback: use SADD via redisRaw.
+			const added = await redisRaw(
+				redis,
+				"SADD",
+				qKeys.queuedSet,
+				args.itemKey,
+			);
+			if (!redisReplyIsPositive(added)) {
+				return { queued: false, duplicate: true, queue_key: queueKey };
+			}
+		}
+	}
+
+	await redisRaw(redis, "RPUSH", queueKey, args.itemKey);
+
+	if (args.documentPatch && Object.keys(args.documentPatch).length > 0) {
+		await writeRedisDocument({
+			ctx: args.ctx,
+			collection: args.collectionName,
+			itemKey: args.itemKey,
+			next: args.documentPatch,
+			mode: "merge",
+		});
+	}
+
+	await redis.xadd(qKeys.stream, "*", {
+		event: "routed",
+		collection: args.collectionName,
+		item_key: args.itemKey,
+		queue: args.queueName,
+		lifecycle: args.lifecycle ?? args.queueSpec.lifecycle ?? "",
+		run_id: args.ctx.runId,
+		step_id: args.ctx.step.id,
+	});
+
+	return { queued: true, duplicate: false, queue_key: queueKey };
+}
+
+/**
+ * After a claimed item is completed and merged, enqueue it into downstream
+ * queues based on state_complete.route_queues predicates.
+ */
+async function routeCompletedItemToQueues(args: {
+	ctx: PluginOperationContext;
+	spec: StateCompleteSpec;
+	collectionName: string;
+	itemKey: string;
+	row: JsonObject;
+	mergedDocument: JsonObject;
+}): Promise<RouteQueueResult[]> {
+	const routes: StateRouteQueueSpec[] = args.spec.route_queues ?? [];
+	const results: RouteQueueResult[] = [];
+
+	for (const route of routes) {
+		const matches = matchesWhere(
+			{ ...args.mergedDocument, ...args.row } as JsonObject,
+			route.when,
+		);
+
+		if (!matches) continue;
+
+		const qSpec = args.ctx.workflow.state?.queues?.[route.queue];
+		if (!qSpec) {
+			throw new Error(
+				`state_complete.route_queues references unknown queue "${route.queue}"`,
+			);
+		}
+
+		if (qSpec.collection !== args.collectionName) {
+			throw new Error(
+				`state_complete.route_queues queue "${route.queue}" belongs to collection ` +
+					`"${qSpec.collection}", not "${args.collectionName}"`,
+			);
+		}
+
+		const resolvedLifecycle = route.lifecycle ?? qSpec.lifecycle ?? null;
+
+		const enqueueResult = await enqueueStateItem({
+			ctx: args.ctx,
+			collectionName: args.collectionName,
+			queueName: route.queue,
+			queueSpec: qSpec,
+			itemKey: args.itemKey,
+			lifecycle: resolvedLifecycle ?? undefined,
+			dedupe: route.dedupe !== false,
+			documentPatch: {
+				lifecycle: resolvedLifecycle,
+				queued_for: route.queue,
+				queued_at: new Date().toISOString(),
+			},
+		});
+
+		if (!enqueueResult.duplicate) {
+			results.push({
+				item_key: args.itemKey,
+				queue: route.queue,
+				lifecycle: resolvedLifecycle,
+			});
+		}
+	}
+
+	return results;
+}
+
 export const statePublishOperation: WorkflowPluginOperation = {
 	id: "workflow.state_publish",
 	description: "Publish validated artifact items into semantic workflow state.",
@@ -1530,6 +1681,9 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 				let failed = 0;
 				let skipped = 0;
 				let stale = 0;
+				let routedCount = 0;
+				let routeDuplicates = 0;
+				const routedByQueue: Record<string, number> = {};
 
 				if (!ctx.redis) {
 					logs.push(
@@ -1591,6 +1745,8 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 							Boolean(spec.merge_fields?.length) ||
 							Boolean(spec.indexes?.length);
 
+						let mergedDocument: JsonObject = {};
+
 						if (shouldMerge) {
 							const patch = fieldsForMerge(row, spec.merge_fields);
 
@@ -1606,6 +1762,8 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 								mode: "merge",
 								indexes: spec.indexes,
 							});
+
+							mergedDocument = patch;
 						}
 
 						await redisRaw(
@@ -1627,6 +1785,23 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 
 						if (terminal === "failed") failed += 1;
 						else completed += 1;
+
+						if (spec.route_queues && spec.route_queues.length > 0) {
+							const routeResults = await routeCompletedItemToQueues({
+								ctx,
+								spec,
+								collectionName: collection,
+								itemKey,
+								row,
+								mergedDocument,
+							});
+							for (const r of routeResults) {
+								routedCount += 1;
+								routedByQueue[r.queue] = (routedByQueue[r.queue] ?? 0) + 1;
+							}
+							const attempted = spec.route_queues.length;
+							routeDuplicates += attempted - routeResults.length;
+						}
 					}
 
 					const coll = collectionSpec(ctx, collection);
@@ -1654,10 +1829,14 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 					failed,
 					skipped,
 					stale_count: stale,
+					routed_count: routedCount,
+					routed_by_queue: routedByQueue,
+					route_duplicates: routeDuplicates,
+					route_skipped: rows.length - completed - failed - skipped - stale,
 				});
 
 				logs.push(
-					`completed=${completed} failed=${failed} skipped=${skipped} stale=${stale} collection=${collection}`,
+					`completed=${completed} failed=${failed} skipped=${skipped} stale=${stale} routed=${routedCount} collection=${collection}`,
 				);
 
 				if (spec.fail_on_skipped !== false && skipped > 0) {
@@ -1686,6 +1865,31 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 				valid_count: summaries.reduce(
 					(sum, item) =>
 						sum + Number(item.completed ?? 0) + Number(item.failed ?? 0),
+					0,
+				),
+				routed_count: summaries.reduce(
+					(sum, item) => sum + Number(item.routed_count ?? 0),
+					0,
+				),
+				routed_by_queue: summaries.reduce(
+					(acc: Record<string, number>, item) => {
+						const byQueue = (item.routed_by_queue ?? {}) as Record<
+							string,
+							number
+						>;
+						for (const [q, n] of Object.entries(byQueue)) {
+							acc[q] = (acc[q] ?? 0) + n;
+						}
+						return acc;
+					},
+					{},
+				),
+				route_duplicates: summaries.reduce(
+					(sum, item) => sum + Number(item.route_duplicates ?? 0),
+					0,
+				),
+				route_skipped: summaries.reduce(
+					(sum, item) => sum + Number(item.route_skipped ?? 0),
 					0,
 				),
 				items: summaries,

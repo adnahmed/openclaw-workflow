@@ -1,4 +1,6 @@
 import type {
+	DrainStopWhenSpec,
+	ExternalLandingPreflightSpec,
 	SealedStepSpec,
 	StateCompleteSpec,
 	StateConsumeSpec,
@@ -198,6 +200,11 @@ export type AuthoringStepBody = {
 	worker_group?: string;
 	max_empty_claims?: number;
 	max_iterations?: number | null;
+	max_active_iterations?: number;
+	drain_mode?: "batch" | "streaming";
+	idle_wait_seconds?: number;
+	max_idle_seconds?: number;
+	stop_when?: DrainStopWhenSpec;
 	claim?: Partial<AuthoringStepBody> & {
 		state_consume?: StateConsumeSpec;
 	};
@@ -212,6 +219,13 @@ export type AuthoringStepBody = {
 	 * Per-step sealed override merged over defaults/profile.
 	 */
 	sealed?: Partial<SealedStepSpec>;
+
+	/**
+	 * External landing preflight probe spec.
+	 * Compiler passes this through to the workflow step for the
+	 * workflow.external_landing_preflight plugin operation.
+	 */
+	external_landing_preflight?: ExternalLandingPreflightSpec;
 };
 
 export type AuthoringDrainStep = {

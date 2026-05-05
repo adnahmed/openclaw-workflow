@@ -55,6 +55,7 @@ import type { PluginOperationRegistry } from "./plugin-operations.js";
 import { runSealedStep } from "./sealed-step-runner.js";
 import { FilesystemStateStore } from "./state-artifact-stores.js";
 import { projectStateContracts } from "./state-contract-projector.js";
+import { buildSemanticStateKeyspace } from "./state-keyspace.js";
 import {
 	adoptStepContract,
 	buildStepHandoffToken,
@@ -72,7 +73,13 @@ import {
 	runStep,
 } from "./step-runner.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
-import type { RunState, StepState, WorkflowStep } from "./types.js";
+import type {
+	RunState,
+	StateDrainSpec,
+	StepState,
+	WorkflowDefinition,
+	WorkflowStep,
+} from "./types.js";
 import {
 	assertSafeOutputPath,
 	buildContext,
@@ -448,6 +455,7 @@ export async function executeWorkflow(
 		empty_claims: number;
 		active_iterations: Set<number>;
 		closing: boolean;
+		first_idle_at: number | null;
 	};
 
 	const drainRuntime = new Map<string, DrainControllerRuntime>();
@@ -474,7 +482,78 @@ export async function executeWorkflow(
 				1,
 				Number(drain.max_active_iterations ?? 1),
 			),
+			drain_mode: (drain.drain_mode ?? "batch") as "batch" | "streaming",
+			idle_wait_seconds: Math.max(1, Number(drain.idle_wait_seconds ?? 10)),
+			max_idle_seconds: Math.max(1, Number(drain.max_idle_seconds ?? 600)),
+			stop_when: drain.stop_when,
 		};
+	}
+
+	async function isSemanticQueueEmpty(
+		wf: WorkflowDefinition,
+		queueName: string,
+	): Promise<boolean> {
+		if (!redis) return false;
+
+		const qSpec = wf.state?.queues?.[queueName];
+		if (!qSpec) return true;
+
+		const date = (varCtx as Record<string, unknown>)?.date as
+			| string
+			| undefined;
+		if (!date) return false;
+
+		const keys = buildSemanticStateKeyspace({
+			stateKey: wf.state?.key,
+			workflowName: wf.name,
+			date,
+			collection: qSpec.collection,
+			queue: queueName,
+			queueSuffix: qSpec.suffix,
+		});
+
+		if (typeof redis.llen === "function") {
+			const len = await redis.llen(keys.queue);
+			return len === 0;
+		}
+
+		// Fallback: use lrange to check if the list has any entries.
+		if (typeof redis.lrange === "function") {
+			const items = await redis.lrange(keys.queue, 0, 0);
+			return items.length === 0;
+		}
+
+		return false;
+	}
+
+	async function isStreamingDrainStopReady(
+		parentStep: WorkflowStep,
+		drainSpecResult: ReturnType<typeof drainSpec>,
+	): Promise<boolean> {
+		const stop = drainSpecResult.stop_when;
+		if (!stop) return false;
+
+		const producers = stop.producers_done ?? [];
+		const producersDone = producers.every((stepId) => {
+			const stepStatus = state.steps[stepId]?.status;
+			return (
+				stepStatus === "ok" ||
+				stepStatus === "failed" ||
+				stepStatus === "blocked" ||
+				stepStatus === "skipped"
+			);
+		});
+
+		if (!producersDone) return false;
+
+		const queueNames = stop.queues_empty ?? [];
+		const queueChecks = await Promise.all(
+			queueNames.map((queueName) =>
+				isSemanticQueueEmpty(workflow as WorkflowDefinition, queueName),
+			),
+		);
+
+		return queueChecks.every(Boolean);
 	}
 
 	function findDrainClaimStep(innerSteps: WorkflowStep[]): WorkflowStep {
@@ -826,7 +905,61 @@ export async function executeWorkflow(
 
 				if (claimedCount === 0) {
 					runtime.active_iterations.delete(activeIteration);
-					runtime.empty_claims += 1;
+
+					const specNow = drainSpec(parentStep);
+					if (specNow.drain_mode === "streaming") {
+						if (runtime.first_idle_at === null) {
+							runtime.first_idle_at = Date.now();
+						}
+
+						const idleMs = Date.now() - runtime.first_idle_at;
+						const maxIdleMs = specNow.max_idle_seconds * 1000;
+
+						const streamingStop =
+							idleMs >= maxIdleMs ||
+							(await isStreamingDrainStopReady(parentStep, specNow));
+
+						if (!streamingStop) {
+							// Not yet ready — keep waiting, do not increment empty_claims
+							drainRuntime.set(parentStep.id, runtime);
+
+							for (const child of children) {
+								if (child.id === claimChildId) continue;
+								const childState = state.steps[child.id];
+								if (childState?.status === "pending") {
+									await mutateState(() =>
+										persistStepPatch(child.id, {
+											status: "skipped",
+											completed_at: getLocalISOString(),
+											duration_ms: 0,
+											error: null,
+											logs: JSON.stringify(
+												{
+													phase: "state_drain",
+													reason: "empty_claim_streaming_wait",
+													iteration: activeIteration,
+													claim_step: claimChildId,
+													idle_ms: idleMs,
+												},
+												null,
+												2,
+											),
+										}),
+									);
+								}
+							}
+
+							// Wait idle_wait_seconds before checking again
+							await sleep(specNow.idle_wait_seconds * 1000);
+							continue;
+						}
+
+						// Streaming stop condition met — count as enough empty claims to close
+						runtime.empty_claims = specNow.max_empty_claims;
+					} else {
+						runtime.empty_claims += 1;
+					}
+
 					drainRuntime.set(parentStep.id, runtime);
 
 					for (const child of children) {
@@ -865,6 +998,7 @@ export async function executeWorkflow(
 
 				runtime.active_iterations.delete(activeIteration);
 				runtime.empty_claims = 0;
+				runtime.first_idle_at = null;
 				drainRuntime.set(parentStep.id, runtime);
 			}
 
@@ -1882,6 +2016,7 @@ export async function executeWorkflow(
 								empty_claims: 0,
 								active_iterations: new Set<number>(),
 								closing: false,
+								first_idle_at: null,
 							});
 							await maybeAppendDrainIterations(step);
 						} catch (err) {

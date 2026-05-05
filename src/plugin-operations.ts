@@ -22,6 +22,7 @@
 
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import { externalLandingPreflightOperation } from "./external-landing-preflight.js";
 import { workflowUsesNativeState } from "./native-state-boundary.js";
 import {
 	stateClaimOperation,
@@ -533,5 +534,6 @@ export function createDefaultRegistry(): PluginOperationRegistry {
 	registry.register(statePatchOutputsOperation);
 	registry.register(statePartitionOperation);
 	registry.register(stateReportOperation);
+	registry.register(externalLandingPreflightOperation);
 	return registry;
 }

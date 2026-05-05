@@ -814,6 +814,48 @@ Behavior:
   - `fail_on_skipped` (default true) fails when rows are skipped due to missing item keys
   - `fail_on_stale` (default true) fails when stale lease completions are detected
 
+##### `state_complete.route_queues` — downstream queue routing
+
+After each item is completed, `workflow.state_complete` can atomically enqueue the item key into one or more downstream semantic queues based on route, status, or field-match conditions.
+
+Add a `route_queues` list to `state_complete`:
+
+```yaml
+state_complete:
+  from_step: classify
+  output: classification_results
+  worker_group: jobs_classifier
+  collection: jobs
+  route_queues:
+    - queue: jobs_easy_apply        # target semantic queue name from workflow.state.queues
+      when:
+        route: easy_apply           # match on item field value
+      lifecycle: queued             # optional lifecycle tag written into document
+    - queue: jobs_needs_review
+      when:
+        status: needs_review
+```
+
+`StateRouteQueueSpec` fields:
+- required: `queue` — semantic queue name (`workflow.state.queues.<name>`)
+- optional: `when` — field/value predicate map; all conditions must match (`AND`)
+- optional: `lifecycle` — string written to the document `lifecycle` field on enqueue
+- optional: `collection` — override the collection (defaults to the enclosing `state_complete` collection)
+
+The summary artifact output by `state_complete` includes routing statistics:
+
+```json
+{
+  "routed_count": 42,
+  "routed_by_queue": { "jobs_easy_apply": 30, "jobs_needs_review": 12 },
+  "route_duplicates": 3,
+  "route_skipped": 0
+}
+```
+
+- `route_duplicates` counts items that were already members of the target queued-set (no double-enqueue).
+- `route_skipped` counts items where no route_queues rule matched.
+
 #### `workflow.state_query`
 
 Queries a semantic collection from Redis and writes bounded query results as an artifact.
@@ -1034,6 +1076,148 @@ Notes:
 - controller keeps up to `max_active_iterations` iterations active concurrently.
 - non-optional child `failed`/`blocked` statuses fail the controller.
 - on empty claim, pending downstream children in that iteration are marked `skipped`.
+
+#### Streaming Drain Mode
+
+By default, `state_drain` uses `drain_mode: batch` — it stops after `max_empty_claims` consecutive empty iterations.
+
+Set `drain_mode: streaming` to keep the drain alive while upstream producers are still running. The controller will idle-poll instead of immediately stopping on an empty claim, and will only close when stop conditions are met.
+
+Additional `drain` fields for streaming mode:
+- `drain_mode`: `"batch"` (default) | `"streaming"`
+- `idle_wait_seconds`: seconds to wait between idle polls (default `10`)
+- `max_idle_seconds`: hard timeout in seconds; drain closes even if stop conditions are not met (default `600`)
+- `stop_when.producers_done`: list of step IDs — all must reach a terminal status (`ok`, `failed`, `blocked`, or `skipped`)
+- `stop_when.queues_empty`: list of semantic queue names — all must have zero items in their pending list
+
+**Important**: `stop_when.producers_done` step IDs are **not** treated as DAG dependencies of the drain step. They are checked at runtime inside the idle loop. If you also need the drain to wait for a producer to start before it runs, add that producer to `depends_on` explicitly.
+
+Example — drain waits for a publisher step to finish before stopping:
+
+```yaml
+- id: publisher
+  name: Publish jobs to queue
+  uses: plugin
+  # ...
+
+- id: jobs_drain
+  kind: state_drain
+  name: Drain jobs queue (streaming)
+  depends_on: []          # drain can start immediately
+  drain:
+    worker_group: jobs_processor
+    drain_mode: streaming
+    idle_wait_seconds: 15
+    max_idle_seconds: 1800
+    stop_when:
+      producers_done: [publisher]   # wait until publisher finishes
+      queues_empty: [jobs_pending]  # and the queue is empty
+  steps:
+    - id: claim
+      kind: plugin
+      uses: workflow.state_claim
+      state_consume:
+        worker_group: jobs_processor
+        output: claim_manifest
+      outputs:
+        - id: claim_manifest
+    # ... worker and complete steps
+```
+
+### `workflow.external_landing_preflight`
+
+Safely probes external job application landing pages before a browser agent attempts to apply. The plugin reads a claim artifact, evaluates each item's URL, classifies page safety, and enqueues safe items into a verified downstream queue.
+
+**Plugin operation ID**: `workflow.external_landing_preflight`
+
+`external_landing_preflight` spec fields:
+- required: `claim_output` — output ID from the upstream claim step
+- required: `output` — artifact output ID for the preflight result
+- required: `collection` — semantic collection name
+- required: `verified_queue` — semantic queue name to enqueue safe items into
+- optional: `from_step` — step to read the claim artifact from (defaults to current step)
+- optional: `max_items` — cap on items to preflight per call (default: all claimed items)
+- optional: `max_redirects` — redirect follow cap (default: `5`)
+- optional: `timeout_ms` — per-item probe timeout (default: `8000`)
+- optional: `verified_lifecycle` — lifecycle tag written to queued items
+- optional: `include_fields` — item fields to carry forward into the output artifact
+- optional: `allowed_actions` — probe actions permitted: `navigate`, `read_dom_metadata`, `read_links`, `read_forms`, `read_buttons`
+- optional: `blocked_actions` — actions always blocked: `submit_form`, `upload_file`, `download_file`, `execute_file`, `enter_credentials`
+- optional: `safety` — detection flags: `require_domain_consistency`, `detect_downloads`, `detect_obfuscated_redirects`, `detect_login_or_verification`, `detect_assessment_or_screening`, `detect_unrelated_page`
+- optional: `matching` — URL/title match scoring weights and thresholds: `title_weight`, `company_weight`, `url_weight`, `strong_match_threshold`, `ambiguous_threshold`
+- optional: `decisions` — classify decision codes into `eligible`, `blocked`, `skipped`, `retryable` lists
+
+Output artifact shape:
+
+```json
+{
+  "status": "ok",
+  "generated_at": "2025-01-01T00:00:00.000Z",
+  "items": [
+    {
+      "job_id": "job_123",
+      "item_key": "job_123",
+      "lease": "...",
+      "route": "easy_apply",
+      "status": "eligible",
+      "submitted": false,
+      "retryable": false,
+      "reason": "eligible",
+      "landing_decision": "eligible",
+      "safe_to_attempt": true,
+      "entrypoint_url": "https://example.com/apply/123",
+      "matched_job_url": "https://example.com/apply/123",
+      "match_confidence": 1.0,
+      "match_confidence_bucket": "strong",
+      "external_preflight": {
+        "final_url": "https://example.com/apply/123",
+        "page_title": "Software Engineer",
+        "risk_flags": []
+      }
+    }
+  ],
+  "rejected_items": [],
+  "workflow_result": { "ok": true, "retryable": false, "blocked": false, "failed": false }
+}
+```
+
+`landing_decision` values:
+- `eligible` — page appears safe to attempt
+- `blocked` — blocked by safety policy
+- `login_required` — page redirected to login or auth
+- `download_risk` — URL points to a downloadable file
+- `redirect_limit` — followed too many redirects
+- `timeout` — probe timed out
+- `unrelated_page` — page content does not match job description
+- `skipped` — item had no `apply_url`/`job_url`
+- `unknown` — undetermined
+
+Example usage in an authoring workflow:
+
+```yaml
+- id: preflight_easy_apply
+  kind: plugin
+  uses: workflow.external_landing_preflight
+  depends_on: [claim_easy_apply]
+  external_landing_preflight:
+    from_step: claim_easy_apply
+    claim_output: claim_manifest
+    output: preflight_results
+    collection: jobs
+    verified_queue: jobs_verified_easy_apply
+    max_items: 5
+    safety:
+      require_domain_consistency: true
+      detect_downloads: true
+      detect_login_or_verification: true
+    matching:
+      strong_match_threshold: 0.8
+      ambiguous_threshold: 0.5
+  outputs:
+    - id: preflight_results
+```
+
+
 
 ### Automatic Step Signaling (Prompt Injection)
 

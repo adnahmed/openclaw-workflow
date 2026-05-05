@@ -676,6 +676,7 @@ function compilePluginAuthoringStep(args: {
 		input_context: args.body.input_context,
 		output_contract_version: args.body.output_contract_version,
 		reuse_outputs: args.body.reuse_outputs,
+		external_landing_preflight: args.body.external_landing_preflight,
 		__compiled_from: args.compiledFrom,
 	};
 }
@@ -1036,6 +1037,11 @@ function compileDrainAuthoringStep(args: {
 			worker_group: workerGroup,
 			max_empty_claims: args.body.max_empty_claims ?? 1,
 			max_iterations: args.body.max_iterations ?? null,
+			max_active_iterations: args.body.max_active_iterations,
+			drain_mode: args.body.drain_mode,
+			idle_wait_seconds: args.body.idle_wait_seconds,
+			max_idle_seconds: args.body.max_idle_seconds,
+			stop_when: args.body.stop_when,
 		},
 		steps: [claimStep, workerStep, completeStep],
 		__compiled_from: args.compiledFrom,

@@ -168,6 +168,35 @@ export type StateReclaimSpec = {
 	on_no_redis?: "fail";
 };
 
+export type StateRouteQueueSpec = {
+	/**
+	 * Predicate evaluated against the final merged row/document.
+	 * Same shape as StateWhereSpec.
+	 */
+	when?: StateWhereSpec;
+
+	/**
+	 * Semantic queue name from workflow.state.queues.
+	 */
+	queue: string;
+
+	/**
+	 * Lifecycle to write onto the document when routed.
+	 */
+	lifecycle?: string;
+
+	/**
+	 * Optional fields to merge when routing.
+	 * If omitted, route only updates lifecycle/queued_for/queue metadata.
+	 */
+	merge_fields?: string[];
+
+	/**
+	 * Defaults true. Prevents duplicate enqueue of the same item into the same queue.
+	 */
+	dedupe?: boolean;
+};
+
 export type StateCompleteSpec = {
 	from_step?: string;
 	output: string;
@@ -203,6 +232,12 @@ export type StateCompleteSpec = {
 	require_rows?: boolean;
 	fail_on_skipped?: boolean;
 	fail_on_stale?: boolean;
+
+	/**
+	 * Streaming routing: after a claimed item is completed and merged,
+	 * immediately enqueue it into downstream queues based on route/status/etc.
+	 */
+	route_queues?: StateRouteQueueSpec[];
 };
 
 export type StateWhereSpec =
@@ -269,6 +304,63 @@ export type StateReportSpec = {
 	json_output: string;
 	markdown_output?: string;
 	on_no_redis?: "fail";
+};
+
+export type ExternalLandingPreflightSpec = {
+	from_step?: string;
+	claim_output: string;
+	output: string;
+	collection: string;
+	item_key?: string;
+
+	verified_queue: string;
+	verified_lifecycle?: string;
+
+	max_items?: number;
+	max_redirects?: number;
+	timeout_ms?: number;
+
+	include_fields?: string[];
+
+	allowed_actions?: Array<
+		| "navigate"
+		| "read_dom_metadata"
+		| "read_links"
+		| "read_forms"
+		| "read_buttons"
+	>;
+
+	blocked_actions?: Array<
+		| "submit_form"
+		| "upload_file"
+		| "download_file"
+		| "execute_file"
+		| "enter_credentials"
+	>;
+
+	safety?: {
+		require_domain_consistency?: boolean;
+		detect_downloads?: boolean;
+		detect_obfuscated_redirects?: boolean;
+		detect_login_or_verification?: boolean;
+		detect_assessment_or_screening?: boolean;
+		detect_unrelated_page?: boolean;
+	};
+
+	matching?: {
+		title_weight?: number;
+		company_weight?: number;
+		url_weight?: number;
+		strong_match_threshold?: number;
+		ambiguous_threshold?: number;
+	};
+
+	decisions?: {
+		eligible?: string[];
+		blocked?: string[];
+		skipped?: string[];
+		retryable?: string[];
+	};
 };
 
 export type ClaimContextInputSpec = {
@@ -812,6 +904,23 @@ export type SealedStepSpec = {
 	};
 };
 
+export type DrainStopWhenSpec = {
+	/**
+	 * Drain can stop only after these producer steps are terminal.
+	 */
+	producers_done?: string[];
+
+	/**
+	 * Drain can stop only when these semantic queues are empty.
+	 */
+	queues_empty?: string[];
+
+	/**
+	 * Optional timeout override for waiting on producers/queues.
+	 */
+	max_wait_seconds?: number;
+};
+
 export type StateDrainSpec = {
 	/**
 	 * Worker group to drain. Usually maps to state.worker_groups.<name>.
@@ -835,6 +944,27 @@ export type StateDrainSpec = {
 	 * This is the real concurrency knob for Redis-backed drains.
 	 */
 	max_active_iterations?: number;
+
+	/**
+	 * "batch" preserves current behavior.
+	 * "streaming" waits through empty claims while upstream producers may still enqueue.
+	 */
+	drain_mode?: "batch" | "streaming";
+
+	/**
+	 * Sleep between empty claim polls in streaming mode.
+	 */
+	idle_wait_seconds?: number;
+
+	/**
+	 * Hard cap on idle time before drain exits/fails.
+	 */
+	max_idle_seconds?: number;
+
+	/**
+	 * Streaming stop condition.
+	 */
+	stop_when?: DrainStopWhenSpec;
 };
 
 export type WorkflowStep = {
@@ -878,6 +1008,7 @@ export type WorkflowStep = {
 	state_partition?: StatePartitionSpec;
 	state_patch_outputs?: StatePatchOutputsSpec;
 	state_report?: StateReportSpec;
+	external_landing_preflight?: ExternalLandingPreflightSpec;
 
 	/**
 	 * Engine-injected runtime input.
@@ -983,6 +1114,12 @@ export interface RedisClient {
 	): Promise<"OK">;
 	/** Execute multiple commands atomically. Returns array of results. */
 	multi(commands: Array<[string, ...unknown[]]>): Promise<unknown[]>;
+	/** Add one or more members to a set. Returns count of newly added members. */
+	sadd?(key: string, ...members: string[]): Promise<number>;
+	/** Check if a member exists in a set. Returns 1 if present, 0 if not. */
+	sismember?(key: string, member: string): Promise<number>;
+	/** Get the length of a list. */
+	llen?(key: string): Promise<number>;
 	disconnect(): Promise<void>;
 }
 
