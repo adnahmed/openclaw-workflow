@@ -103,6 +103,13 @@ The plugin chooses how to spawn subagent sessions based on the available OpenCla
 
 If a specific adapter is forced but the required API is missing, the plugin will fail fast with an error.
 
+When a workflow contains sealed `tool_worker` steps with context firewall enforcement, adapter selection is capability-aware. The selected adapter must support:
+- tool-result interception
+- transcript firewall
+- artifact sink
+
+If those capabilities are unavailable, execution fails before worker spawn (rather than degrading to prompt-only sealing).
+
 ---
 
 **1. Create a workflow file:**
@@ -159,15 +166,19 @@ workflow_status({ name: "hello" })
 
 OpenClaw Workflow supports two YAML surfaces:
 
-1. **Authoring schema**  
-   Compact, human-friendly workflow format for writing pipelines.
+1. **Authoring schema (public)**  
+  Compact, human-friendly workflow format for writing pipelines.
 
-2. **Execution schema**  
-   Explicit runtime workflow format consumed by the engine.
+2. **Execution schema (internal target)**  
+  Low-level runtime format produced by the compiler.
 
 Authoring workflows are compiled into execution workflows before validation and execution:
 
 `authoring YAML -> authoring-loader -> authoring-compiler -> execution WorkflowDefinition -> workflow-loader normalize/validate -> template-schema-validator -> workflow-executor`
+
+Raw execution-schema workflow files are disabled by default at load time. They are only accepted when `allowLegacyExecutionSchema` is explicitly enabled (migration/testing scenarios).
+
+Security note: trust is based on in-memory compilation, not on YAML metadata. A hand-written `__compiled_from` field in input YAML is not treated as trusted compiler output.
 
 Authoring example:
 
@@ -270,6 +281,8 @@ steps:
 `**` `uses` is required when `kind: plugin`.
 
 `*` `sealed` is required when `kind: sealed`.
+
+Authoring-first note: in normal user workflows (`schema: authoring`), the compiler emits execution kinds such as `sealed`, `plugin`, and internal `state_drain` controllers. Raw `subagent` / `loop_subagent` execution-schema steps are legacy-only and rejected unless legacy execution loading is explicitly enabled.
 
 ### Sealed Steps (`kind: sealed`)
 
@@ -393,7 +406,9 @@ sealed:
 
 #### Capability boundary note
 
-When the runner uses CLI fallback adapter, internal tool-result interception cannot be enforced inside the child transcript. In that case, `sealed` still applies prompt/output-contract enforcement and bounded process output handling, but full core-level result interception requires OpenClaw runtime support.
+Sealed `tool_worker` steps with context firewall require adapter-enforced runtime capabilities. If the chosen adapter cannot enforce tool-result interception, transcript firewall, and artifact sink, the run fails before spawning the worker.
+
+This prevents silent downgrade from sealed runtime enforcement to prompt-only behavior.
 
 ### Plugin Steps (`kind: plugin`)
 
