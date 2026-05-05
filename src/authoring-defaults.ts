@@ -14,4 +14,5 @@ export const AUTHORING_DEFAULTS = {
 		report: "output/{workflow_slug}/{date}/{output_id}.md",
 		spool: "data/{workflow_slug}/{date}/spool/{step_id}/{artifact_id}",
 	},
+	sealed: {},
 } as const;

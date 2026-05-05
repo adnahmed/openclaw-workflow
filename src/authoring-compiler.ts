@@ -6,15 +6,19 @@ import type {
 	AuthoringDefaults,
 	AuthoringDrainStep,
 	AuthoringNamedStep,
+	AuthoringOutputSpec,
 	AuthoringPipelineItem,
 	AuthoringProfile,
-	AuthoringResource,
 	AuthoringStepBody,
 	AuthoringUses,
 	AuthoringWorkflow,
 } from "./authoring-types.js";
+import { normalizeSealedSpec } from "./sealed-policy.js";
 import type {
 	CompiledFromMetadata,
+	OutputSpec,
+	SealedStepSpec,
+	ValidatorSpec,
 	WorkflowDefinition,
 	WorkflowStateConfig,
 	WorkflowStep,
@@ -29,6 +33,7 @@ type ResolvedAuthoringDefaults = {
 	batch_size: number;
 	lease_seconds: number;
 	visibility_timeout_s: number;
+	sealed: Partial<SealedStepSpec>;
 	layout: {
 		data: string;
 		report: string;
@@ -51,6 +56,12 @@ type ResolvedProfile = {
 	output?: "artifacts";
 	model?: string | "none";
 	script?: string | string[];
+};
+
+type ResolvedRetry = {
+	retry: number;
+	retry_delay: number;
+	retry_on?: string[];
 };
 
 type ResolvedResource = {
@@ -91,6 +102,7 @@ const USES_TOOLS: Record<AuthoringUses, string[]> = {
 	model: ["write_output", "read_output"],
 	transform: [],
 	plugin: [],
+	drain: [],
 };
 
 export function compileAuthoringWorkflow(
@@ -120,22 +132,52 @@ export function compileAuthoringWorkflow(
 	}
 
 	validateCompiledStepIds(steps, ctx);
+	const generatedState = compileCollectionsState(ctx);
 
 	const workflow: WorkflowDefinition = {
 		name: input.name,
-		version: "1.0",
+		version: input.version ?? "1.0",
 		description: input.description ?? "",
 		config: compileConfig(input),
-		validators: (input.validators ?? {}) as Record<string, any>,
-		state: compileCollectionsState(ctx),
+		validators: (input.validators ?? {}) as Record<string, ValidatorSpec>,
+		state: mergeWorkflowState(input.state, generatedState),
+		required_skills: Array.isArray(input.required_skills)
+			? input.required_skills
+			: [],
 		steps,
-		concurrency: 3,
+		concurrency:
+			typeof input.concurrency === "number"
+				? Math.max(1, input.concurrency)
+				: 3,
 		__compiled_from: {
 			schema: "authoring",
 		} as CompiledFromMetadata,
 	};
 
 	return workflow;
+}
+
+function mergeWorkflowState(
+	explicit: WorkflowStateConfig | undefined,
+	generated: WorkflowStateConfig,
+): WorkflowStateConfig | undefined {
+	if (!explicit) return generated;
+
+	return {
+		...explicit,
+		collections: {
+			...(explicit.collections ?? {}),
+			...(generated.collections ?? {}),
+		},
+		queues: {
+			...(explicit.queues ?? {}),
+			...(generated.queues ?? {}),
+		},
+		worker_groups: {
+			...(explicit.worker_groups ?? {}),
+			...(generated.worker_groups ?? {}),
+		},
+	};
 }
 
 function validateAuthoringWorkflow(
@@ -208,6 +250,10 @@ function resolveDefaults(
 		lease_seconds: defaults?.lease_seconds ?? AUTHORING_DEFAULTS.lease_seconds,
 		visibility_timeout_s:
 			defaults?.visibility_timeout_s ?? AUTHORING_DEFAULTS.visibility_timeout_s,
+		sealed: {
+			...AUTHORING_DEFAULTS.sealed,
+			...(defaults?.sealed ?? {}),
+		},
 		layout: {
 			data: defaults?.layout?.data ?? AUTHORING_DEFAULTS.layout.data,
 			report: defaults?.layout?.report ?? AUTHORING_DEFAULTS.layout.report,
@@ -277,7 +323,6 @@ function validatePipelineReferences(
 				`/pipeline/${i}/drain/do`,
 			);
 			validateStepBody(
-				drainStepId,
 				drainBody,
 				ctx,
 				`/pipeline/${i}/drain/do/${drainStepId}`,
@@ -294,16 +339,16 @@ function validatePipelineReferences(
 			);
 		}
 		declaredStepIds.add(stepId);
-		validateStepBody(stepId, body, ctx, `/pipeline/${i}/${stepId}`, false);
+		validateStepBody(body, ctx, `/pipeline/${i}/${stepId}`, false);
 	}
 }
 
 function compileCollectionsState(
 	ctx: AuthoringCompileContext,
 ): WorkflowStateConfig {
-	const collections: Record<string, any> = {};
-	const queues: Record<string, any> = {};
-	const worker_groups: Record<string, any> = {};
+	const collections: NonNullable<WorkflowStateConfig["collections"]> = {};
+	const queues: NonNullable<WorkflowStateConfig["queues"]> = {};
+	const worker_groups: NonNullable<WorkflowStateConfig["worker_groups"]> = {};
 
 	for (const [name, spec] of ctx.collections.entries()) {
 		const queueNames = [...spec.queues];
@@ -436,7 +481,9 @@ function compileNamedPipelineStep(
 		);
 	}
 
-	if (!["browser", "model", "transform", "plugin"].includes(resolvedUses)) {
+	if (
+		!["browser", "model", "transform", "plugin", "drain"].includes(resolvedUses)
+	) {
 		throw new AuthoringCompileError(
 			`unknown uses value "${String(resolvedUses)}"`,
 			`${pointer}/uses`,
@@ -452,10 +499,13 @@ function compileNamedPipelineStep(
 		resolveQueueRef(ref, ctx, `${pointer}/writes/${writeIndex}`),
 	);
 
-	const writeOutputs = writeRefs.map((ref) => ({
-		id: queueRefOutputId(ref),
-		validate: `${ref.collection}_array`,
-	}));
+	const writeOutputs = writeRefs.map((ref, writeIndex) =>
+		finalizeOutputSpec(
+			{ id: queueRefOutputId(ref), validate: `${ref.collection}_array` },
+			ctx,
+			`${pointer}/writes/${writeIndex}`,
+		),
+	);
 
 	const explicitOutputs = compileExplicitOutputs(
 		body.outputs,
@@ -463,22 +513,7 @@ function compileNamedPipelineStep(
 		`${pointer}/outputs`,
 	);
 
-	const normalizedOutputs = [...explicitOutputs, ...writeOutputs].map(
-		(output) => {
-			const resolvedPath =
-				("path" in output ? output.path : undefined) ??
-				buildOutputPath(output.id, output.validate, ctx);
-
-			return {
-				...output,
-				path: resolvedPath,
-				materialize: {
-					path: resolvedPath,
-					mode: ctx.defaults.materialize,
-				},
-			};
-		},
-	);
+	const normalizedOutputs = [...explicitOutputs, ...writeOutputs];
 
 	const retry = resolveRetry(body, profile, ctx);
 
@@ -491,135 +526,89 @@ function compileNamedPipelineStep(
 	let mainStep: WorkflowStep;
 
 	if (resolvedUses === "plugin") {
-		const op = body.with?.operation;
-		if (!op || typeof op !== "string") {
-			throw new AuthoringCompileError(
-				"uses: plugin requires with.operation",
-				`${pointer}/with/operation`,
-			);
-		}
-
-		const withArgs = { ...(body.with ?? {}) };
-		delete (withArgs as Record<string, unknown>).operation;
-
-		mainStep = {
-			id: stepId,
-			name: stepId,
-			kind: "plugin",
-			uses: op,
-			with: withArgs,
-			task: null,
-			depends_on: baseDependsOn,
-			outputs: normalizedOutputs,
-			timeout: body.timeout ?? 300,
-			retry: retry.retry,
-			retry_delay: retry.retry_delay,
-			retry_on: retry.retry_on,
-			optional: false,
-			complete_when: "outputs",
-			__compiled_from: compiledFrom,
-		};
+		mainStep = compilePluginAuthoringStep({
+			stepId,
+			body,
+			dependsOn: baseDependsOn,
+			normalizedOutputs,
+			retry,
+			compiledFrom,
+			pointer,
+		});
+	} else if (resolvedUses === "drain") {
+		mainStep = compileDrainAuthoringStep({
+			stepId,
+			body,
+			dependsOn: baseDependsOn,
+			retry,
+			ctx,
+			compiledFrom,
+			pointer,
+		});
 	} else if (resolvedUses === "transform") {
-		const script = body.script ?? profile?.script;
-		if (!script) {
-			throw new AuthoringCompileError(
-				"required when uses: transform",
-				`${pointer}/script`,
-			);
-		}
-
-		if (!Array.isArray(script)) {
-			throw new AuthoringCompileError(
-				"transform script must be an argv array in first implementation",
-				`${pointer}/script`,
-			);
-		}
-
-		mainStep = {
-			id: stepId,
-			name: stepId,
-			kind: "sealed",
-			task: null,
-			depends_on: baseDependsOn,
-			outputs: normalizedOutputs,
-			timeout: body.timeout ?? 300,
-			retry: retry.retry,
-			retry_delay: retry.retry_delay,
-			retry_on: retry.retry_on,
-			optional: false,
-			complete_when: "outputs",
-			sealed: {
-				mode: "command",
-				no_model: true,
-				command: {
-					argv: script.map(String),
-				},
-			},
-			__compiled_from: compiledFrom,
-		};
+		mainStep = compileTransformStep({
+			stepId,
+			body,
+			profile,
+			dependsOn: baseDependsOn,
+			normalizedOutputs,
+			retry,
+			compiledFrom,
+			pointer,
+		});
+	} else if (
+		(resolvedUses === "browser" || resolvedUses === "model") &&
+		body.for_each
+	) {
+		mainStep = compileSealedForEachStep({
+			stepId,
+			body,
+			resolvedUses,
+			profile,
+			reads,
+			writes,
+			dependsOn: baseDependsOn,
+			normalizedOutputs,
+			retry,
+			ctx,
+			compiledFrom,
+			pointer,
+		});
+	} else if (resolvedUses === "browser" || resolvedUses === "model") {
+		mainStep = compileSealedWorkerStep({
+			stepId,
+			body,
+			resolvedUses,
+			profile,
+			reads,
+			writes,
+			dependsOn: baseDependsOn,
+			normalizedOutputs,
+			retry,
+			ctx,
+			compiledFrom,
+			inDrain,
+			drainQueueRef: null,
+		});
 	} else {
-		const tools = profile?.tools?.length
-			? profile.tools
-			: USES_TOOLS[resolvedUses];
-
-		mainStep = {
-			id: stepId,
-			name: stepId,
-			kind: "sealed",
-			task: buildWorkerTask({
-				stepId,
-				userTask: body.task,
-				reads,
-				writes,
-				inDrain,
-				drainQueueRef: null,
-			}),
-			depends_on: baseDependsOn,
-			outputs: normalizedOutputs,
-			timeout: body.timeout ?? 300,
-			retry: retry.retry,
-			retry_delay: retry.retry_delay,
-			retry_on: retry.retry_on,
-			optional: false,
-			model:
-				body.model ??
-				(profile?.model && profile.model !== "none"
-					? profile.model
-					: undefined),
-			complete_when: "outputs",
-			sealed: {
-				mode: "tool_worker",
-				tools: {
-					allow: tools,
-				},
-				result_visibility: {
-					mode: "auto",
-				},
-				context_firewall:
-					(body.uses === "model" || body.uses === "browser" || !body.uses) &&
-					(profile?.context ?? ctx.defaults.context) === "adaptive"
-						? {
-								enabled: true,
-								strategy: "adaptive",
-							}
-						: {
-								enabled: false,
-							},
-			},
-			__compiled_from: compiledFrom,
-		};
+		throw new AuthoringCompileError(
+			`unknown uses value "${resolvedUses}"`,
+			`${pointer}/uses`,
+		);
 	}
 
 	const helpers: WorkflowStep[] = [];
-	for (const ref of writeRefs) {
-		helpers.push(
-			compilePublishHelperStep({
-				sourceStepId: stepId,
-				sourcePointer: pointer,
-				ref,
-				inDrain,
-			}),
-		);
+	if (resolvedUses !== "plugin" && resolvedUses !== "drain" && !body.for_each) {
+		for (const ref of writeRefs) {
+			helpers.push(
+				compilePublishHelperStep({
+					sourceStepId: stepId,
+					sourcePointer: pointer,
+					ref,
+					inDrain,
+				}),
+			);
+		}
 	}
 
 	if (!inDrain) {
@@ -632,6 +621,405 @@ function compileNamedPipelineStep(
 	return {
 		mainStep,
 		helpers,
+	};
+}
+
+function compilePluginAuthoringStep(args: {
+	stepId: string;
+	body: AuthoringStepBody;
+	dependsOn: string[];
+	normalizedOutputs: OutputSpec[];
+	retry: ResolvedRetry;
+	compiledFrom: CompiledFromMetadata;
+	pointer: string;
+}): WorkflowStep {
+	const op = args.body.operation ?? args.body.with?.operation;
+
+	if (!op || typeof op !== "string") {
+		throw new AuthoringCompileError(
+			"uses: plugin requires operation",
+			`${args.pointer}/operation`,
+		);
+	}
+
+	const withArgs = { ...(args.body.with ?? {}) };
+	delete (withArgs as Record<string, unknown>).operation;
+
+	return {
+		id: args.stepId,
+		name: args.body.name ?? args.stepId,
+		kind: "plugin",
+		uses: op,
+		with: withArgs,
+		task: null,
+		depends_on: args.dependsOn,
+		outputs: args.normalizedOutputs,
+		timeout: args.body.timeout ?? 300,
+		retry: args.retry.retry,
+		retry_delay: args.body.retry_delay ?? args.retry.retry_delay,
+		retry_on: args.body.retry_on ?? args.retry.retry_on,
+		retry_except: args.body.retry_except,
+		optional: args.body.optional ?? false,
+		always_run: args.body.always_run,
+		on_block: args.body.on_block,
+		complete_when: args.body.complete_when ?? "outputs",
+		state_publish: args.body.state_publish,
+		state_consume: args.body.state_consume,
+		state_complete: args.body.state_complete,
+		state_reclaim: args.body.state_reclaim,
+		output_contract_version: args.body.output_contract_version,
+		reuse_outputs: args.body.reuse_outputs,
+		__compiled_from: args.compiledFrom,
+	};
+}
+
+function compileTransformStep(args: {
+	stepId: string;
+	body: AuthoringStepBody;
+	profile?: ResolvedProfile;
+	dependsOn: string[];
+	normalizedOutputs: OutputSpec[];
+	retry: ResolvedRetry;
+	compiledFrom: CompiledFromMetadata;
+	pointer: string;
+}): WorkflowStep {
+	const script = args.body.script ?? args.profile?.script;
+	if (!script) {
+		throw new AuthoringCompileError(
+			"required when uses: transform",
+			`${args.pointer}/script`,
+		);
+	}
+
+	if (!Array.isArray(script)) {
+		throw new AuthoringCompileError(
+			"transform script must be an argv array in first implementation",
+			`${args.pointer}/script`,
+		);
+	}
+
+	return {
+		id: args.stepId,
+		name: args.body.name ?? args.stepId,
+		kind: "sealed",
+		task: null,
+		depends_on: args.dependsOn,
+		outputs: args.normalizedOutputs,
+		timeout: args.body.timeout ?? 300,
+		retry: args.retry.retry,
+		retry_delay: args.body.retry_delay ?? args.retry.retry_delay,
+		retry_on: args.body.retry_on ?? args.retry.retry_on,
+		retry_except: args.body.retry_except,
+		optional: args.body.optional ?? false,
+		always_run: args.body.always_run,
+		on_block: args.body.on_block,
+		complete_when: args.body.complete_when ?? "outputs",
+		output_contract_version: args.body.output_contract_version,
+		reuse_outputs: args.body.reuse_outputs,
+		sealed: normalizeSealedSpec({
+			...args.body.sealed,
+			mode: "command",
+			no_model: true,
+			command: {
+				argv: script.map(String),
+			},
+		}),
+		__compiled_from: args.compiledFrom,
+	};
+}
+
+function compileSealedWorkerStep(args: {
+	stepId: string;
+	body: AuthoringStepBody;
+	resolvedUses: "browser" | "model";
+	profile?: ResolvedProfile;
+	reads: string[];
+	writes: string[];
+	dependsOn: string[];
+	normalizedOutputs: OutputSpec[];
+	retry: ResolvedRetry;
+	ctx: AuthoringCompileContext;
+	compiledFrom: CompiledFromMetadata;
+	inDrain?: boolean;
+	drainQueueRef?: string | null;
+}): WorkflowStep {
+	if (!args.normalizedOutputs.length) {
+		throw new AuthoringCompileError(
+			`sealed ${args.resolvedUses} step requires declared outputs`,
+		);
+	}
+
+	const tools = args.profile?.tools?.length
+		? args.profile.tools
+		: USES_TOOLS[args.resolvedUses];
+
+	const context =
+		(args.profile?.context ?? args.ctx.defaults.context) === "none"
+			? { enabled: false }
+			: { enabled: true, strategy: "adaptive" as const };
+
+	return {
+		id: args.stepId,
+		name: args.body.name ?? args.stepId,
+		kind: "sealed",
+		task: buildWorkerTask({
+			stepId: args.stepId,
+			userTask: args.body.task,
+			reads: args.reads,
+			writes: args.writes,
+			inDrain: args.inDrain ?? false,
+			drainQueueRef: args.drainQueueRef ?? null,
+		}),
+		depends_on: args.dependsOn,
+		outputs: args.normalizedOutputs,
+		timeout: args.body.timeout ?? 300,
+		retry: args.retry.retry,
+		retry_delay: args.body.retry_delay ?? args.retry.retry_delay,
+		retry_on: args.body.retry_on ?? args.retry.retry_on,
+		retry_except: args.body.retry_except,
+		optional: args.body.optional ?? false,
+		always_run: args.body.always_run,
+		on_block: args.body.on_block,
+		model:
+			args.body.model ??
+			(args.profile?.model && args.profile.model !== "none"
+				? args.profile.model
+				: undefined),
+		complete_when: args.body.complete_when ?? "outputs",
+		output_contract_version: args.body.output_contract_version,
+		reuse_outputs: args.body.reuse_outputs,
+		sealed: normalizeSealedSpec({
+			...args.ctx.defaults.sealed,
+			...args.body.sealed,
+			mode: "tool_worker",
+			tools: { allow: tools },
+			result_visibility: {
+				mode: "auto",
+				...(args.ctx.defaults.sealed?.result_visibility ?? {}),
+				...(args.body.sealed?.result_visibility ?? {}),
+			},
+			context_firewall: {
+				...context,
+				...(args.ctx.defaults.sealed?.context_firewall ?? {}),
+				...(args.body.sealed?.context_firewall ?? {}),
+			},
+		}),
+		__compiled_from: args.compiledFrom,
+	};
+}
+
+function compileSealedForEachStep(args: {
+	stepId: string;
+	body: AuthoringStepBody;
+	resolvedUses: "browser" | "model";
+	profile?: ResolvedProfile;
+	reads: string[];
+	writes: string[];
+	dependsOn: string[];
+	normalizedOutputs: OutputSpec[];
+	retry: ResolvedRetry;
+	ctx: AuthoringCompileContext;
+	compiledFrom: CompiledFromMetadata;
+	pointer: string;
+}): WorkflowStep {
+	if (!args.body.for_each) {
+		throw new AuthoringCompileError(
+			"for_each step requires for_each path",
+			`${args.pointer}/for_each`,
+		);
+	}
+
+	const childId = `${args.stepId}_item`;
+
+	const child = compileSealedWorkerStep({
+		...args,
+		stepId: childId,
+		dependsOn: [],
+		compiledFrom: {
+			...args.compiledFrom,
+			generated: true,
+			generated_reason: `sealed_loop_worker:${args.stepId}`,
+		},
+	});
+
+	return {
+		id: args.stepId,
+		name: args.body.name ?? args.stepId,
+		kind: "loop_subagent",
+		task: null,
+		depends_on: args.dependsOn,
+		for_each: args.body.for_each,
+		parser: args.body.parser ?? "auto",
+		item_schema: args.body.item_schema,
+		skip_if_empty: args.body.skip_if_empty,
+		concurrency: args.body.concurrency,
+		outputs: [],
+		timeout: args.body.timeout ?? 300,
+		retry: args.retry.retry,
+		retry_delay: args.body.retry_delay ?? args.retry.retry_delay,
+		retry_on: args.body.retry_on ?? args.retry.retry_on,
+		retry_except: args.body.retry_except,
+		optional: args.body.optional ?? false,
+		complete_when: args.body.complete_when ?? "session_then_outputs",
+		steps: [child],
+		__compiled_from: args.compiledFrom,
+	};
+}
+
+function compileDrainAuthoringStep(args: {
+	stepId: string;
+	body: AuthoringStepBody;
+	dependsOn: string[];
+	retry: ResolvedRetry;
+	ctx: AuthoringCompileContext;
+	compiledFrom: CompiledFromMetadata;
+	pointer: string;
+}): WorkflowStep {
+	const workerGroup = args.body.worker_group;
+
+	if (!workerGroup) {
+		throw new AuthoringCompileError(
+			"uses: drain requires worker_group",
+			`${args.pointer}/worker_group`,
+		);
+	}
+
+	if (!args.body.worker) {
+		throw new AuthoringCompileError(
+			"uses: drain requires worker",
+			`${args.pointer}/worker`,
+		);
+	}
+
+	const workerBody = args.body.worker;
+	const workerId = workerBody.id ?? "worker";
+
+	const claimStep: WorkflowStep = {
+		id: "claim",
+		name: args.body.claim?.name ?? "claim",
+		kind: "plugin",
+		uses: "workflow.state_claim",
+		task: null,
+		depends_on: args.body.claim?.depends_on ?? [],
+		state_consume: args.body.claim?.state_consume ?? {
+			worker_group: workerGroup,
+			output: "claim_manifest",
+		},
+		outputs: compileExplicitOutputs(
+			args.body.claim?.outputs ?? [{ id: "claim_manifest" }],
+			args.ctx,
+			`${args.pointer}/claim/outputs`,
+		),
+		timeout: args.body.claim?.timeout ?? 300,
+		retry:
+			typeof args.body.claim?.retry === "number" ? args.body.claim.retry : 0,
+		retry_delay: args.body.claim?.retry_delay ?? 30,
+		complete_when: args.body.claim?.complete_when ?? "outputs",
+		optional: false,
+		__compiled_from: {
+			...args.compiledFrom,
+			generated: true,
+			generated_reason: `state_claim:${workerGroup}`,
+		},
+	};
+
+	const workerUses = workerBody.uses ?? "model";
+	if (workerUses !== "model" && workerUses !== "browser") {
+		throw new AuthoringCompileError(
+			"drain worker must use model or browser",
+			`${args.pointer}/worker/uses`,
+		);
+	}
+
+	const workerStep = compileSealedWorkerStep({
+		stepId: workerId,
+		body: workerBody,
+		resolvedUses: workerUses,
+		profile: workerBody.profile
+			? resolveProfile(workerBody.profile, args.ctx, `${args.pointer}/worker`)
+			: undefined,
+		reads: normalizeStringArray(workerBody.reads),
+		writes: normalizeStringArray(workerBody.writes),
+		dependsOn: workerBody.depends_on ?? ["claim"],
+		normalizedOutputs: compileExplicitOutputs(
+			workerBody.outputs,
+			args.ctx,
+			`${args.pointer}/worker/outputs`,
+		),
+		retry: resolveRetry(workerBody, undefined, args.ctx),
+		ctx: args.ctx,
+		inDrain: true,
+		drainQueueRef: workerGroup,
+		compiledFrom: {
+			...args.compiledFrom,
+			source_step: workerId,
+			generated: true,
+			generated_reason: `state_drain_worker:${args.stepId}`,
+		},
+	});
+	const primaryWorkerOutput = workerStep.outputs?.[0];
+	const primaryWorkerOutputId =
+		typeof primaryWorkerOutput === "string"
+			? primaryWorkerOutput
+			: primaryWorkerOutput?.id;
+	if (!primaryWorkerOutputId) {
+		throw new AuthoringCompileError(
+			"drain worker must declare at least one output",
+			`${args.pointer}/worker/outputs`,
+		);
+	}
+
+	const completeStep: WorkflowStep = {
+		id: "complete",
+		name: args.body.complete?.name ?? "complete",
+		kind: "plugin",
+		uses: "workflow.state_complete",
+		task: null,
+		depends_on: args.body.complete?.depends_on ?? [workerId],
+		state_complete: args.body.complete?.state_complete ?? {
+			from_step: workerId,
+			output: primaryWorkerOutputId,
+			worker_group: workerGroup,
+			summary_output: "state_complete_summary",
+		},
+		outputs: compileExplicitOutputs(
+			args.body.complete?.outputs ?? [{ id: "state_complete_summary" }],
+			args.ctx,
+			`${args.pointer}/complete/outputs`,
+		),
+		timeout: args.body.complete?.timeout ?? 300,
+		retry:
+			typeof args.body.complete?.retry === "number"
+				? args.body.complete.retry
+				: 0,
+		retry_delay: args.body.complete?.retry_delay ?? 30,
+		complete_when: args.body.complete?.complete_when ?? "outputs",
+		optional: false,
+		__compiled_from: {
+			...args.compiledFrom,
+			generated: true,
+			generated_reason: `state_complete:${workerGroup}`,
+		},
+	};
+
+	return {
+		id: args.stepId,
+		name: args.body.name ?? args.stepId,
+		kind: "state_drain",
+		task: null,
+		depends_on: args.dependsOn,
+		outputs: [],
+		timeout: args.body.timeout ?? 300,
+		retry: args.retry.retry,
+		retry_delay: args.body.retry_delay ?? args.retry.retry_delay,
+		optional: args.body.optional ?? false,
+		drain: {
+			worker_group: workerGroup,
+			max_empty_claims: args.body.max_empty_claims ?? 1,
+			max_iterations: args.body.max_iterations ?? null,
+		},
+		steps: [claimStep, workerStep, completeStep],
+		__compiled_from: args.compiledFrom,
 	};
 }
 
@@ -884,7 +1272,6 @@ function validateCollection(name: string, spec: AuthoringCollection): void {
 }
 
 function validateStepBody(
-	stepId: string,
 	body: AuthoringStepBody,
 	ctx: AuthoringCompileContext,
 	pointer: string,
@@ -899,7 +1286,7 @@ function validateStepBody(
 
 	if (
 		body.uses &&
-		!["browser", "model", "transform", "plugin"].includes(body.uses)
+		!["browser", "model", "transform", "plugin", "drain"].includes(body.uses)
 	) {
 		throw new AuthoringCompileError(
 			`unknown uses value "${body.uses}"`,
@@ -919,10 +1306,13 @@ function validateStepBody(
 	}
 
 	if (body.uses === "plugin") {
-		if (!body.with || typeof body.with.operation !== "string") {
+		if (
+			typeof body.operation !== "string" &&
+			(!body.with || typeof body.with.operation !== "string")
+		) {
 			throw new AuthoringCompileError(
-				"uses: plugin requires with.operation",
-				`${pointer}/with/operation`,
+				"uses: plugin requires operation",
+				`${pointer}/operation`,
 			);
 		}
 	}
@@ -981,15 +1371,21 @@ function resolveRetry(
 	body: AuthoringStepBody,
 	profile: ResolvedProfile | undefined,
 	ctx: AuthoringCompileContext,
-): {
-	retry: number;
-	retry_delay: number;
-	retry_on?: string[];
-} {
+): ResolvedRetry {
+	if (typeof body.retry === "number") {
+		return {
+			retry: Math.max(0, body.retry),
+			retry_delay: 30,
+			retry_on: ["missing_file", "parse", "timeout"],
+		};
+	}
+
 	const retryMode =
-		body.with && typeof body.with.retry === "string"
-			? (body.with.retry as "safe" | "none")
-			: (profile?.retry ?? ctx.defaults.retry);
+		typeof body.retry === "string"
+			? body.retry
+			: body.with && typeof body.with.retry === "string"
+				? (body.with.retry as "safe" | "none")
+				: (profile?.retry ?? ctx.defaults.retry);
 
 	if (retryMode === "none") {
 		return { retry: 0, retry_delay: 30 };
@@ -1003,41 +1399,63 @@ function resolveRetry(
 }
 
 function compileExplicitOutputs(
-	outputs: AuthoringStepBody["outputs"],
+	raw: AuthoringStepBody["outputs"],
 	ctx: AuthoringCompileContext,
 	pointer: string,
-): Array<{ id: string; validate?: string; path?: string }> {
-	if (!outputs) return [];
+): OutputSpec[] {
+	if (!raw) return [];
 
-	if (Array.isArray(outputs)) {
-		if (ctx.strict) {
-			throw new AuthoringCompileError(
-				"outputs validator missing in strict mode",
-				pointer,
-			);
-		}
+	if (Array.isArray(raw)) {
+		return raw.map((item, index) => {
+			if (typeof item === "string") {
+				return finalizeOutputSpec({ id: item }, ctx, `${pointer}/${index}`);
+			}
 
-		return outputs.map((id, index) => ({
-			id,
-			path: buildOutputPath(id, undefined, ctx),
-		}));
-	}
+			if (!item || typeof item !== "object") {
+				throw new AuthoringCompileError(
+					"output must be a string or object",
+					`${pointer}/${index}`,
+				);
+			}
 
-	const out: Array<{ id: string; validate?: string; path?: string }> = [];
-	for (const [id, validate] of Object.entries(outputs)) {
-		if (ctx.strict && (!validate || typeof validate !== "string")) {
-			throw new AuthoringCompileError(
-				"outputs validator missing in strict mode",
-				`${pointer}/${id}`,
-			);
-		}
-		out.push({
-			id,
-			validate,
-			path: buildOutputPath(id, validate, ctx),
+			if (!("id" in item) && !("path" in item)) {
+				throw new AuthoringCompileError(
+					"output object must define id or path",
+					`${pointer}/${index}`,
+				);
+			}
+
+			return finalizeOutputSpec(item, ctx, `${pointer}/${index}`);
 		});
 	}
-	return out;
+
+	return Object.entries(raw).map(([id, validate]) =>
+		finalizeOutputSpec({ id, validate }, ctx, `${pointer}/${id}`),
+	);
+}
+
+function finalizeOutputSpec(
+	output: Exclude<AuthoringOutputSpec, string>,
+	ctx: AuthoringCompileContext,
+	pointer: string,
+): OutputSpec {
+	const id = output.id ?? output.path;
+	if (!id) {
+		throw new AuthoringCompileError("output missing id", pointer);
+	}
+
+	const path = output.path ?? buildOutputPath(id, output.validate, ctx);
+
+	return {
+		id,
+		path,
+		validate: output.validate,
+		optional: output.optional === true,
+		materialize: {
+			path: output.materialize?.path ?? path,
+			mode: output.materialize?.mode ?? ctx.defaults.materialize,
+		},
+	};
 }
 
 function buildOutputPath(
@@ -1277,9 +1695,10 @@ function isReportLikeOutput(outputId: string, validatorId?: string): boolean {
 
 function detectProfileCycles(profiles: Record<string, AuthoringProfile>): void {
 	const graph = new Map<string, string[]>();
+	type ProfileWithParent = AuthoringProfile & { profile?: string };
 
 	for (const [name, profile] of Object.entries(profiles)) {
-		const maybeExtends = (profile as any).profile;
+		const maybeExtends = (profile as ProfileWithParent).profile;
 		if (typeof maybeExtends === "string" && maybeExtends.length > 0) {
 			graph.set(name, [maybeExtends]);
 		} else {

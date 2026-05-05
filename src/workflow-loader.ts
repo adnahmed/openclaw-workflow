@@ -40,12 +40,9 @@ import type {
 	WorkflowStep,
 } from "./types.js";
 
-type WorkflowLoadOptions = {
-	allowLegacyExecutionSchema?: boolean;
-};
-
-type WorkflowValidationOptions = WorkflowLoadOptions & {
+type WorkflowValidationOptions = {
 	trustedCompiledExecution: boolean;
+	allowLegacyExecutionSchema?: boolean;
 };
 
 /**
@@ -77,11 +74,7 @@ type WorkflowValidationOptions = WorkflowLoadOptions & {
  * const wf = await loadWorkflow('seo-pipeline', '/home/user/.openclaw/workflows');
  * console.log(wf.steps.length); // 3
  */
-export async function loadWorkflow(
-	name,
-	workflowsDir,
-	options: WorkflowLoadOptions = {},
-) {
+export async function loadWorkflow(name, workflowsDir) {
 	const candidates = [
 		join(workflowsDir, `${name}.yml`),
 		join(workflowsDir, `${name}.yaml`),
@@ -107,7 +100,7 @@ export async function loadWorkflow(
 	}
 
 	const parsed = parseWorkflowFile(raw, filePath);
-	return normalizeAndValidateEntry(parsed, filePath, options);
+	return normalizeAndValidateEntry(parsed, filePath);
 }
 
 /**
@@ -120,20 +113,25 @@ export async function loadWorkflow(
  * @example
  * const wf = await loadWorkflowFromFile('/tmp/test-workflow.yml');
  */
-export async function loadWorkflowFromFile(
-	filePath,
-	options: WorkflowLoadOptions = {},
-) {
+export async function loadWorkflowFromFile(filePath) {
 	const raw = await readFile(filePath, "utf8");
 	const parsed = parseWorkflowFile(raw, filePath);
-	return normalizeAndValidateEntry(parsed, filePath, options);
+	return normalizeAndValidateEntry(parsed, filePath);
 }
 
-function normalizeAndValidateEntry(
-	raw,
-	filePath,
-	options: WorkflowLoadOptions,
-) {
+export async function loadLegacyExecutionWorkflowForMigrationOnly(
+	filePath: string,
+): Promise<WorkflowDefinition> {
+	const raw = await readFile(filePath, "utf8");
+	const parsed = parseWorkflowFile(raw, filePath);
+
+	return normalizeAndValidate(parsed, filePath, {
+		trustedCompiledExecution: false,
+		allowLegacyExecutionSchema: true,
+	});
+}
+
+function normalizeAndValidateEntry(raw, filePath) {
 	if (isAuthoringWorkflow(raw)) {
 		const compiled = compileAuthoringWorkflow(raw, {
 			workflowDir: dirname(filePath),
@@ -142,20 +140,13 @@ function normalizeAndValidateEntry(
 
 		return normalizeAndValidate(compiled, filePath, {
 			trustedCompiledExecution: true,
-			allowLegacyExecutionSchema: options.allowLegacyExecutionSchema === true,
+			allowLegacyExecutionSchema: false,
 		});
 	}
 
-	if (!options.allowLegacyExecutionSchema) {
-		throw new Error(
-			"Raw execution-schema workflows are disabled. Use authoring schema instead, or explicitly enable allowLegacyExecutionSchema for migration/testing.",
-		);
-	}
-
-	return normalizeAndValidate(raw, filePath, {
-		trustedCompiledExecution: false,
-		allowLegacyExecutionSchema: true,
-	});
+	throw new Error(
+		"Raw execution-schema workflows are disabled. Use authoring schema instead. Legacy execution schema loading is migration-only.",
+	);
 }
 
 /**
@@ -218,12 +209,12 @@ function validateValidators(rawValidators = {}) {
 	const validTypes = new Set(["json", "text"]);
 
 	for (const [id, validatorRaw] of Object.entries(rawValidators)) {
-		const validator = validatorRaw as any;
+		const validator = validatorRaw as Record<string, unknown>;
 		if (!validator || typeof validator !== "object") {
 			throw new Error(`Validator "${id}" must be an object`);
 		}
 
-		if (!validTypes.has(validator.type)) {
+		if (!validTypes.has(String(validator.type))) {
 			throw new Error(
 				`Validator "${id}" has invalid type "${validator.type}". ` +
 					`Expected "json" or "text".`,
@@ -232,7 +223,7 @@ function validateValidators(rawValidators = {}) {
 
 		if (
 			validator.unknown_policy !== undefined &&
-			!validUnknownPolicies.has(validator.unknown_policy)
+			!validUnknownPolicies.has(String(validator.unknown_policy))
 		) {
 			throw new Error(
 				`Validator "${id}" has invalid unknown_policy ` +
@@ -290,7 +281,7 @@ function normalizeAndValidate(
 				);
 			}
 
-			const reuse = reuseRaw as any;
+			const reuse = reuseRaw as Record<string, unknown>;
 			if (reuse.enabled !== undefined && typeof reuse.enabled !== "boolean") {
 				throw new Error(
 					`Step "${stepId}" reuse_outputs.enabled must be boolean.`,
@@ -365,8 +356,13 @@ function normalizeAndValidate(
 				);
 			}
 
-			const include = Array.isArray(reuse.freshness?.include)
-				? reuse.freshness.include
+			const freshness =
+				reuse.freshness && typeof reuse.freshness === "object"
+					? (reuse.freshness as { include?: unknown })
+					: undefined;
+
+			const include = Array.isArray(freshness?.include)
+				? freshness.include
 				: undefined;
 
 			if (include) {
@@ -381,10 +377,13 @@ function normalizeAndValidate(
 
 			return {
 				enabled: reuse.enabled === true,
-				when: reuse.when,
-				require: reuse.require || "declared_outputs",
+				when: typeof reuse.when === "string" ? reuse.when : undefined,
+				require: "declared_outputs",
 				require_signature: reuse.require_signature !== false,
-				legacy_unsigned_cache: reuse.legacy_unsigned_cache || "stale",
+				legacy_unsigned_cache:
+					reuse.legacy_unsigned_cache === "allow_if_valid"
+						? "allow_if_valid"
+						: "stale",
 				freshness: {
 					include: include || [
 						"output_contract_version",
@@ -396,8 +395,11 @@ function normalizeAndValidate(
 					],
 				},
 				accept_decisions: acceptDecisions,
-				on_hit: reuse.on_hit,
-				on_invalid: reuse.on_invalid || "run_step",
+				on_hit:
+					reuse.on_hit && typeof reuse.on_hit === "object"
+						? (reuse.on_hit as ReuseOutputsSpec["on_hit"])
+						: undefined,
+				on_invalid: reuse.on_invalid === "fail_step" ? "fail_step" : "run_step",
 			};
 		};
 
