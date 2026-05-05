@@ -19,6 +19,7 @@ import type {
 	PluginOperationContext,
 	PluginOperationResult,
 	RedisClient,
+	StateArtifactSourceMode,
 	StateCollectionSpec,
 	StateCompleteSpec,
 	StateConsumeSpec,
@@ -35,6 +36,12 @@ import type {
 import { getLocalISOString } from "./workflow-state.js";
 
 type JsonObject = Record<string, unknown>;
+type SourceArtifact = {
+	stepId: string;
+	outputId: string;
+	data: unknown;
+};
+
 type ReclaimStats = {
 	reclaimedExpiredCount: number;
 	reclaimedOrphanedCount: number;
@@ -163,6 +170,62 @@ function selectItems(value: unknown, selector?: string): JsonObject[] {
 	}
 
 	return [];
+}
+
+async function readSourceArtifacts(args: {
+	ctx: PluginOperationContext;
+	fromStep: string;
+	output: string;
+	source?: StateArtifactSourceMode;
+}): Promise<SourceArtifact[]> {
+	const source = args.source ?? "auto";
+
+	if (source === "exact" || source === "auto") {
+		const exact = await args.ctx.artifactStore.readArtifact(
+			args.ctx.runId,
+			args.fromStep,
+			args.output,
+		);
+
+		if (exact) {
+			return [
+				{
+					stepId: args.fromStep,
+					outputId: args.output,
+					data: exact.data,
+				},
+			];
+		}
+
+		if (source === "exact") return [];
+	}
+
+	const metas = await args.ctx.artifactStore.listArtifacts(args.ctx.runId);
+
+	const matches = metas.filter((meta) => {
+		if (meta.output_id !== args.output) return false;
+		return meta.step_id.startsWith(`${args.fromStep}:`);
+	});
+
+	const out: SourceArtifact[] = [];
+
+	for (const meta of matches) {
+		const artifact = await args.ctx.artifactStore.readArtifact(
+			args.ctx.runId,
+			meta.step_id,
+			meta.output_id,
+		);
+
+		if (!artifact) continue;
+
+		out.push({
+			stepId: meta.step_id,
+			outputId: meta.output_id,
+			data: artifact.data,
+		});
+	}
+
+	return out;
 }
 
 function collectionSpec(
@@ -556,12 +619,24 @@ function reportSpec(ctx: PluginOperationContext): StateReportSpec {
 		{}) as StateReportSpec;
 }
 
-function projectItem(item: JsonObject, projection?: string[]): JsonObject {
+function projectItem(
+	item: JsonObject,
+	projection?: string[],
+	itemKeyField = "id",
+): JsonObject {
 	if (!projection || projection.length === 0) return item;
 
 	const out: JsonObject = {};
 	for (const field of projection) {
 		if (field in item) out[field] = item[field];
+	}
+
+	if ("item_key" in item && !("item_key" in out)) {
+		out.item_key = item.item_key;
+	}
+
+	if (itemKeyField in item && !(itemKeyField in out)) {
+		out[itemKeyField] = item[itemKeyField];
 	}
 
 	return out;
@@ -655,41 +730,93 @@ async function loadCollectionItemKeys(args: {
 		throw new Error("Redis is required for state query operations");
 	}
 
-	const coll = collectionSpec(args.ctx, args.collection);
 	const keys = keyspace(args.ctx, args.collection);
+	const coll = collectionSpec(args.ctx, args.collection);
+	const indexedFields = new Set(coll.indexes ?? []);
+	const where = args.where as JsonObject | undefined;
 
-	/**
-	 * Fast path for simple equality on an indexed field.
-	 */
-	const whereObj = args.where as JsonObject | undefined;
-	const flatWhere =
-		whereObj &&
-		!("all" in whereObj) &&
-		!("any" in whereObj) &&
-		!("not" in whereObj)
-			? whereObj
-			: null;
+	if (where && "any" in where && Array.isArray(where.any)) {
+		const unionKeys: string[] = [];
 
-	if (flatWhere) {
-		const indexedFields = new Set(coll.indexes ?? []);
-		for (const [field, value] of Object.entries(flatWhere)) {
-			if (
-				indexedFields.has(field) &&
-				value != null &&
-				typeof value !== "object"
-			) {
-				const members = await redisRaw(
-					args.ctx.redis,
-					"SMEMBERS",
-					keys.indexSet(field, String(value)),
-				);
-				return Array.isArray(members) ? members.map(String) : [];
+		for (const branch of where.any) {
+			const terms = simpleIndexedTerms({
+				where: branch as StateWhereSpec,
+				indexedFields,
+			});
+
+			for (const term of terms) {
+				for (const value of term.values) {
+					unionKeys.push(keys.indexSet(term.field, value));
+				}
 			}
 		}
+
+		if (unionKeys.length > 0) {
+			const members = await redisRaw(args.ctx.redis, "SUNION", ...unionKeys);
+			return Array.isArray(members) ? members.map(String) : [];
+		}
+	}
+
+	const terms = simpleIndexedTerms({
+		where: args.where,
+		indexedFields,
+	});
+
+	if (terms.length > 0) {
+		const indexKeys = terms.flatMap((term) =>
+			term.values.map((value) => keys.indexSet(term.field, value)),
+		);
+
+		if (indexKeys.length === 1) {
+			const members = await redisRaw(args.ctx.redis, "SMEMBERS", indexKeys[0]);
+			return Array.isArray(members) ? members.map(String) : [];
+		}
+
+		const members = await redisRaw(args.ctx.redis, "SINTER", ...indexKeys);
+		return Array.isArray(members) ? members.map(String) : [];
 	}
 
 	const members = await redisRaw(args.ctx.redis, "SMEMBERS", keys.seenSet);
 	return Array.isArray(members) ? members.map(String) : [];
+}
+
+function simpleIndexedTerms(args: {
+	where?: StateWhereSpec;
+	indexedFields: Set<string>;
+}): Array<{ field: string; values: string[] }> {
+	const where = args.where as JsonObject | undefined;
+	if (!where) return [];
+
+	const flat =
+		"all" in where
+			? (where.all as JsonObject)
+			: !("any" in where) && !("not" in where)
+				? where
+				: null;
+
+	if (!flat) return [];
+
+	const terms: Array<{ field: string; values: string[] }> = [];
+
+	for (const [field, expected] of Object.entries(flat)) {
+		if (!args.indexedFields.has(field)) continue;
+		if (expected === null || expected === undefined) continue;
+
+		if (typeof expected !== "object") {
+			terms.push({ field, values: [String(expected)] });
+			continue;
+		}
+
+		const rule = expected as JsonObject;
+
+		if ("eq" in rule && rule.eq != null) {
+			terms.push({ field, values: [String(rule.eq)] });
+		} else if ("in" in rule && Array.isArray(rule.in)) {
+			terms.push({ field, values: rule.in.map(String) });
+		}
+	}
+
+	return terms;
 }
 
 async function loadRedisDocument(args: {
@@ -719,15 +846,16 @@ async function loadRedisDocument(args: {
 	return { [itemKeyField]: args.itemKey, item_key: args.itemKey };
 }
 
-async function mergeRedisDocument(args: {
+async function writeRedisDocument(args: {
 	ctx: PluginOperationContext;
 	collection: string;
 	itemKey: string;
-	patch: JsonObject;
+	next: JsonObject;
+	mode: "replace" | "merge";
 	indexes?: string[];
 }): Promise<void> {
 	if (!args.ctx.redis) {
-		throw new Error("Redis is required for document merge");
+		throw new Error("Redis is required for document write");
 	}
 
 	const keys = keyspace(args.ctx, args.collection, args.itemKey);
@@ -737,21 +865,47 @@ async function mergeRedisDocument(args: {
 		itemKey: args.itemKey,
 	});
 
-	const merged = {
-		...existing,
-		...args.patch,
-		item_key: args.itemKey,
-		updated_at: getLocalISOString(),
-	};
-
-	await args.ctx.redis.set(keys.document, JSON.stringify(merged));
-	await args.ctx.redis.hset(keys.hash, scalarizeForHash(merged));
+	const merged =
+		args.mode === "replace"
+			? {
+					...args.next,
+					item_key: args.itemKey,
+					updated_at: getLocalISOString(),
+				}
+			: {
+					...existing,
+					...args.next,
+					item_key: args.itemKey,
+					updated_at: getLocalISOString(),
+				};
 
 	const coll = collectionSpec(args.ctx, args.collection);
 	const indexFields = new Set([
 		...(coll.indexes ?? []),
 		...(args.indexes ?? []),
 	]);
+
+	for (const field of indexFields) {
+		const oldValue = existing[field];
+		const newValue = merged[field];
+
+		if (
+			oldValue !== undefined &&
+			oldValue !== null &&
+			oldValue !== "" &&
+			String(oldValue) !== String(newValue)
+		) {
+			await redisRaw(
+				args.ctx.redis,
+				"SREM",
+				keyspace(args.ctx, args.collection).indexSet(field, String(oldValue)),
+				args.itemKey,
+			);
+		}
+	}
+
+	await args.ctx.redis.set(keys.document, JSON.stringify(merged));
+	await args.ctx.redis.hset(keys.hash, scalarizeForHash(merged));
 
 	for (const field of indexFields) {
 		const value = merged[field];
@@ -762,6 +916,13 @@ async function mergeRedisDocument(args: {
 			"SADD",
 			keyspace(args.ctx, args.collection).indexSet(field, String(value)),
 			args.itemKey,
+		);
+
+		await redisRaw(
+			args.ctx.redis,
+			"SADD",
+			keyspace(args.ctx, args.collection).indexValuesSet(field),
+			String(value),
 		);
 	}
 }
@@ -784,6 +945,8 @@ async function loadQueryItems(args: {
 		collection: args.collection,
 		where: args.where,
 	});
+	const coll = collectionSpec(args.ctx, args.collection);
+	const itemKeyField = coll.item_key ?? "id";
 
 	const out: JsonObject[] = [];
 	let skipped = 0;
@@ -802,7 +965,7 @@ async function loadQueryItems(args: {
 			continue;
 		}
 
-		out.push(projectItem(doc, args.projection));
+		out.push(projectItem(doc, args.projection, itemKeyField));
 
 		if (limit && out.length >= limit) break;
 	}
@@ -845,17 +1008,18 @@ export const statePublishOperation: WorkflowPluginOperation = {
 					);
 				}
 
-				const artifact = await ctx.artifactStore.readArtifact(
-					ctx.runId,
+				const sourceArtifacts = await readSourceArtifacts({
+					ctx,
 					fromStep,
-					spec.output,
-				);
-				if (!artifact) {
+					output: spec.output,
+					source: spec.source ?? "auto",
+				});
+
+				if (sourceArtifacts.length === 0) {
 					return failResult(
 						`workflow.state_publish: artifact not found for ${fromStep}.${spec.output}`,
 					);
 				}
-				const items = selectItems(artifact.data, spec.select);
 
 				const collection = spec.collection;
 				const coll = collectionSpec(ctx, collection);
@@ -875,6 +1039,7 @@ export const statePublishOperation: WorkflowPluginOperation = {
 				let published = 0;
 				let updated = 0;
 				let enqueued = 0;
+				let selected = 0;
 				const rejected: JsonObject[] = [];
 
 				if (!ctx.redis) {
@@ -889,118 +1054,129 @@ export const statePublishOperation: WorkflowPluginOperation = {
 						);
 					}
 					logs.push(`no redis client; ${collection} publish is artifact-only`);
-				} else {
-					for (const item of items) {
-						const rawItemKey = item[itemKeyField];
-						const itemKey = rawItemKey == null ? "" : String(rawItemKey);
-
-						if (!itemKey) {
-							rejected.push({
-								reason: `missing item key field "${itemKeyField}"`,
-								item,
-							});
-							continue;
-						}
-
-						const keys = keyspace(ctx, collection, itemKey, queue);
-						let firstSeen = true;
-
-						if (views.seen_index) {
-							const addedSeen = await redisRaw(
-								ctx.redis,
-								"SADD",
-								keys.seenSet,
-								itemKey,
-							);
-							firstSeen = redisReplyIsPositive(addedSeen);
-						}
-
-						if (views.document) {
-							await ctx.redis.set(keys.document, JSON.stringify(item));
-						}
-
-						if (views.metadata_hash) {
-							await ctx.redis.hset(keys.hash, scalarizeForHash(item));
-
-							for (const field of coll.indexes ?? []) {
-								const value = item[field];
-								if (value === undefined || value === null || value === "")
-									continue;
-
-								await redisRaw(
-									ctx.redis,
-									"SADD",
-									keyspace(ctx, collection).indexSet(field, String(value)),
-									itemKey,
-								);
-							}
-						}
-
-						if (queue && views.pending_queue) {
-							const added = await redisRaw(
-								ctx.redis,
-								"SADD",
-								keys.queuedSet,
-								itemKey,
-							);
-							if (redisReplyIsPositive(added)) {
-								await redisRaw(ctx.redis, "RPUSH", keys.queue, itemKey);
-								enqueued += 1;
-							}
-						}
-
-						if (views.event_stream) {
-							await ctx.redis.xadd(keys.stream, "*", {
-								event: firstSeen ? "published" : "updated",
-								collection,
-								item_key: itemKey,
-								lifecycle,
-								queue: queue ?? "",
-								run_id: ctx.runId,
-								step_id: ctx.step.id,
-							});
-						}
-
-						if (firstSeen) published += 1;
-						else updated += 1;
-					}
-
-					if (coll.counters?.published) {
-						await incrBy(
-							ctx.redis,
-							keyspace(ctx, collection).counter(coll.counters.published),
-							published,
-						);
-					}
-
-					if (coll.counters?.rejected) {
-						await incrBy(
-							ctx.redis,
-							keyspace(ctx, collection).counter(coll.counters.rejected),
-							rejected.length,
-						);
-					}
 				}
 
-				totalSelected += items.length;
+				for (const sourceArtifact of sourceArtifacts) {
+					const items = selectItems(sourceArtifact.data, spec.select);
+					selected += items.length;
+
+					const sourceRejected: JsonObject[] = [];
+					let sourcePublished = 0;
+					let sourceUpdated = 0;
+					let sourceEnqueued = 0;
+
+					if (ctx.redis) {
+						for (const item of items) {
+							const rawItemKey = item[itemKeyField];
+							const itemKey = rawItemKey == null ? "" : String(rawItemKey);
+
+							if (!itemKey) {
+								const entry = {
+									reason: `missing item key field "${itemKeyField}"`,
+									item,
+								};
+								sourceRejected.push(entry);
+								rejected.push(entry);
+								continue;
+							}
+
+							const keys = keyspace(ctx, collection, itemKey, queue);
+							let firstSeen = true;
+
+							if (views.seen_index) {
+								const addedSeen = await redisRaw(
+									ctx.redis,
+									"SADD",
+									keys.seenSet,
+									itemKey,
+								);
+								firstSeen = redisReplyIsPositive(addedSeen);
+							}
+
+							if (views.document || views.metadata_hash) {
+								await writeRedisDocument({
+									ctx,
+									collection,
+									itemKey,
+									next: item,
+									mode: "replace",
+									indexes: [],
+								});
+							}
+
+							if (queue && views.pending_queue) {
+								const added = await redisRaw(
+									ctx.redis,
+									"SADD",
+									keys.queuedSet,
+									itemKey,
+								);
+								if (redisReplyIsPositive(added)) {
+									await redisRaw(ctx.redis, "RPUSH", keys.queue, itemKey);
+									enqueued += 1;
+									sourceEnqueued += 1;
+								}
+							}
+
+							if (views.event_stream) {
+								await ctx.redis.xadd(keys.stream, "*", {
+									event: firstSeen ? "published" : "updated",
+									collection,
+									item_key: itemKey,
+									lifecycle,
+									queue: queue ?? "",
+									run_id: ctx.runId,
+									step_id: ctx.step.id,
+								});
+							}
+
+							if (firstSeen) {
+								published += 1;
+								sourcePublished += 1;
+							} else {
+								updated += 1;
+								sourceUpdated += 1;
+							}
+						}
+					}
+
+					summaries.push({
+						collection,
+						from_step: fromStep,
+						source_step: sourceArtifact.stepId,
+						output: spec.output,
+						selected_count: items.length,
+						published_count: sourcePublished,
+						updated_count: sourceUpdated,
+						enqueued_count: sourceEnqueued,
+						rejected_items: sourceRejected,
+						queue: queue ?? null,
+					});
+				}
+
+				if (ctx.redis && coll.counters?.published) {
+					await incrBy(
+						ctx.redis,
+						keyspace(ctx, collection).counter(coll.counters.published),
+						published,
+					);
+				}
+
+				if (ctx.redis && coll.counters?.rejected) {
+					await incrBy(
+						ctx.redis,
+						keyspace(ctx, collection).counter(coll.counters.rejected),
+						rejected.length,
+					);
+				}
+
+				totalSelected += selected;
 				totalPublished += published;
 				totalUpdated += updated;
 				totalEnqueued += enqueued;
 
-				summaries.push({
-					collection,
-					from_step: fromStep,
-					output: spec.output,
-					selected_count: items.length,
-					published_count: published,
-					updated_count: updated,
-					enqueued_count: enqueued,
-					rejected_items: rejected,
-					queue: queue ?? null,
-				});
-
 				logs.push(
-					`published ${published}/${items.length} item(s) to collection ${collection}`,
+					`published ${published}/${selected} item(s) to collection ${collection}`,
 				);
 			}
 
@@ -1338,6 +1514,14 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 					);
 				}
 				const rows = selectItems(artifact.data, spec.select);
+
+				if (spec.require_rows === true && rows.length === 0) {
+					return failResult(
+						`workflow.state_complete: selected zero rows from ${fromStep}.${spec.output}`,
+						{ duration_ms: Date.now() - start, retryable: true },
+					);
+				}
+
 				const itemKeyField =
 					spec.item_key ?? collectionSpec(ctx, collection).item_key ?? "id";
 				const statusField = spec.status_field ?? "status";
@@ -1414,11 +1598,12 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 							patch.lifecycle = terminal;
 							patch.completed_at = getLocalISOString();
 
-							await mergeRedisDocument({
+							await writeRedisDocument({
 								ctx,
 								collection,
 								itemKey,
-								patch,
+								next: patch,
+								mode: "merge",
 								indexes: spec.indexes,
 							});
 						}
@@ -1474,6 +1659,20 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 				logs.push(
 					`completed=${completed} failed=${failed} skipped=${skipped} stale=${stale} collection=${collection}`,
 				);
+
+				if (spec.fail_on_skipped !== false && skipped > 0) {
+					return failResult(
+						`workflow.state_complete: skipped ${skipped} row(s) because item key was missing`,
+						{ duration_ms: Date.now() - start, retryable: false },
+					);
+				}
+
+				if (spec.fail_on_stale !== false && stale > 0) {
+					return failResult(
+						`workflow.state_complete: skipped ${stale} stale lease completion(s)`,
+						{ duration_ms: Date.now() - start, retryable: true },
+					);
+				}
 			}
 
 			const summaryOutput =
@@ -1619,14 +1818,18 @@ export const statePatchOutputsOperation: WorkflowPluginOperation = {
 				);
 			}
 
-			const artifacts = await ctx.artifactStore.listArtifacts(ctx.runId);
-			const matching = artifacts.filter((artifact) => {
-				return (
-					artifact.output_id === spec.output &&
-					(artifact.step_id === fromStep ||
-						artifact.step_id.startsWith(`${fromStep}_`))
-				);
+			const sourceArtifacts = await readSourceArtifacts({
+				ctx,
+				fromStep,
+				output: spec.output,
+				source: spec.source ?? "auto",
 			});
+
+			if (sourceArtifacts.length === 0) {
+				return failResult(
+					`workflow.state_patch_outputs: artifact not found for ${fromStep}.${spec.output}`,
+				);
+			}
 
 			const coll = collectionSpec(ctx, spec.collection);
 			const itemKeyField = spec.item_key ?? coll.item_key ?? "id";
@@ -1635,16 +1838,8 @@ export const statePatchOutputsOperation: WorkflowPluginOperation = {
 			let skipped = 0;
 			const rejected: JsonObject[] = [];
 
-			for (const meta of matching) {
-				const artifact = await ctx.artifactStore.readArtifact(
-					ctx.runId,
-					meta.step_id,
-					meta.output_id,
-				);
-
-				if (!artifact) continue;
-
-				const rows = selectItems(artifact.data, spec.select);
+			for (const sourceArtifact of sourceArtifacts) {
+				const rows = selectItems(sourceArtifact.data, spec.select);
 
 				for (const row of rows) {
 					const itemKey = String(row.item_key ?? row[itemKeyField] ?? "");
@@ -1653,7 +1848,7 @@ export const statePatchOutputsOperation: WorkflowPluginOperation = {
 						skipped += 1;
 						rejected.push({
 							reason: `missing item key field "${itemKeyField}"`,
-							artifact: `${meta.step_id}.${meta.output_id}`,
+							artifact: `${sourceArtifact.stepId}.${sourceArtifact.outputId}`,
 						});
 						continue;
 					}
@@ -1664,11 +1859,12 @@ export const statePatchOutputsOperation: WorkflowPluginOperation = {
 						patch[spec.status_field] = row[spec.status_field];
 					}
 
-					await mergeRedisDocument({
+					await writeRedisDocument({
 						ctx,
 						collection: spec.collection,
 						itemKey,
-						patch,
+						next: patch,
+						mode: "merge",
 						indexes: spec.indexes,
 					});
 
@@ -1687,7 +1883,7 @@ export const statePatchOutputsOperation: WorkflowPluginOperation = {
 				from_step: fromStep,
 				output: spec.output,
 				generated_at: getLocalISOString(),
-				artifact_count: matching.length,
+				artifact_count: sourceArtifacts.length,
 				patched_count: patched,
 				skipped_count: skipped,
 				valid_count: patched,
@@ -1703,7 +1899,7 @@ export const statePatchOutputsOperation: WorkflowPluginOperation = {
 
 			return okResult({
 				duration_ms: Date.now() - start,
-				logs: `patched ${patched} Redis document(s) from ${matching.length} artifact(s)`,
+				logs: `patched ${patched} Redis document(s) from ${sourceArtifacts.length} artifact(s)`,
 			});
 		} catch (err) {
 			return failResult(
@@ -1758,6 +1954,20 @@ export const statePartitionOperation: WorkflowPluginOperation = {
 
 				if (partition.queue) {
 					const queue = partition.queue;
+					const qSpec = queueSpec(ctx, queue);
+
+					if (!qSpec) {
+						return failResult(
+							`workflow.state_partition: unknown queue "${queue}"`,
+						);
+					}
+
+					if (qSpec.collection !== spec.collection) {
+						return failResult(
+							`workflow.state_partition: queue "${queue}" belongs to collection "${qSpec.collection}", not "${spec.collection}"`,
+						);
+					}
+
 					const coll = collectionSpec(ctx, spec.collection);
 					const itemKeyField = spec.item_key ?? coll.item_key ?? "id";
 					const qKeys = keyspace(ctx, spec.collection, undefined, queue);
@@ -1775,6 +1985,21 @@ export const statePartitionOperation: WorkflowPluginOperation = {
 						if (redisReplyIsPositive(added)) {
 							await redisRaw(ctx.redis, "RPUSH", qKeys.queue, itemKey);
 							enqueued += 1;
+						}
+
+						if (partition.lifecycle) {
+							await writeRedisDocument({
+								ctx,
+								collection: spec.collection,
+								itemKey,
+								next: {
+									lifecycle: partition.lifecycle,
+									queued_for: queue,
+									partition: name,
+								},
+								mode: "merge",
+								indexes: spec.indexes,
+							});
 						}
 
 						await ctx.redis.xadd(keyspace(ctx, spec.collection).stream, "*", {
@@ -1885,11 +2110,42 @@ export const stateReportOperation: WorkflowPluginOperation = {
 						})
 					: [];
 
+				const requestedIndexFields =
+					spec.indexes?.[collection] ??
+					collectionSpec(ctx, collection).indexes ??
+					[];
+
+				const indexBreakdowns: Record<string, Record<string, number>> = {};
+
+				for (const field of requestedIndexFields) {
+					const valuesRaw = await redisRaw(
+						ctx.redis,
+						"SMEMBERS",
+						keyspace(ctx, collection).indexValuesSet(field),
+					);
+
+					const values = Array.isArray(valuesRaw) ? valuesRaw.map(String) : [];
+					const counts: Record<string, number> = {};
+
+					for (const value of values) {
+						const count = await redisRaw(
+							ctx.redis,
+							"SCARD",
+							keyspace(ctx, collection).indexSet(field, value),
+						);
+
+						counts[value] = Number(count ?? 0);
+					}
+
+					indexBreakdowns[field] = counts;
+				}
+
 				collectionSummaries.push({
 					collection,
 					seen_count: Number(seen ?? 0),
 					completed_count: Number(completed ?? 0),
 					failed_count: Number(failed ?? 0),
+					indexes: indexBreakdowns,
 					sample_items: sampleItems,
 				});
 			}
@@ -1922,6 +2178,21 @@ export const stateReportOperation: WorkflowPluginOperation = {
 			await commitPluginOutput(ctx, spec.json_output, report);
 
 			if (spec.markdown_output) {
+				const indexLines = collectionSummaries.flatMap((item) => {
+					const perCollection: string[] = [];
+					const indexes =
+						(item.indexes as Record<string, Record<string, number>>) ?? {};
+
+					for (const [field, counts] of Object.entries(indexes)) {
+						perCollection.push(`- ${item.collection}.${field}`);
+						for (const [value, count] of Object.entries(counts)) {
+							perCollection.push(`  - ${value}: ${count}`);
+						}
+					}
+
+					return perCollection;
+				});
+
 				const markdown = [
 					`# ${ctx.workflow.name} report`,
 					"",
@@ -1933,6 +2204,10 @@ export const stateReportOperation: WorkflowPluginOperation = {
 						(item) =>
 							`- ${item.collection}: seen=${item.seen_count}, completed=${item.completed_count}, failed=${item.failed_count}`,
 					),
+					"",
+					"## Indexes",
+					"",
+					...(indexLines.length > 0 ? indexLines : ["- (none)"]),
 					"",
 					"## Counters",
 					"",

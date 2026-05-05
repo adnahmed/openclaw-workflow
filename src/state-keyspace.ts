@@ -56,6 +56,11 @@ export type SemanticStateKeyspace = {
 	indexSet(field: string, value: string): string;
 
 	/**
+	 * Tracks known values for an indexed field so reports can enumerate values.
+	 */
+	indexValuesSet(field: string): string;
+
+	/**
 	 * Backward-compatible property names for older state_contract code.
 	 * These intentionally point to the same canonical keys.
 	 */
@@ -145,6 +150,11 @@ export function buildSemanticStateKeyspace(
 			const safeField = encodeURIComponent(field);
 			const safeValue = encodeURIComponent(value);
 			return `${prefix}:set:${collection}:idx:${safeField}:${safeValue}:${args.date}`;
+		},
+
+		indexValuesSet(field: string) {
+			const safeField = encodeURIComponent(field);
+			return `${prefix}:set:${collection}:idx_values:${safeField}:${args.date}`;
 		},
 	};
 

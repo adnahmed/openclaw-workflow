@@ -135,8 +135,11 @@ export type StateWorkerGroupSpec = {
 	caps?: string[];
 };
 
+export type StateArtifactSourceMode = "auto" | "exact" | "descendants";
+
 export type StatePublishSpec = {
 	from_step?: string;
+	source?: StateArtifactSourceMode;
 	output: string;
 	select?: string;
 	collection: string;
@@ -193,6 +196,13 @@ export type StateCompleteSpec = {
 	 * Example: ["route", "status", "submitted"].
 	 */
 	indexes?: string[];
+
+	/**
+	 * Safety gates. Prevent silent "ok" completion with zero useful rows.
+	 */
+	require_rows?: boolean;
+	fail_on_skipped?: boolean;
+	fail_on_stale?: boolean;
 };
 
 export type StateWhereSpec =
@@ -239,6 +249,7 @@ export type StatePartitionSpec = {
 export type StatePatchOutputsSpec = {
 	collection: string;
 	from_step?: string;
+	source?: StateArtifactSourceMode;
 	output: string;
 	select?: string;
 	item_key?: string;
@@ -818,6 +829,12 @@ export type StateDrainSpec = {
 	 * termination is queue emptiness.
 	 */
 	max_iterations?: number | null;
+
+	/**
+	 * Maximum simultaneous claim/worker/complete iterations.
+	 * This is the real concurrency knob for Redis-backed drains.
+	 */
+	max_active_iterations?: number;
 };
 
 export type WorkflowStep = {

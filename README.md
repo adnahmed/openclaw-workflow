@@ -614,7 +614,7 @@ Use when:
 `state_publish` fields:
 - required: `from_step`, `output`
 - recommended: `collection`
-- optional: `queue`, `select`, `item_key`, `summary_output`
+- optional: `source` (`auto` | `exact` | `descendants`), `queue`, `select`, `item_key`, `summary_output`
 
 Example:
 
@@ -636,6 +636,7 @@ Example:
 
 Behavior:
 - reads the declared artifact from `from_step` / `output`
+- in `auto` mode, resolves either the exact artifact (`from_step.output`) or descendant loop/drain artifacts (`from_step:<n>:...`)
 - selects items from the artifact payload (default root item list)
 - publishes documents / hashes / queue entries / stream events according to the collection config
 - first-seen items increment `published_count`; previously-seen items increment `updated_count`
@@ -772,7 +773,7 @@ Marks claimed items as completed or failed based on a result artifact written by
 `state_complete` fields:
 - required: `from_step`, `output`
 - required: one of `collection`, `queue`, or `worker_group`
-- optional: `select`, `item_key`, `status_field`, `summary_output`, `merge_document`, `merge_fields`, `indexes`
+- optional: `select`, `item_key`, `status_field`, `summary_output`, `merge_document`, `merge_fields`, `indexes`, `require_rows`, `fail_on_skipped`, `fail_on_stale`
 
 Example:
 
@@ -788,6 +789,10 @@ Example:
     select: $.items
     item_key: alert_key
     status_field: status
+    merge_document: true
+    require_rows: true
+    fail_on_skipped: true
+    fail_on_stale: true
     summary_output: state_complete_summary
   depends_on: [classify_claimed_alerts]
   outputs:
@@ -804,6 +809,10 @@ Behavior:
 - maintains configured secondary indexes during merge (`collections.<name>.indexes` plus per-step `indexes`)
 - appends lifecycle events to the collection stream when configured
 - increments completion/failure counters and writes a summary artifact
+- supports strict safety gates:
+  - `require_rows: true` fails completion when selection returns zero rows
+  - `fail_on_skipped` (default true) fails when rows are skipped due to missing item keys
+  - `fail_on_stale` (default true) fails when stale lease completions are detected
 
 #### `workflow.state_query`
 
@@ -834,8 +843,9 @@ Example:
 ```
 
 Behavior:
-- uses collection secondary indexes for simple equality where possible
+- uses collection secondary indexes for simple equality, `all` intersections, and `any` unions when possible
 - falls back to collection seen-set scan + predicate matching when needed
+- always re-checks matched documents with the full `where` predicate for correctness
 - commits query output and optional summary artifact
 
 #### `workflow.state_patch_outputs`
@@ -845,7 +855,7 @@ Merges rows from one or more artifacts into semantic Redis documents/hashes with
 `state_patch_outputs` fields:
 - required: `collection`, `output`
 - required in practice: `from_step` (or plugin step dependency)
-- optional: `select`, `item_key`, `merge_fields`, `status_field`, `indexes`, `summary_output`
+- optional: `source` (`auto` | `exact` | `descendants`), `select`, `item_key`, `merge_fields`, `status_field`, `indexes`, `summary_output`
 
 Example:
 
@@ -866,9 +876,9 @@ Example:
 ```
 
 Behavior:
-- reads matching artifacts from `from_step` (including loop child artifacts)
+- reads matching artifacts from `from_step` using source-mode resolution (including colon-prefixed loop/drain descendants)
 - merges selected fields into Redis document + hash records
-- updates secondary indexes for merged fields
+- updates secondary indexes for merged fields and removes stale index memberships on value changes
 - commits a summary artifact with patched/skipped counts
 
 #### `workflow.state_partition`
@@ -906,7 +916,9 @@ Example:
 Behavior:
 - resolves each partition independently via semantic query filters
 - commits one output artifact per partition
+- validates queue ownership (`state.queues.<name>.collection`) before enqueueing
 - optionally enqueues each partitioned item and writes partition events to stream
+- when `partition.lifecycle` is set, patches document state (`lifecycle`, `queued_for`, `partition`) to keep Redis state aligned with routing
 - commits aggregate partition summary
 
 #### `workflow.state_report`
@@ -936,6 +948,7 @@ Example:
 
 Behavior:
 - reports seen/completed/failed totals by collection
+- reports per-index value breakdowns when requested (or from collection defaults)
 - optionally includes bounded sample items per collection
 - optionally resolves configured counters
 - emits JSON report and optional Markdown report artifacts
@@ -968,6 +981,7 @@ What it does:
 - required: `worker_group`
 - optional: `max_empty_claims` (default `1`)
 - optional: `max_iterations` (`null`/unset = no explicit cap)
+- optional: `max_active_iterations` (default `1`) — number of concurrent active drain iterations
 
 Example:
 
@@ -1006,6 +1020,9 @@ Example:
         output: classification_results
         worker_group: task_alert_classifier
         collection: task_alerts
+        require_rows: true
+        fail_on_skipped: true
+        fail_on_stale: true
         summary_output: state_complete_summary
       outputs:
         - id: state_complete_summary
@@ -1014,6 +1031,7 @@ Example:
 Notes:
 - `state_drain` is a scheduler/controller step, not a plugin operation ID.
 - nested step instances are expanded dynamically as `<drain_step_id>:<iteration>:<child_id>`.
+- controller keeps up to `max_active_iterations` iterations active concurrently.
 - non-optional child `failed`/`blocked` statuses fail the controller.
 - on empty claim, pending downstream children in that iteration are marked `skipped`.
 
