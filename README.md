@@ -155,6 +155,55 @@ workflow_status({ name: "hello" })
 
 ---
 
+## Workflow YAML surfaces
+
+OpenClaw Workflow supports two YAML surfaces:
+
+1. **Authoring schema**  
+   Compact, human-friendly workflow format for writing pipelines.
+
+2. **Execution schema**  
+   Explicit runtime workflow format consumed by the engine.
+
+Authoring workflows are compiled into execution workflows before validation and execution:
+
+`authoring YAML -> authoring-loader -> authoring-compiler -> execution WorkflowDefinition -> workflow-loader normalize/validate -> template-schema-validator -> workflow-executor`
+
+Authoring example:
+
+```yaml
+schema: authoring
+name: Example
+
+collections:
+  jobs:
+    key: job_id
+    queues: [pending, done]
+
+pipeline:
+  - collect_jobs:
+      uses: browser
+      writes: jobs.pending
+```
+
+Compiled execution outline (abridged):
+
+```yaml
+name: Example
+state:
+  collections: ...
+  queues: ...
+  worker_groups: ...
+steps:
+  - id: collect_jobs
+    kind: sealed
+    ...
+  - id: __publish_jobs_pending_from_collect_jobs
+    kind: plugin
+    uses: workflow.state_publish
+    ...
+```
+
 ## Workflow YAML Schema Reference
 
 ### Top-level fields
