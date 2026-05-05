@@ -106,6 +106,12 @@ export type StateCollectionSpec = {
 		completed?: string;
 		failed?: string;
 	};
+
+	/**
+	 * Redis secondary indexes maintained as sets:
+	 * {prefix}:set:{collection}:idx:{field}:{value}:{date}
+	 */
+	indexes?: string[];
 	on_no_redis?: "artifact_only" | "fail";
 };
 
@@ -169,6 +175,89 @@ export type StateCompleteSpec = {
 	item_key?: string;
 	status_field?: string;
 	summary_output?: string;
+
+	/**
+	 * Merge worker result rows back into Redis documents/hashes.
+	 * This is what makes Redis queryable after classification/application steps.
+	 */
+	merge_document?: boolean;
+
+	/**
+	 * Fields copied from each result row into the Redis document.
+	 * If omitted and merge_document=true, merge the whole row except lease metadata.
+	 */
+	merge_fields?: string[];
+
+	/**
+	 * Extra Redis indexes to maintain from merged fields.
+	 * Example: ["route", "status", "submitted"].
+	 */
+	indexes?: string[];
+};
+
+export type StateWhereSpec =
+	| Record<string, unknown>
+	| {
+			all?: Record<string, unknown>;
+			any?: Record<string, unknown>[];
+			not?: Record<string, unknown>;
+	  };
+
+export type StateQuerySpec = {
+	collection: string;
+	where?: StateWhereSpec;
+	projection?: string[];
+	limit?: number;
+	offset?: number;
+	output: string;
+	summary_output?: string;
+	order_by?: string;
+	item_key?: string;
+	on_no_redis?: "fail";
+};
+
+export type StatePartitionSpec = {
+	collection: string;
+	by?: string;
+	projection?: string[];
+	limit_per_partition?: number;
+	partitions: Record<
+		string,
+		{
+			where?: StateWhereSpec;
+			output: string;
+			queue?: string;
+			lifecycle?: string;
+		}
+	>;
+	summary_output?: string;
+	item_key?: string;
+	indexes?: string[];
+	on_no_redis?: "fail";
+};
+
+export type StatePatchOutputsSpec = {
+	collection: string;
+	from_step?: string;
+	output: string;
+	select?: string;
+	item_key?: string;
+	merge_document?: boolean;
+	merge_fields?: string[];
+	indexes?: string[];
+	status_field?: string;
+	summary_output?: string;
+	on_no_redis?: "fail";
+};
+
+export type StateReportSpec = {
+	collections?: string[];
+	counters?: string[];
+	indexes?: Record<string, string[]>;
+	include_samples?: number;
+	json_output: string;
+	markdown_output?: string;
+	on_no_redis?: "fail";
 };
 
 export type StateContractSpec = {
@@ -713,6 +802,10 @@ export type WorkflowStep = {
 	state_consume?: StateConsumeSpec;
 	state_reclaim?: StateReclaimSpec;
 	state_complete?: StateCompleteSpec | StateCompleteSpec[];
+	state_query?: StateQuerySpec;
+	state_partition?: StatePartitionSpec;
+	state_patch_outputs?: StatePatchOutputsSpec;
+	state_report?: StateReportSpec;
 	sealed?: SealedStepSpec;
 
 	/**

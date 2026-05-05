@@ -22,9 +22,14 @@ import type {
 	StateCollectionSpec,
 	StateCompleteSpec,
 	StateConsumeSpec,
+	StatePartitionSpec,
+	StatePatchOutputsSpec,
 	StatePublishSpec,
+	StateQuerySpec,
 	StateQueueSpec,
 	StateReclaimSpec,
+	StateReportSpec,
+	StateWhereSpec,
 	WorkflowPluginOperation,
 } from "./types.js";
 import { getLocalISOString } from "./workflow-state.js";
@@ -513,6 +518,298 @@ function completeSpecs(ctx: PluginOperationContext): StateCompleteSpec[] {
 	);
 }
 
+function querySpec(ctx: PluginOperationContext): StateQuerySpec {
+	const stepSpec = (ctx.step as unknown as { state_query?: StateQuerySpec })
+		.state_query;
+	return (withObject(ctx).state_query ??
+		withObject(ctx).query ??
+		stepSpec ??
+		{}) as StateQuerySpec;
+}
+
+function partitionSpec(ctx: PluginOperationContext): StatePartitionSpec {
+	const stepSpec = (
+		ctx.step as unknown as { state_partition?: StatePartitionSpec }
+	).state_partition;
+	return (withObject(ctx).state_partition ??
+		withObject(ctx).partition ??
+		stepSpec ??
+		{}) as StatePartitionSpec;
+}
+
+function patchOutputsSpec(ctx: PluginOperationContext): StatePatchOutputsSpec {
+	const stepSpec = (
+		ctx.step as unknown as { state_patch_outputs?: StatePatchOutputsSpec }
+	).state_patch_outputs;
+	return (withObject(ctx).state_patch_outputs ??
+		withObject(ctx).patch_outputs ??
+		stepSpec ??
+		{}) as StatePatchOutputsSpec;
+}
+
+function reportSpec(ctx: PluginOperationContext): StateReportSpec {
+	const stepSpec = (ctx.step as unknown as { state_report?: StateReportSpec })
+		.state_report;
+	return (withObject(ctx).state_report ??
+		withObject(ctx).report ??
+		stepSpec ??
+		{}) as StateReportSpec;
+}
+
+function projectItem(item: JsonObject, projection?: string[]): JsonObject {
+	if (!projection || projection.length === 0) return item;
+
+	const out: JsonObject = {};
+	for (const field of projection) {
+		if (field in item) out[field] = item[field];
+	}
+
+	return out;
+}
+
+function matchesFlatWhere(
+	item: JsonObject,
+	where?: Record<string, unknown>,
+): boolean {
+	if (!where) return true;
+
+	for (const [field, expected] of Object.entries(where)) {
+		const actual = item[field];
+
+		if (Array.isArray(expected)) {
+			if (!expected.map(String).includes(String(actual))) return false;
+			continue;
+		}
+
+		if (expected !== null && typeof expected === "object") {
+			const rule = expected as Record<string, unknown>;
+
+			if ("exists" in rule) {
+				const exists = actual !== undefined && actual !== null && actual !== "";
+				if (Boolean(rule.exists) !== exists) return false;
+			}
+
+			if ("eq" in rule && String(actual) !== String(rule.eq)) return false;
+			if ("ne" in rule && String(actual) === String(rule.ne)) return false;
+			if ("in" in rule) {
+				const values = Array.isArray(rule.in) ? rule.in.map(String) : [];
+				if (!values.includes(String(actual))) return false;
+			}
+
+			continue;
+		}
+
+		if (String(actual) !== String(expected)) return false;
+	}
+
+	return true;
+}
+
+function matchesWhere(item: JsonObject, where?: StateWhereSpec): boolean {
+	if (!where) return true;
+
+	const w = where as Record<string, unknown>;
+
+	if ("all" in w) {
+		return matchesFlatWhere(item, w.all as Record<string, unknown>);
+	}
+
+	if ("any" in w) {
+		const any = Array.isArray(w.any) ? w.any : [];
+		return any.some((branch) => matchesFlatWhere(item, branch));
+	}
+
+	if ("not" in w) {
+		return !matchesFlatWhere(item, w.not as Record<string, unknown>);
+	}
+
+	return matchesFlatWhere(item, w);
+}
+
+function fieldsForMerge(row: JsonObject, mergeFields?: string[]): JsonObject {
+	const out: JsonObject = {};
+
+	if (mergeFields && mergeFields.length > 0) {
+		for (const field of mergeFields) {
+			if (field in row) out[field] = row[field];
+		}
+		return out;
+	}
+
+	for (const [key, value] of Object.entries(row)) {
+		if (key === "lease" || key === "item_key" || key.startsWith("_")) {
+			continue;
+		}
+		out[key] = value;
+	}
+
+	return out;
+}
+
+async function loadCollectionItemKeys(args: {
+	ctx: PluginOperationContext;
+	collection: string;
+	where?: StateWhereSpec;
+}): Promise<string[]> {
+	if (!args.ctx.redis) {
+		throw new Error("Redis is required for state query operations");
+	}
+
+	const coll = collectionSpec(args.ctx, args.collection);
+	const keys = keyspace(args.ctx, args.collection);
+
+	/**
+	 * Fast path for simple equality on an indexed field.
+	 */
+	const whereObj = args.where as JsonObject | undefined;
+	const flatWhere =
+		whereObj &&
+		!("all" in whereObj) &&
+		!("any" in whereObj) &&
+		!("not" in whereObj)
+			? whereObj
+			: null;
+
+	if (flatWhere) {
+		const indexedFields = new Set(coll.indexes ?? []);
+		for (const [field, value] of Object.entries(flatWhere)) {
+			if (
+				indexedFields.has(field) &&
+				value != null &&
+				typeof value !== "object"
+			) {
+				const members = await redisRaw(
+					args.ctx.redis,
+					"SMEMBERS",
+					keys.indexSet(field, String(value)),
+				);
+				return Array.isArray(members) ? members.map(String) : [];
+			}
+		}
+	}
+
+	const members = await redisRaw(args.ctx.redis, "SMEMBERS", keys.seenSet);
+	return Array.isArray(members) ? members.map(String) : [];
+}
+
+async function loadRedisDocument(args: {
+	ctx: PluginOperationContext;
+	collection: string;
+	itemKey: string;
+}): Promise<JsonObject> {
+	const coll = collectionSpec(args.ctx, args.collection);
+	const itemKeyField = coll.item_key ?? "id";
+	const keys = keyspace(args.ctx, args.collection, args.itemKey);
+	const raw = await args.ctx.redis?.get(keys.document);
+
+	if (!raw) return { [itemKeyField]: args.itemKey, item_key: args.itemKey };
+
+	try {
+		const parsed = JSON.parse(raw);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return {
+				...(parsed as JsonObject),
+				item_key: args.itemKey,
+			};
+		}
+	} catch {
+		// Fall through.
+	}
+
+	return { [itemKeyField]: args.itemKey, item_key: args.itemKey };
+}
+
+async function mergeRedisDocument(args: {
+	ctx: PluginOperationContext;
+	collection: string;
+	itemKey: string;
+	patch: JsonObject;
+	indexes?: string[];
+}): Promise<void> {
+	if (!args.ctx.redis) {
+		throw new Error("Redis is required for document merge");
+	}
+
+	const keys = keyspace(args.ctx, args.collection, args.itemKey);
+	const existing = await loadRedisDocument({
+		ctx: args.ctx,
+		collection: args.collection,
+		itemKey: args.itemKey,
+	});
+
+	const merged = {
+		...existing,
+		...args.patch,
+		item_key: args.itemKey,
+		updated_at: getLocalISOString(),
+	};
+
+	await args.ctx.redis.set(keys.document, JSON.stringify(merged));
+	await args.ctx.redis.hset(keys.hash, scalarizeForHash(merged));
+
+	const coll = collectionSpec(args.ctx, args.collection);
+	const indexFields = new Set([
+		...(coll.indexes ?? []),
+		...(args.indexes ?? []),
+	]);
+
+	for (const field of indexFields) {
+		const value = merged[field];
+		if (value === undefined || value === null || value === "") continue;
+
+		await redisRaw(
+			args.ctx.redis,
+			"SADD",
+			keyspace(args.ctx, args.collection).indexSet(field, String(value)),
+			args.itemKey,
+		);
+	}
+}
+
+async function loadQueryItems(args: {
+	ctx: PluginOperationContext;
+	collection: string;
+	where?: StateWhereSpec;
+	projection?: string[];
+	limit?: number;
+	offset?: number;
+}): Promise<JsonObject[]> {
+	const limit = Math.max(0, args.limit ?? 1000);
+	const offset = Math.max(0, args.offset ?? 0);
+
+	if (limit === 0) return [];
+
+	const itemKeys = await loadCollectionItemKeys({
+		ctx: args.ctx,
+		collection: args.collection,
+		where: args.where,
+	});
+
+	const out: JsonObject[] = [];
+	let skipped = 0;
+
+	for (const itemKey of itemKeys) {
+		const doc = await loadRedisDocument({
+			ctx: args.ctx,
+			collection: args.collection,
+			itemKey,
+		});
+
+		if (!matchesWhere(doc, args.where)) continue;
+
+		if (skipped < offset) {
+			skipped += 1;
+			continue;
+		}
+
+		out.push(projectItem(doc, args.projection));
+
+		if (limit && out.length >= limit) break;
+	}
+
+	return out;
+}
+
 export const statePublishOperation: WorkflowPluginOperation = {
 	id: "workflow.state_publish",
 	description: "Publish validated artifact items into semantic workflow state.",
@@ -624,6 +921,19 @@ export const statePublishOperation: WorkflowPluginOperation = {
 
 						if (views.metadata_hash) {
 							await ctx.redis.hset(keys.hash, scalarizeForHash(item));
+
+							for (const field of coll.indexes ?? []) {
+								const value = item[field];
+								if (value === undefined || value === null || value === "")
+									continue;
+
+								await redisRaw(
+									ctx.redis,
+									"SADD",
+									keyspace(ctx, collection).indexSet(field, String(value)),
+									itemKey,
+								);
+							}
 						}
 
 						if (queue && views.pending_queue) {
@@ -1092,6 +1402,27 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 							);
 						}
 
+						const shouldMerge =
+							spec.merge_document === true ||
+							Boolean(spec.merge_fields?.length) ||
+							Boolean(spec.indexes?.length);
+
+						if (shouldMerge) {
+							const patch = fieldsForMerge(row, spec.merge_fields);
+
+							patch[statusField] = row[statusField] ?? status;
+							patch.lifecycle = terminal;
+							patch.completed_at = getLocalISOString();
+
+							await mergeRedisDocument({
+								ctx,
+								collection,
+								itemKey,
+								patch,
+								indexes: spec.indexes,
+							});
+						}
+
 						await redisRaw(
 							ctx.redis,
 							"SADD",
@@ -1178,6 +1509,448 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 				{
 					duration_ms: Date.now() - start,
 				},
+			);
+		}
+	},
+};
+
+export const stateQueryOperation: WorkflowPluginOperation = {
+	id: "workflow.state_query",
+	description:
+		"Query Redis semantic state and commit a bounded manifest artifact.",
+	async run(ctx: PluginOperationContext): Promise<PluginOperationResult> {
+		const start = Date.now();
+
+		try {
+			const spec = querySpec(ctx);
+
+			if (!spec.collection) {
+				return failResult("workflow.state_query: collection is required");
+			}
+
+			if (!spec.output) {
+				return failResult("workflow.state_query: output is required");
+			}
+
+			if (!ctx.redis) {
+				return failResult(
+					"workflow.state_query: Redis is required; artifact globbing is intentionally unsupported",
+					{ duration_ms: Date.now() - start, retryable: false },
+				);
+			}
+
+			const items = await loadQueryItems({
+				ctx,
+				collection: spec.collection,
+				where: spec.where,
+				projection: spec.projection,
+				limit: spec.limit ?? 1000,
+				offset: spec.offset ?? 0,
+			});
+
+			await commitPluginOutput(ctx, spec.output, items);
+
+			const summaryOutput = spec.summary_output;
+			if (summaryOutput) {
+				await commitPluginOutput(ctx, summaryOutput, {
+					status: "ok",
+					backend: "redis",
+					mode: "stateful",
+					collection: spec.collection,
+					generated_at: getLocalISOString(),
+					count: items.length,
+					valid_count: items.length,
+					items: [],
+					rejected_items: [],
+					workflow_result: {
+						ok: true,
+						retryable: false,
+						blocked: false,
+						failed: false,
+					},
+				});
+			}
+
+			return okResult({
+				duration_ms: Date.now() - start,
+				logs: `queried ${items.length} item(s) from ${spec.collection}`,
+			});
+		} catch (err) {
+			return failResult(
+				`workflow.state_query: ${err instanceof Error ? err.message : String(err)}`,
+				{ duration_ms: Date.now() - start },
+			);
+		}
+	},
+};
+
+export const statePatchOutputsOperation: WorkflowPluginOperation = {
+	id: "workflow.state_patch_outputs",
+	description:
+		"Merge result artifact rows back into Redis semantic documents without exposing them to model context.",
+	async run(ctx: PluginOperationContext): Promise<PluginOperationResult> {
+		const start = Date.now();
+
+		try {
+			const spec = patchOutputsSpec(ctx);
+
+			if (!spec.collection) {
+				return failResult(
+					"workflow.state_patch_outputs: collection is required",
+				);
+			}
+
+			if (!spec.output) {
+				return failResult("workflow.state_patch_outputs: output is required");
+			}
+
+			if (!ctx.redis) {
+				return failResult("workflow.state_patch_outputs: Redis is required", {
+					duration_ms: Date.now() - start,
+					retryable: false,
+				});
+			}
+
+			const fromStep = spec.from_step ?? ctx.step.depends_on?.[0];
+
+			if (!fromStep) {
+				return failResult(
+					"workflow.state_patch_outputs: from_step is required when the plugin step has no dependency",
+				);
+			}
+
+			const artifacts = await ctx.artifactStore.listArtifacts(ctx.runId);
+			const matching = artifacts.filter((artifact) => {
+				return (
+					artifact.output_id === spec.output &&
+					(artifact.step_id === fromStep ||
+						artifact.step_id.startsWith(`${fromStep}_`))
+				);
+			});
+
+			const coll = collectionSpec(ctx, spec.collection);
+			const itemKeyField = spec.item_key ?? coll.item_key ?? "id";
+
+			let patched = 0;
+			let skipped = 0;
+			const rejected: JsonObject[] = [];
+
+			for (const meta of matching) {
+				const artifact = await ctx.artifactStore.readArtifact(
+					ctx.runId,
+					meta.step_id,
+					meta.output_id,
+				);
+
+				if (!artifact) continue;
+
+				const rows = selectItems(artifact.data, spec.select);
+
+				for (const row of rows) {
+					const itemKey = String(row.item_key ?? row[itemKeyField] ?? "");
+
+					if (!itemKey) {
+						skipped += 1;
+						rejected.push({
+							reason: `missing item key field "${itemKeyField}"`,
+							artifact: `${meta.step_id}.${meta.output_id}`,
+						});
+						continue;
+					}
+
+					const patch = fieldsForMerge(row, spec.merge_fields);
+
+					if (spec.status_field && row[spec.status_field] != null) {
+						patch[spec.status_field] = row[spec.status_field];
+					}
+
+					await mergeRedisDocument({
+						ctx,
+						collection: spec.collection,
+						itemKey,
+						patch,
+						indexes: spec.indexes,
+					});
+
+					patched += 1;
+				}
+			}
+
+			const summaryOutput =
+				spec.summary_output ?? "state_patch_outputs_summary";
+
+			await commitPluginOutput(ctx, summaryOutput, {
+				status: "ok",
+				backend: "redis",
+				mode: "stateful",
+				collection: spec.collection,
+				from_step: fromStep,
+				output: spec.output,
+				generated_at: getLocalISOString(),
+				artifact_count: matching.length,
+				patched_count: patched,
+				skipped_count: skipped,
+				valid_count: patched,
+				items: [],
+				rejected_items: rejected,
+				workflow_result: {
+					ok: true,
+					retryable: false,
+					blocked: false,
+					failed: false,
+				},
+			});
+
+			return okResult({
+				duration_ms: Date.now() - start,
+				logs: `patched ${patched} Redis document(s) from ${matching.length} artifact(s)`,
+			});
+		} catch (err) {
+			return failResult(
+				`workflow.state_patch_outputs: ${err instanceof Error ? err.message : String(err)}`,
+				{ duration_ms: Date.now() - start },
+			);
+		}
+	},
+};
+
+export const statePartitionOperation: WorkflowPluginOperation = {
+	id: "workflow.state_partition",
+	description:
+		"Partition Redis semantic collection items into bounded artifacts and optional Redis queues.",
+	async run(ctx: PluginOperationContext): Promise<PluginOperationResult> {
+		const start = Date.now();
+
+		try {
+			const spec = partitionSpec(ctx);
+
+			if (!spec.collection) {
+				return failResult("workflow.state_partition: collection is required");
+			}
+
+			if (!spec.partitions || Object.keys(spec.partitions).length === 0) {
+				return failResult("workflow.state_partition: partitions are required");
+			}
+
+			if (!ctx.redis) {
+				return failResult("workflow.state_partition: Redis is required", {
+					duration_ms: Date.now() - start,
+					retryable: false,
+				});
+			}
+
+			const summaries: JsonObject[] = [];
+			let total = 0;
+
+			for (const [name, partition] of Object.entries(spec.partitions)) {
+				const items = await loadQueryItems({
+					ctx,
+					collection: spec.collection,
+					where: partition.where,
+					projection: spec.projection,
+					limit: spec.limit_per_partition ?? 10000,
+					offset: 0,
+				});
+
+				await commitPluginOutput(ctx, partition.output, items);
+
+				let enqueued = 0;
+
+				if (partition.queue) {
+					const queue = partition.queue;
+					const coll = collectionSpec(ctx, spec.collection);
+					const itemKeyField = spec.item_key ?? coll.item_key ?? "id";
+					const qKeys = keyspace(ctx, spec.collection, undefined, queue);
+
+					for (const item of items) {
+						const itemKey = String(item.item_key ?? item[itemKeyField] ?? "");
+						if (!itemKey) continue;
+
+						const added = await redisRaw(
+							ctx.redis,
+							"SADD",
+							qKeys.queuedSet,
+							itemKey,
+						);
+						if (redisReplyIsPositive(added)) {
+							await redisRaw(ctx.redis, "RPUSH", qKeys.queue, itemKey);
+							enqueued += 1;
+						}
+
+						await ctx.redis.xadd(keyspace(ctx, spec.collection).stream, "*", {
+							event: "partitioned",
+							collection: spec.collection,
+							partition: name,
+							item_key: itemKey,
+							queue,
+							lifecycle: partition.lifecycle ?? name,
+							run_id: ctx.runId,
+							step_id: ctx.step.id,
+						});
+					}
+				}
+
+				summaries.push({
+					partition: name,
+					output: partition.output,
+					queue: partition.queue ?? null,
+					count: items.length,
+					enqueued_count: enqueued,
+				});
+
+				total += items.length;
+			}
+
+			const summaryOutput = spec.summary_output ?? "state_partition_summary";
+
+			await commitPluginOutput(ctx, summaryOutput, {
+				status: "ok",
+				backend: "redis",
+				mode: "stateful",
+				collection: spec.collection,
+				generated_at: getLocalISOString(),
+				count: total,
+				valid_count: total,
+				items: summaries,
+				rejected_items: [],
+				workflow_result: {
+					ok: true,
+					retryable: false,
+					blocked: false,
+					failed: false,
+				},
+			});
+
+			return okResult({
+				duration_ms: Date.now() - start,
+				logs: `partitioned ${total} item(s) from ${spec.collection}`,
+			});
+		} catch (err) {
+			return failResult(
+				`workflow.state_partition: ${err instanceof Error ? err.message : String(err)}`,
+				{ duration_ms: Date.now() - start },
+			);
+		}
+	},
+};
+
+export const stateReportOperation: WorkflowPluginOperation = {
+	id: "workflow.state_report",
+	description:
+		"Generate a bounded final report from Redis semantic state, counters, and indexes.",
+	async run(ctx: PluginOperationContext): Promise<PluginOperationResult> {
+		const start = Date.now();
+
+		try {
+			const spec = reportSpec(ctx);
+
+			if (!spec.json_output) {
+				return failResult("workflow.state_report: json_output is required");
+			}
+
+			if (!ctx.redis) {
+				return failResult("workflow.state_report: Redis is required", {
+					duration_ms: Date.now() - start,
+					retryable: false,
+				});
+			}
+
+			const collections =
+				spec.collections ?? Object.keys(ctx.workflow.state?.collections ?? {});
+			const includeSamples = Math.max(0, spec.include_samples ?? 25);
+			const collectionSummaries: JsonObject[] = [];
+
+			for (const collection of collections) {
+				const keys = keyspace(ctx, collection);
+				const seen = await redisRaw(ctx.redis, "SCARD", keys.seenSet);
+
+				const completed = await redisRaw(
+					ctx.redis,
+					"SCARD",
+					keys.terminalSet("completed"),
+				);
+
+				const failed = await redisRaw(
+					ctx.redis,
+					"SCARD",
+					keys.terminalSet("failed"),
+				);
+
+				const sampleItems = includeSamples
+					? await loadQueryItems({
+							ctx,
+							collection,
+							limit: includeSamples,
+							offset: 0,
+						})
+					: [];
+
+				collectionSummaries.push({
+					collection,
+					seen_count: Number(seen ?? 0),
+					completed_count: Number(completed ?? 0),
+					failed_count: Number(failed ?? 0),
+					sample_items: sampleItems,
+				});
+			}
+
+			const counterValues: Record<string, number> = {};
+
+			for (const counterName of spec.counters ?? []) {
+				const raw = await ctx.redis.get(
+					keyspace(ctx, collections[0] ?? "state").counter(counterName),
+				);
+				counterValues[counterName] = Number(raw ?? 0);
+			}
+
+			const report = {
+				status: "ok",
+				backend: "redis",
+				mode: "stateful",
+				generated_at: getLocalISOString(),
+				run_id: ctx.runId,
+				workflow: ctx.workflow.name,
+				counts: counterValues,
+				collections: collectionSummaries,
+				audit: {
+					source: "redis_semantic_state",
+					artifact_globs_used: false,
+					step_id: ctx.step.id,
+				},
+			};
+
+			await commitPluginOutput(ctx, spec.json_output, report);
+
+			if (spec.markdown_output) {
+				const markdown = [
+					`# ${ctx.workflow.name} report`,
+					"",
+					`Generated: ${report.generated_at}`,
+					"",
+					"## Collections",
+					"",
+					...collectionSummaries.map(
+						(item) =>
+							`- ${item.collection}: seen=${item.seen_count}, completed=${item.completed_count}, failed=${item.failed_count}`,
+					),
+					"",
+					"## Counters",
+					"",
+					...Object.entries(counterValues).map(([k, v]) => `- ${k}: ${v}`),
+					"",
+				].join("\n");
+
+				await commitPluginOutput(ctx, spec.markdown_output, markdown);
+			}
+
+			return okResult({
+				duration_ms: Date.now() - start,
+				logs: `generated Redis state report for ${collections.length} collection(s)`,
+			});
+		} catch (err) {
+			return failResult(
+				`workflow.state_report: ${err instanceof Error ? err.message : String(err)}`,
+				{ duration_ms: Date.now() - start },
 			);
 		}
 	},

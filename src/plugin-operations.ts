@@ -14,6 +14,10 @@
  *   - workflow.state_claim           — claim a leased batch from a semantic queue
  *   - workflow.state_reclaim_expired — requeue expired or orphaned in-flight claims
  *   - workflow.state_complete        — complete claimed items into terminal state
+ *   - workflow.state_query           — query semantic collection items into bounded artifacts
+ *   - workflow.state_patch_outputs   — merge worker output rows back into semantic documents
+ *   - workflow.state_partition       — partition semantic collection items and optionally enqueue
+ *   - workflow.state_report          — produce bounded final report from semantic state
  */
 
 import { readFile } from "node:fs/promises";
@@ -22,8 +26,12 @@ import { workflowUsesNativeState } from "./native-state-boundary.js";
 import {
 	stateClaimOperation,
 	stateCompleteOperation,
+	statePartitionOperation,
+	statePatchOutputsOperation,
 	statePublishOperation,
+	stateQueryOperation,
 	stateReclaimExpiredOperation,
+	stateReportOperation,
 } from "./state-plugin-operations.js";
 import type {
 	OutputCheckResult,
@@ -521,5 +529,9 @@ export function createDefaultRegistry(): PluginOperationRegistry {
 	registry.register(stateClaimOperation);
 	registry.register(stateReclaimExpiredOperation);
 	registry.register(stateCompleteOperation);
+	registry.register(stateQueryOperation);
+	registry.register(statePatchOutputsOperation);
+	registry.register(statePartitionOperation);
+	registry.register(stateReportOperation);
 	return registry;
 }

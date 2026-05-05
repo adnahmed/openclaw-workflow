@@ -2,8 +2,12 @@ import type {
 	SealedStepSpec,
 	StateCompleteSpec,
 	StateConsumeSpec,
+	StatePartitionSpec,
+	StatePatchOutputsSpec,
 	StatePublishSpec,
+	StateQuerySpec,
 	StateReclaimSpec,
+	StateReportSpec,
 	WorkflowStateConfig,
 } from "./types.js";
 
@@ -170,6 +174,10 @@ export type AuthoringStepBody = {
 	state_consume?: StateConsumeSpec;
 	state_complete?: StateCompleteSpec | StateCompleteSpec[];
 	state_reclaim?: StateReclaimSpec;
+	state_query?: StateQuerySpec;
+	state_partition?: StatePartitionSpec;
+	state_patch_outputs?: StatePatchOutputsSpec;
+	state_report?: StateReportSpec;
 
 	/**
 	 * Public authoring form for state-drain controllers.

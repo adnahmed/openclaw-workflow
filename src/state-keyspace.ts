@@ -50,6 +50,12 @@ export type SemanticStateKeyspace = {
 	counter(name: string): string;
 
 	/**
+	 * Secondary index set:
+	 * {prefix}:set:{collection}:idx:{field}:{value}:{date}
+	 */
+	indexSet(field: string, value: string): string;
+
+	/**
 	 * Backward-compatible property names for older state_contract code.
 	 * These intentionally point to the same canonical keys.
 	 */
@@ -133,6 +139,12 @@ export function buildSemanticStateKeyspace(
 
 		counter(name: string) {
 			return `${prefix}:counter:${name}:${args.date}`;
+		},
+
+		indexSet(field: string, value: string) {
+			const safeField = encodeURIComponent(field);
+			const safeValue = encodeURIComponent(value);
+			return `${prefix}:set:${collection}:idx:${safeField}:${safeValue}:${args.date}`;
 		},
 	};
 
