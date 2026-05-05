@@ -232,7 +232,7 @@ steps:
 |----------------|-----------|----------|---------|-------------|
 | `id`           | string    | ✅       | —       | Unique step identifier. Must match `[a-zA-Z0-9_-]+`. Used in `depends_on` references and state files. |
 | `name`         | string    | ❌       | Same as `id` | Human display name for notifications. |
-| `kind`         | string    | ❌       | inferred | Step execution kind: `subagent`, `loop_subagent`, `plugin`, or `state_drain`. If omitted, loop steps infer `loop_subagent`, drain-controller steps infer `state_drain`, otherwise `subagent`. |
+| `kind`         | string    | ❌       | inferred | Step execution kind: `subagent`, `loop_subagent`, `plugin`, `state_drain`, or `sealed`. If omitted, loop steps infer `loop_subagent`, drain-controller steps infer `state_drain`, otherwise `subagent`. |
 | `task`         | string    | ✅*      | —       | The agent prompt / task description. Supports [variable substitution](#variable-substitution). (*Not required for `kind: plugin` steps or loop containers using `for_each`) |
 | `uses`         | string    | ✅**     | —       | Plugin operation ID for `kind: plugin` steps (for example, `workflow.cache_json_document`). |
 | `with`         | object    | ❌       | `{}`    | Parameter map passed to a `kind: plugin` operation. Supports [variable substitution](#variable-substitution). |
@@ -260,6 +260,7 @@ steps:
 | `state_reclaim` | object | ❌ | — | Semantic reclaim specification for `kind: plugin` steps using `workflow.state_reclaim_expired`. Requeues expired or orphaned in-flight claims before another worker pass. |
 | `state_complete` | object\|object[] | ❌ | — | Semantic completion specification for `kind: plugin` steps using `workflow.state_complete`. Marks claimed items completed/failed using result artifacts from a prior step. |
 | `drain` | object | ❌ | — | Scheduler/controller spec for `kind: state_drain`. Repeatedly expands nested steps until `workflow.state_claim` returns an empty batch. |
+| `sealed` | object | ✅* | — | Configuration for `kind: sealed` execution boundary. Required for `kind: sealed`. Supports command-mode execution and worker-mode context-firewall policies. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
 | `complete_when` | string    | ❌       | `"session"` | Determines completion criteria: `"session"`, `"outputs"`, `"session_then_outputs"`, `"handoff"`, or `"handoff_or_outputs"`. |
 | `signaling` | string | ❌ | auto for `handoff`/`handoff_or_outputs`, otherwise `off` | Controls plugin-injected signaling instructions. `"auto"` injects `workflow_step_update` + `workflow_step_complete` protocol into the runtime prompt so authors don't need to repeat this boilerplate in every step task. `"off"` disables injection for that step. |
@@ -267,6 +268,132 @@ steps:
 | `reuse_outputs` | object | ❌ | — | Structured cache adoption policy. Supports pre-launch reuse checks with validator + signature freshness gates. |
 
 `**` `uses` is required when `kind: plugin`.
+
+`*` `sealed` is required when `kind: sealed`.
+
+### Sealed Steps (`kind: sealed`)
+
+`sealed` is the generic worker primitive for enforcing a data-plane/control-plane split:
+- **large/full results** are preserved in artifact storage
+- **model context** receives only compact summaries/handles
+- declared outputs remain the authoritative contract for step completion
+
+Use `kind: sealed` instead of introducing many specialized worker kinds.
+
+#### Sealed modes
+
+- `tool_worker` (default): isolated worker session with policy hints for result/context handling
+- `skill_worker`: same execution surface, authored for skill-centric worker tasks
+- `adapter`: reserved adapter-directed worker mode
+- `command`: bounded OS command execution with stdout/stderr spool + output-contract checks
+
+`mode` defaults to:
+- `command` when `sealed.command` is present
+- otherwise `tool_worker`
+
+#### Sealed spec fields
+
+```yaml
+sealed:
+  mode: tool_worker | skill_worker | adapter | command
+  no_model: false
+
+  command:                      # required when mode: command
+    argv: ["node", "scripts/transform.mjs"]
+    cwd: "."
+    env:
+      NODE_ENV: production
+
+  tools:
+    allow: []
+    deny: []
+
+  result_visibility:
+    mode: auto
+    inline_when_safe: true
+    preserve_full_results: true
+    spool_when_large: true
+    return_refs: true
+    lazy_read: true
+    expose_preview: true
+
+  context_firewall:
+    enabled: true
+    strategy: adaptive
+    on_context_pressure: spool_and_compact
+
+  tool_result_policy:
+    max_context_injection_bytes: auto
+    max_single_result_bytes_before_spool: auto
+    include_head_bytes: 512
+    include_tail_bytes: 512
+    preserve_full_result: true
+    mode: auto
+
+  stdout_policy:
+    max_stdout_bytes: 2048
+    max_stderr_bytes: 4096
+    max_process_output_bytes: 104857600
+    mode: spool_and_summarize
+
+  watchdog:
+    mode: progress_based
+    require_declared_outputs: true
+    detect_repeated_tool_calls: true
+    detect_repeated_navigation: true
+    repeated_tool_call_threshold: 3
+    on_no_progress: fail
+
+  return_contract:
+    type: json
+    max_context_bytes: auto
+    schema: {}
+
+  artifact_spool:
+    enabled: true
+    path: ".openclaw-workflow/sealed"
+```
+
+#### Sealed command example
+
+```yaml
+- id: normalize_manifest
+  kind: sealed
+  sealed:
+    mode: command
+    command:
+      argv: ["node", "scripts/normalize-manifest.mjs", "--date", "{date}"]
+    return_contract:
+      type: json
+      schema:
+        type: object
+        required: [status]
+        properties:
+          status:
+            type: string
+  outputs:
+    - id: normalized_manifest
+      validate: manifest_schema
+```
+
+#### Sealed worker example
+
+```yaml
+- id: collect_jobs
+  kind: sealed
+  task: |
+    Collect jobs and commit declared outputs.
+  sealed:
+    mode: tool_worker
+    context_firewall:
+      enabled: true
+  outputs:
+    - id: jobs_manifest
+```
+
+#### Capability boundary note
+
+When the runner uses CLI fallback adapter, internal tool-result interception cannot be enforced inside the child transcript. In that case, `sealed` still applies prompt/output-contract enforcement and bounded process output handling, but full core-level result interception requires OpenClaw runtime support.
 
 ### Plugin Steps (`kind: plugin`)
 
@@ -1453,6 +1580,11 @@ interface PluginApi {
 | `src/step-runner.ts` | Session lifecycle: spawn, poll, output check. Includes MockAdapter |
 | `src/output-checker.ts` | File existence validation for output gates |
 | `src/output-validator.ts` | Advanced output content validation |
+| `src/sealed-policy.ts` | Sealed-mode policy normalization and defaults |
+| `src/sealed-spool.ts` | Sealed data-plane spooling and compact envelope helpers |
+| `src/sealed-command-runner.ts` | `kind: sealed` command-mode bounded execution |
+| `src/sealed-step-runner.ts` | Sealed step dispatcher (command vs worker paths) |
+| `src/return-contract.ts` | AJV-based validation for sealed control-plane returns |
 | `src/step-contract.ts` | Shared contract validation, cache signature freshness, and cache manifest I/O |
 | `src/variable-substitution.ts` | `{date}`, `{datetime}`, `{utc_date}`, `{utc_datetime}`, `{run_id}` substitution |
 | `src/list-resolver.ts` | Resolves `for_each` sources (JSON, CSV, Newline) |
