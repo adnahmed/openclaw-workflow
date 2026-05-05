@@ -21,6 +21,8 @@ type RunStepOptionsLike = {
 	filesystemFallback?: boolean;
 	workflow?: WorkflowDefinition;
 	sessionAdapter?: string;
+	injectedContext?: Record<string, unknown>;
+	injectedContextLogs?: string[];
 	[k: string]: unknown;
 };
 

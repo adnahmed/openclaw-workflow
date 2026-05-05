@@ -581,6 +581,34 @@ a failure. Only report failure if the final exit code is non-zero or the output 
 explicitly indicates an error.
 `;
 
+function buildInjectedContextPreamble(context: unknown): string {
+	if (
+		!context ||
+		typeof context !== "object" ||
+		Array.isArray(context) ||
+		Object.keys(context as Record<string, unknown>).length === 0
+	) {
+		return "";
+	}
+
+	const json = JSON.stringify(context, null, 2);
+
+	return `
+IMPORTANT — Engine-injected workflow input:
+The following JSON was injected by the workflow engine. It is the complete bounded input context for this step.
+
+Do not read claim artifacts by path.
+Do not inspect artifact directories.
+Do not aggregate filesystem outputs.
+Use only this injected input, declared config, declared tools, and visible page/tool state.
+
+<workflow_input_json>
+${json}
+</workflow_input_json>
+
+`;
+}
+
 function buildWriteOutputPreamble(args: {
 	step: { outputs?: OutputSpec[] } | null | undefined;
 	validators?: Record<string, ValidatorSpec>;
@@ -995,6 +1023,8 @@ export async function runStep(step, runId, api, options) {
 		handoffToken,
 		runStartedAtMs,
 		acceptPreviousAttemptOutputs = true,
+		injectedContext = {},
+		injectedContextLogs = [],
 	} = options;
 
 	const runOutputCheck = async () => {
@@ -1076,6 +1106,8 @@ export async function runStep(step, runId, api, options) {
 			attempts,
 			handoffToken,
 		});
+		const injectedContextPreamble =
+			buildInjectedContextPreamble(injectedContext);
 		const writeOutputPreamble = buildWriteOutputPreamble({
 			step,
 			validators,
@@ -1092,6 +1124,7 @@ export async function runStep(step, runId, api, options) {
 			mcpContract +
 			isolatedStepBoundaryPreamble +
 			signalingPreamble +
+			injectedContextPreamble +
 			step.task;
 
 		assertAdapterCanRunSealedToolWorker(adapter, step, sealed);
@@ -1101,6 +1134,7 @@ export async function runStep(step, runId, api, options) {
 			timeout: step.timeout,
 			sessionTarget: "isolated",
 			label: `wf:${runId}:${step.id}`,
+			inputContext: injectedContext,
 			sealed,
 			resultPolicy: sealed?.tool_result_policy,
 			transcriptPolicy: sealed?.context_firewall,

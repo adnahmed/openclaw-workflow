@@ -18,6 +18,7 @@ import type {
 	CompiledFromMetadata,
 	OutputSpec,
 	SealedStepSpec,
+	StepInputSpec,
 	ValidatorSpec,
 	WorkflowDefinition,
 	WorkflowStateConfig,
@@ -671,6 +672,8 @@ function compilePluginAuthoringStep(args: {
 		state_partition: args.body.state_partition,
 		state_patch_outputs: args.body.state_patch_outputs,
 		state_report: args.body.state_report,
+		input: args.body.input,
+		input_context: args.body.input_context,
 		output_contract_version: args.body.output_contract_version,
 		reuse_outputs: args.body.reuse_outputs,
 		__compiled_from: args.compiledFrom,
@@ -718,6 +721,8 @@ function compileTransformStep(args: {
 		always_run: args.body.always_run,
 		on_block: args.body.on_block,
 		complete_when: args.body.complete_when ?? "outputs",
+		input: args.body.input,
+		input_context: args.body.input_context,
 		output_contract_version: args.body.output_contract_version,
 		reuse_outputs: args.body.reuse_outputs,
 		sealed: normalizeSealedSpec({
@@ -790,6 +795,8 @@ function compileSealedWorkerStep(args: {
 				? args.profile.model
 				: undefined),
 		complete_when: args.body.complete_when ?? "outputs",
+		input: args.body.input,
+		input_context: args.body.input_context,
 		output_contract_version: args.body.output_contract_version,
 		reuse_outputs: args.body.reuse_outputs,
 		sealed: normalizeSealedSpec({
@@ -865,6 +872,8 @@ function compileSealedForEachStep(args: {
 		retry_except: args.body.retry_except,
 		optional: args.body.optional ?? false,
 		complete_when: args.body.complete_when ?? "session_then_outputs",
+		input: args.body.input,
+		input_context: args.body.input_context,
 		steps: [child],
 		__compiled_from: args.compiledFrom,
 	};
@@ -961,6 +970,12 @@ function compileDrainAuthoringStep(args: {
 			generated_reason: `state_drain_worker:${args.stepId}`,
 		},
 	});
+	if ((workerStep.depends_on ?? []).includes("claim")) {
+		workerStep.input = claimInputForDrainWorker({
+			body: workerBody,
+			claimOutputId: outputIdOfSpec(claimStep.outputs?.[0]) || "claim_manifest",
+		});
+	}
 	const primaryWorkerOutput = workerStep.outputs?.[0];
 	const primaryWorkerOutputId =
 		typeof primaryWorkerOutput === "string"
@@ -1048,6 +1063,14 @@ function compileDrainPipelineItem(
 	const workerStep = {
 		...workerCompiled.mainStep,
 		depends_on: ["claim", ...workerCompiled.mainStep.depends_on],
+		input: ["claim", ...(workerCompiled.mainStep.depends_on ?? [])].includes(
+			"claim",
+		)
+			? claimInputForDrainWorker({
+					body: workerBody,
+					claimOutputId: "claim_manifest",
+				})
+			: workerCompiled.mainStep.input,
 		task: buildWorkerTask({
 			stepId: workerStepId,
 			userTask: workerBody.task,
@@ -1489,7 +1512,11 @@ function buildWorkerTask(args: {
 	if (args.inDrain) {
 		lines.push(`Authoring drain worker: ${args.stepId}`);
 		lines.push("");
-		lines.push("Process only the claimed records from claim_manifest.");
+		lines.push("Process only the engine-injected claim.");
+		lines.push(
+			"If claim.items is empty, write the declared empty result and stop.",
+		);
+		lines.push("Do not read claim artifact paths or artifact directories.");
 		if (args.drainQueueRef) {
 			lines.push(`Source queue: ${args.drainQueueRef}`);
 		}
@@ -1585,6 +1612,31 @@ function normalizeStringArray(value?: string | string[]): string[] {
 
 function queueRefOutputId(ref: ResolvedQueueRef): string {
 	return `${ref.collection}_${ref.queue}`;
+}
+
+function outputIdOfSpec(spec: OutputSpec | undefined): string {
+	if (!spec) return "";
+	if (typeof spec === "string") return spec;
+	if (typeof spec.id === "string" && spec.id.length > 0) return spec.id;
+	if (typeof spec.path === "string" && spec.path.length > 0) return spec.path;
+	return "";
+}
+
+function claimInputForDrainWorker(args: {
+	body: AuthoringStepBody;
+	claimOutputId: string;
+}): StepInputSpec | undefined {
+	if (args.body.input) return args.body.input;
+
+	return {
+		claim: {
+			from: args.claimOutputId,
+			inject_as: "claim",
+			max_bytes: 32768,
+			expose_artifact_path: false,
+			require_lease: true,
+		},
+	};
 }
 
 function singularize(name: string): string {

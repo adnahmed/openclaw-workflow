@@ -44,6 +44,7 @@
 import fs, { appendFile } from "node:fs/promises";
 import path, { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { resolveInjectedContextForStep } from "./claim-context.js";
 import { writeJsonAtomic } from "./json-io.js";
 import {
 	resolveList,
@@ -1153,6 +1154,15 @@ export async function executeWorkflow(
 				}
 
 				let result;
+				let injected = { context: {}, logs: [] as string[] };
+
+				if (step.kind !== "plugin") {
+					injected = await resolveInjectedContextForStep({
+						artifactStore,
+						runId,
+						step,
+					});
+				}
 
 				// ── Plugin step path ──────────────────────────────────────────────────────
 				if (step.kind === "plugin") {
@@ -1187,6 +1197,8 @@ export async function executeWorkflow(
 						artifactStore,
 						filesystemFallback: config.filesystemFallback !== false,
 						workflow,
+						injectedContext: injected.context,
+						injectedContextLogs: injected.logs,
 						getStepState: () => state.steps[step.id],
 						onSpawn: async (spawn) => {
 							await mutateState(() =>
@@ -1224,6 +1236,8 @@ export async function executeWorkflow(
 							artifactStore,
 							filesystemFallback: config.filesystemFallback !== false,
 							workflow,
+							injectedContext: injected.context,
+							injectedContextLogs: injected.logs,
 							getStepState: () => state.steps[step.id],
 
 							onSpawn: async (spawn) => {
@@ -1249,6 +1263,12 @@ export async function executeWorkflow(
 						};
 					}
 				} // end else (subagent path)
+
+				if (injected.logs.length > 0) {
+					result.logs = [result.logs, ...injected.logs]
+						.filter(Boolean)
+						.join("\n");
+				}
 
 				// Merge plugin output_writes back into run state
 				if (step.kind === "plugin" && result.output_writes) {

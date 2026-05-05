@@ -263,6 +263,8 @@ Authoring step additions:
 - public sealed-loop authoring via `for_each` (+ `parser`, `item_schema`) for browser/model steps
 - named drain controller authoring via `uses: drain` + `worker_group`, `claim`, `worker`, `complete`
 - step-level `sealed` overrides merged over defaults/profile
+- `input.claim` for engine-injected bounded claim context (preferred)
+- `input_context` as a backward-compatible alias for injected claim context
 
 Example rich output object:
 
@@ -336,6 +338,8 @@ outputs:
 | `state_partition` | object | ❌ | — | Partition specification for `kind: plugin` steps using `workflow.state_partition`. Splits semantic items into bounded outputs and optional queues. |
 | `state_patch_outputs` | object | ❌ | — | Patch specification for `kind: plugin` steps using `workflow.state_patch_outputs`. Merges result artifacts back into semantic Redis documents. |
 | `state_report` | object | ❌ | — | Report specification for `kind: plugin` steps using `workflow.state_report`. Produces bounded JSON/Markdown reports from semantic state. |
+| `input` | object | ❌ | — | Engine-injected runtime input configuration. Use `input.claim` to inject bounded claim payloads from a dependency claim artifact into worker context. |
+| `input_context` | object | ❌ | — | Backward-compatible alias for claim injection config. Prefer `input.claim`. |
 | `drain` | object | ❌ | — | Scheduler/controller spec for `kind: state_drain`. Repeatedly expands nested steps until `workflow.state_claim` returns an empty batch. |
 | `sealed` | object | ✅* | — | Configuration for `kind: sealed` execution boundary. Required for `kind: sealed`. Supports command-mode execution and worker-mode context-firewall policies. |
 | `skip_if_empty` | string    | ❌       | —       | Path to a file that, if missing or containing no valid records (parsed as JSON/CSV/Newline), causes this step to be skipped and marked `ok`. Supports [variable substitution](#variable-substitution). |
@@ -666,8 +670,15 @@ Example:
 
 - id: classify_claimed_alerts
   depends_on: [claim_task_alert_batch]
+  input:
+    claim:
+      from: claim_manifest
+      inject_as: claim
+      max_bytes: 32768
+      require_lease: true
+      expose_artifact_path: false
   task: |
-    Read the claimed alert batch from the claim_manifest artifact and classify each item.
+    Process the engine-injected claim and classify each item.
   outputs:
     - id: classification_results
 ```
@@ -684,6 +695,44 @@ Behavior:
 
 Important:
 - `workflow.state_claim` requires Redis. There is currently no filesystem-backed queue implementation, so artifact-only mode is intentionally rejected for queue claims.
+
+### Engine-injected claim context (`input.claim`)
+
+Workers can consume claim manifests through **engine-injected bounded context** rather than reading artifact files/paths directly.
+
+Preferred step syntax:
+
+```yaml
+input:
+  claim:
+    from: claim_manifest
+    from_step: claim_task_alert_batch   # optional; auto-resolved from immediate depends_on when omitted
+    inject_as: claim                    # default: claim
+    max_items: 50                       # optional; default: all claimed items
+    max_bytes: 32768                    # optional; default: 32768
+    include_fields: [item_key, lease, route, href]   # optional projection
+    require_lease: true                 # default: true
+    expose_artifact_path: false         # default: false
+```
+
+Backward-compatible alias:
+
+```yaml
+input_context:
+  from_claim: claim_manifest
+  mode: injected
+```
+
+Runtime behavior:
+- executor resolves the producer claim artifact before worker spawn
+- injects a bounded JSON object into worker context (default key: `claim`)
+- rejects invalid/unsafe configs (for example `max_bytes <= 0`, `max_items < 0`)
+- blocks `expose_artifact_path: true` for agent worker steps
+- supports both normal and sealed worker execution paths
+
+Authoring drain behavior:
+- drain-generated worker steps now default to injected claim input when they depend on the nested `claim` step
+- generated worker prompt guidance is: process only engine-injected claim, do not read claim artifact paths/directories
 
 #### `workflow.state_reclaim_expired`
 

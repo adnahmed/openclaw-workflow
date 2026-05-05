@@ -260,6 +260,60 @@ export type StateReportSpec = {
 	on_no_redis?: "fail";
 };
 
+export type ClaimContextInputSpec = {
+	/**
+	 * Output id from a dependency claim step.
+	 * Example: easy_apply_claim_manifest
+	 */
+	from: string;
+
+	/**
+	 * Optional explicit producer step id.
+	 * If omitted, the executor resolves the producer from immediate dependencies.
+	 */
+	from_step?: string;
+
+	/**
+	 * Variable name injected into worker context.
+	 * Default: "claim"
+	 */
+	inject_as?: string;
+
+	/**
+	 * Hard cap on claim.items included in the worker context.
+	 * Default: all claimed items in the manifest.
+	 */
+	max_items?: number;
+
+	/**
+	 * Hard cap on serialized injected JSON bytes.
+	 * Default: 32768.
+	 */
+	max_bytes?: number;
+
+	/**
+	 * Fields to keep from each claimed item.
+	 * If omitted, keep the full bounded claim item.
+	 */
+	include_fields?: string[];
+
+	/**
+	 * Whether each injected item must include a lease object.
+	 * Default: true.
+	 */
+	require_lease?: boolean;
+
+	/**
+	 * Whether the worker may see the backing artifact path.
+	 * Default: false. Keep false for agent context isolation.
+	 */
+	expose_artifact_path?: boolean;
+};
+
+export type StepInputSpec = {
+	claim?: ClaimContextInputSpec;
+};
+
 export type StateContractSpec = {
 	kind: "collection" | "document" | "counter" | "queue";
 	/**
@@ -472,6 +526,7 @@ export type SpawnOptions = {
 	timeout?: number;
 	sessionTarget?: string;
 	label?: string;
+	inputContext?: Record<string, unknown>;
 	cronDeliveryMode?: string;
 	cronDeliveryChannel?: string;
 	cronDeliveryTo?: string;
@@ -806,6 +861,26 @@ export type WorkflowStep = {
 	state_partition?: StatePartitionSpec;
 	state_patch_outputs?: StatePatchOutputsSpec;
 	state_report?: StateReportSpec;
+
+	/**
+	 * Engine-injected runtime input.
+	 * This is resolved by the executor, not by the worker session.
+	 */
+	input?: StepInputSpec;
+
+	/**
+	 * Back-compat alias. Prefer input.claim.
+	 */
+	input_context?: {
+		from_claim?: string;
+		mode?: "injected";
+		max_items?: number;
+		max_bytes?: number;
+		include_fields?: string[];
+		inject_as?: string;
+		expose_artifact_path?: boolean;
+		require_lease?: boolean;
+	};
 	sealed?: SealedStepSpec;
 
 	/**

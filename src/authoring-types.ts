@@ -8,6 +8,7 @@ import type {
 	StateQuerySpec,
 	StateReclaimSpec,
 	StateReportSpec,
+	StepInputSpec,
 	WorkflowStateConfig,
 } from "./types.js";
 
@@ -178,6 +179,17 @@ export type AuthoringStepBody = {
 	state_partition?: StatePartitionSpec;
 	state_patch_outputs?: StatePatchOutputsSpec;
 	state_report?: StateReportSpec;
+	input?: StepInputSpec;
+	input_context?: {
+		from_claim?: string;
+		mode?: "injected";
+		max_items?: number;
+		max_bytes?: number;
+		include_fields?: string[];
+		inject_as?: string;
+		expose_artifact_path?: boolean;
+		require_lease?: boolean;
+	};
 
 	/**
 	 * Public authoring form for state-drain controllers.

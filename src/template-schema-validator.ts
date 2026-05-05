@@ -14,6 +14,28 @@ type WorkflowStepLike = {
 	skip_if_empty?: unknown;
 	for_each?: unknown;
 	drain?: unknown;
+	input?: {
+		claim?: {
+			from?: unknown;
+			from_step?: unknown;
+			inject_as?: unknown;
+			max_items?: unknown;
+			max_bytes?: unknown;
+			include_fields?: unknown;
+			expose_artifact_path?: unknown;
+			require_lease?: unknown;
+		};
+	};
+	input_context?: {
+		from_claim?: unknown;
+		mode?: unknown;
+		max_items?: unknown;
+		max_bytes?: unknown;
+		include_fields?: unknown;
+		inject_as?: unknown;
+		expose_artifact_path?: unknown;
+		require_lease?: unknown;
+	};
 	item_schema?: JsonSchemaLite | null;
 	steps?: WorkflowStepLike[];
 };
@@ -72,6 +94,7 @@ function validateStepTemplates(
 	},
 ): void {
 	validateStepShape(step, ctx);
+	validateStepInput(step);
 
 	const isLoopController = !!step.for_each;
 	const activeLoopCtx = isLoopController
@@ -97,6 +120,56 @@ function validateStepTemplates(
 
 	for (const inner of step.steps ?? []) {
 		validateStepTemplates(inner, activeLoopCtx);
+	}
+}
+
+function validateStepInput(step: WorkflowStepLike): void {
+	const claim = step.input?.claim;
+	const legacy = step.input_context;
+
+	if (claim && legacy) {
+		throw new WorkflowTemplateValidationError(
+			`step "${step.id}" must not define both input.claim and input_context`,
+		);
+	}
+
+	const spec =
+		claim ||
+		(legacy?.from_claim
+			? {
+					from: legacy.from_claim,
+					max_items: legacy.max_items,
+					max_bytes: legacy.max_bytes,
+					include_fields: legacy.include_fields,
+					expose_artifact_path: legacy.expose_artifact_path,
+					require_lease: legacy.require_lease,
+				}
+			: null);
+
+	if (!spec) return;
+
+	if (!spec.from || typeof spec.from !== "string") {
+		throw new WorkflowTemplateValidationError(
+			`step "${step.id}" input.claim.from is required`,
+		);
+	}
+
+	if (spec.max_items !== undefined && Number(spec.max_items) < 0) {
+		throw new WorkflowTemplateValidationError(
+			`step "${step.id}" input.claim.max_items must be >= 0`,
+		);
+	}
+
+	if (spec.max_bytes !== undefined && Number(spec.max_bytes) <= 0) {
+		throw new WorkflowTemplateValidationError(
+			`step "${step.id}" input.claim.max_bytes must be > 0`,
+		);
+	}
+
+	if (spec.expose_artifact_path === true && step.kind !== "plugin") {
+		throw new WorkflowTemplateValidationError(
+			`step "${step.id}" input.claim.expose_artifact_path=true is not allowed for agent steps`,
+		);
 	}
 }
 
