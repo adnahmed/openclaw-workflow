@@ -417,6 +417,15 @@ export type ValidatorSpec = {
 	unknown_policy?: "fail" | "blocked" | "pass";
 };
 
+export type CompiledFromMetadata = {
+	schema: "authoring";
+	source_path?: string;
+	source_step?: string;
+	source_pointer?: string;
+	generated?: boolean;
+	generated_reason?: string;
+};
+
 /**
  * High-level workflow definition.
  */
@@ -425,6 +434,7 @@ export type WorkflowDefinition = {
 	version: string;
 	description: string;
 	config: Record<string, unknown>;
+	__compiled_from?: CompiledFromMetadata;
 	state?: WorkflowStateConfig;
 	validators?: Record<string, ValidatorSpec>;
 	required_skills?: string[];
@@ -694,6 +704,7 @@ export type WorkflowStep = {
 	 * the configured worker-group queue returns an empty claim.
 	 */
 	drain?: StateDrainSpec;
+	__compiled_from?: CompiledFromMetadata;
 };
 
 /**

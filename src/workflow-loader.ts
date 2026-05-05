@@ -30,6 +30,8 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import yaml from "js-yaml";
+import { compileAuthoringWorkflow } from "./authoring-compiler.js";
+import { isAuthoringWorkflow } from "./authoring-loader.js";
 import { normalizeSealedSpec } from "./sealed-policy.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import {
@@ -197,6 +199,13 @@ function validateValidators(rawValidators = {}) {
 }
 
 function normalizeAndValidate(raw, filePath) {
+	raw = isAuthoringWorkflow(raw)
+		? compileAuthoringWorkflow(raw, {
+				workflowDir: dirname(filePath),
+				strict: true,
+			})
+		: raw;
+
 	// ── Top-level required fields ──────────────────────────────────────────────
 	if (!raw.name || typeof raw.name !== "string") {
 		throw new Error(
@@ -682,6 +691,10 @@ function normalizeAndValidate(raw, filePath) {
 						: undefined,
 				complete_when: completeWhen,
 				signaling: signalingMode,
+				__compiled_from:
+					step.__compiled_from && typeof step.__compiled_from === "object"
+						? step.__compiled_from
+						: undefined,
 			};
 		});
 	};
@@ -741,6 +754,10 @@ function normalizeAndValidate(raw, filePath) {
 		version: raw.version ? String(raw.version) : "1.0",
 		description: raw.description || "",
 		config: raw.config || {},
+		__compiled_from:
+			raw.__compiled_from && typeof raw.__compiled_from === "object"
+				? raw.__compiled_from
+				: undefined,
 		state:
 			raw.state && typeof raw.state === "object"
 				? {

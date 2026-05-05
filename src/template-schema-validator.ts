@@ -41,6 +41,17 @@ export class WorkflowTemplateValidationError extends Error {
 }
 
 export function validateWorkflowTemplates(workflow: WorkflowLike): void {
+	if (
+		workflow &&
+		typeof workflow === "object" &&
+		((workflow as any).schema === "authoring" ||
+			(workflow as any).format === "authoring")
+	) {
+		throw new WorkflowTemplateValidationError(
+			"Authoring workflows must be compiled before template-schema-validator runs.",
+		);
+	}
+
 	for (const step of workflow.steps) {
 		validateStepTemplates(step, {
 			workflowName: workflow.name,
