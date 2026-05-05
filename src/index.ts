@@ -4,6 +4,11 @@ import { writeDeclaredOutput } from "./output-writer.js";
 import { createDefaultRegistry } from "./plugin-operations.js";
 import { resolveRedisClient } from "./redis-client.js";
 import {
+	readObservationJsonPath,
+	readResultSlice,
+	searchObservationText,
+} from "./sealed-spool.js";
+import {
 	FilesystemArtifactStore,
 	FilesystemStateStore,
 	RedisArtifactStore,
@@ -24,6 +29,9 @@ import {
 	WorkflowListOutputsParameters,
 	WorkflowListParameters,
 	WorkflowMaterializeOutputParameters,
+	WorkflowObservationJsonPathParameters,
+	WorkflowObservationReadParameters,
+	WorkflowObservationSearchParameters,
 	WorkflowReadOutputParameters,
 	WorkflowRunParameters,
 	WorkflowStateGetParameters,
@@ -933,6 +941,126 @@ export default definePluginEntry({
 							});
 						} catch (err) {
 							dumpError("read_output failed", err);
+							return errorResult(err);
+						}
+					},
+				},
+				{ optional: true },
+			);
+
+			api.registerTool(
+				{
+					name: "workflow_observation_read",
+					description:
+						"Read a bounded slice of a sealed observation artifact. Never returns the full artifact by default.",
+					parameters: WorkflowObservationReadParameters,
+					async execute(first, second) {
+						const {
+							run_id,
+							step_id,
+							observation_id,
+							mode = "head",
+							page = 1,
+							max_bytes = 4096,
+						} = readParams(first, second);
+
+						try {
+							const runtime = await resolveWorkflowRuntime(run_id);
+							await runtime.stateStore.loadRun(run_id);
+
+							const result = await readResultSlice({
+								artifactStore: runtime.artifactStore,
+								runId: run_id,
+								stepId: step_id,
+								outputId: observation_id,
+								mode,
+								page,
+								maxBytes: Math.min(max_bytes, 32768),
+							});
+
+							return textResult({ ok: true, ...((result as object) || {}) });
+						} catch (err) {
+							dumpError("workflow_observation_read failed", err);
+							return errorResult(err);
+						}
+					},
+				},
+				{ optional: true },
+			);
+
+			api.registerTool(
+				{
+					name: "workflow_observation_search",
+					description:
+						"Search within a sealed observation artifact and return bounded snippets only.",
+					parameters: WorkflowObservationSearchParameters,
+					async execute(first, second) {
+						const {
+							run_id,
+							step_id,
+							observation_id,
+							query,
+							max_matches = 10,
+							context_bytes = 256,
+						} = readParams(first, second);
+
+						try {
+							const runtime = await resolveWorkflowRuntime(run_id);
+							await runtime.stateStore.loadRun(run_id);
+
+							const result = await searchObservationText({
+								artifactStore: runtime.artifactStore,
+								runId: run_id,
+								stepId: step_id,
+								outputId: observation_id,
+								query,
+								maxMatches: max_matches,
+								contextBytes: context_bytes,
+							});
+
+							return textResult({ ok: true, ...((result as object) || {}) });
+						} catch (err) {
+							dumpError("workflow_observation_search failed", err);
+							return errorResult(err);
+						}
+					},
+				},
+				{ optional: true },
+			);
+
+			api.registerTool(
+				{
+					name: "workflow_observation_json_path",
+					description:
+						"Read a bounded JSON-path-like projection from a sealed observation artifact.",
+					parameters: WorkflowObservationJsonPathParameters,
+					async execute(first, second) {
+						const {
+							run_id,
+							step_id,
+							observation_id,
+							path,
+							max_items = 50,
+							max_bytes = 8192,
+						} = readParams(first, second);
+
+						try {
+							const runtime = await resolveWorkflowRuntime(run_id);
+							await runtime.stateStore.loadRun(run_id);
+
+							const result = await readObservationJsonPath({
+								artifactStore: runtime.artifactStore,
+								runId: run_id,
+								stepId: step_id,
+								outputId: observation_id,
+								path,
+								maxItems: max_items,
+								maxBytes: max_bytes,
+							});
+
+							return textResult({ ok: true, ...((result as object) || {}) });
+						} catch (err) {
+							dumpError("workflow_observation_json_path failed", err);
 							return errorResult(err);
 						}
 					},

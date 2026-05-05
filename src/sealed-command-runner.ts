@@ -221,8 +221,13 @@ export async function runSealedCommandStep(
 			error: "Sealed return_contract validation failed",
 			logs: JSON.stringify(
 				addEnvelopeRef(result.envelope, {
+					ok: false,
 					status: "failed",
 					kind: "json_object",
+					control: {
+						ok: false,
+						status: "failed",
+					},
 					preview: {
 						errors: validationErrors,
 					},

@@ -42,10 +42,16 @@ function buildSealedWorkerPreamble(args: {
 
 	return `
 IMPORTANT — sealed worker boundary:
-- Keep detailed tool outputs and large intermediate data out of conversational context.
-- Commit substantial artifacts through declared outputs using write_output.
-- Only report compact control-plane summaries in your final response.
-- If large data is produced, keep a short preview and reference declared output IDs.
+- Tool calls in this step return sealed observation envelopes, not raw payloads.
+- Use envelope.control to decide whether an action worked:
+	- control.ok / control.error
+	- control.url / control.title / control.page_loaded
+	- control.visible_item_count
+	- control.scroll.near_bottom
+	- control.batch_items / control.total_items / control.exhausted
+- Do not ask tools to return full DOM, full page text, full logs, or full network payloads.
+- When more detail is needed, use workflow_observation_read, workflow_observation_search, or workflow_observation_json_path with bounded max_bytes.
+- The final source of truth is declared outputs written with write_output.
 
 Execution metadata:
 - run_id: "${args.runId}"

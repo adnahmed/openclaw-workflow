@@ -642,9 +642,16 @@ export type SpawnOptions = {
 	resultPolicy?: SealedToolResultPolicy;
 	transcriptPolicy?: SealedContextFirewall;
 	artifactSink?: {
-		runId: string;
-		stepId: string;
-		spoolPrefix: string;
+		runId?: string;
+		stepId?: string;
+		spoolPrefix?: string;
+		recordObservation?: (event: {
+			tool_call_id: string;
+			tool_name?: string;
+			result: unknown;
+			control?: Record<string, unknown>;
+			elapsed_ms?: number;
+		}) => Promise<unknown>;
 	};
 };
 
@@ -825,7 +832,7 @@ export type SealedMode = "command" | "tool_worker" | "skill_worker" | "adapter";
 export type SealedOverflowMode = "fail" | "truncate" | "spool_and_summarize";
 
 export type SealedResultVisibility = {
-	mode?: "auto";
+	mode?: "auto" | "artifact_ref";
 	inline_when_safe?: boolean;
 	preserve_full_results?: boolean;
 	spool_when_large?: boolean;

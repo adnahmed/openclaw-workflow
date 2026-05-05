@@ -158,10 +158,54 @@ export const WorkflowReadOutputParameters = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const WorkflowObservationReadParameters = Type.Object(
+	{
+		run_id: Type.String(),
+		step_id: Type.String(),
+		observation_id: Type.String(),
+		mode: Type.Optional(
+			Type.Union([
+				Type.Literal("head"),
+				Type.Literal("tail"),
+				Type.Literal("page"),
+			]),
+		),
+		page: Type.Optional(Type.Number({ minimum: 1 })),
+		max_bytes: Type.Optional(Type.Number({ minimum: 1, maximum: 32768 })),
+	},
+	{ additionalProperties: false },
+);
+
+export const WorkflowObservationSearchParameters = Type.Object(
+	{
+		run_id: Type.String(),
+		step_id: Type.String(),
+		observation_id: Type.String(),
+		query: Type.String(),
+		max_matches: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })),
+		context_bytes: Type.Optional(Type.Number({ minimum: 16, maximum: 2048 })),
+	},
+	{ additionalProperties: false },
+);
+
+export const WorkflowObservationJsonPathParameters = Type.Object(
+	{
+		run_id: Type.String(),
+		step_id: Type.String(),
+		observation_id: Type.String(),
+		path: Type.String(),
+		max_items: Type.Optional(Type.Number({ minimum: 1, maximum: 200 })),
+		max_bytes: Type.Optional(Type.Number({ minimum: 128, maximum: 32768 })),
+	},
+	{ additionalProperties: false },
+);
+
 export const WorkflowListOutputsParameters = Type.Object(
 	{
 		run_id: Type.String({ description: "The workflow run ID." }),
-		step_id: Type.Optional(Type.String({ description: "Optional step filter." })),
+		step_id: Type.Optional(
+			Type.String({ description: "Optional step filter." }),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -202,6 +246,9 @@ export const toolSchemas = {
 	workflow_step_complete: WorkflowStepCompleteParameters,
 	write_output: WorkflowWriteOutputParameters,
 	read_output: WorkflowReadOutputParameters,
+	workflow_observation_read: WorkflowObservationReadParameters,
+	workflow_observation_search: WorkflowObservationSearchParameters,
+	workflow_observation_json_path: WorkflowObservationJsonPathParameters,
 	list_outputs: WorkflowListOutputsParameters,
 	materialize_output: WorkflowMaterializeOutputParameters,
 	workflow_state_get: WorkflowStateGetParameters,

@@ -47,6 +47,7 @@ import {
 } from "./native-state-boundary.js";
 import { checkOutputs, checkStepContract } from "./output-checker.js";
 import { normalizeSealedSpec } from "./sealed-policy.js";
+import { spoolValue } from "./sealed-spool.js";
 import {
 	type CancelResult,
 	type MockAdapterOptions,
@@ -470,6 +471,19 @@ ${blocks.join("\n\n")}
 `;
 }
 
+function usesOutputCompletion(step: {
+	complete_when?: string;
+	outputs?: unknown[];
+}): boolean {
+	return (
+		Array.isArray(step.outputs) &&
+		step.outputs.length > 0 &&
+		(step.complete_when === "outputs" ||
+			step.complete_when === "handoff_or_outputs" ||
+			step.complete_when === "session_then_outputs")
+	);
+}
+
 function sha256ForFile(filePath: string): string | null {
 	try {
 		const raw = fs.readFileSync(filePath);
@@ -722,6 +736,98 @@ function requiresSealedRuntime(step, sealed = step?.sealed): boolean {
 	);
 }
 
+function getRuntimeSealedCapabilities(
+	api: any,
+): Record<string, unknown> | null {
+	const sealedCaps =
+		api?.runtime?.subagent?.capabilities?.sealed ??
+		api?.runtime?.subagent?.sealedCapabilities ??
+		null;
+
+	return sealedCaps && typeof sealedCaps === "object"
+		? (sealedCaps as Record<string, unknown>)
+		: null;
+}
+
+function assertRuntimeSealedCapabilities(
+	api: any,
+	step,
+	sealed = step?.sealed,
+) {
+	if (!requiresSealedRuntime(step, sealed)) return;
+
+	const sealedCaps = getRuntimeSealedCapabilities(api);
+
+	if (!sealedCaps?.toolResultInterception) {
+		throw new Error(
+			`Cannot run sealed tool_worker "${step.id}": runtime does not explicitly advertise enforced tool-result interception.`,
+		);
+	}
+
+	if (!sealedCaps?.transcriptFirewall) {
+		throw new Error(
+			`Cannot run sealed tool_worker "${step.id}": runtime does not explicitly advertise enforced transcript firewalling.`,
+		);
+	}
+
+	if (!sealedCaps?.artifactSink) {
+		throw new Error(
+			`Cannot run sealed tool_worker "${step.id}": runtime does not explicitly advertise enforced artifact sink support.`,
+		);
+	}
+}
+
+function buildSealedArtifactSink(args: {
+	sealed: any;
+	artifactStore: any;
+	runId: string;
+	stepId: string;
+}) {
+	if (!args.sealed) return undefined;
+
+	const maxPreviewBytes =
+		typeof args.sealed?.tool_result_policy?.max_context_injection_bytes ===
+		"number"
+			? Math.max(64, args.sealed.tool_result_policy.max_context_injection_bytes)
+			: 2048;
+
+	if (!args.artifactStore) {
+		return {
+			runId: args.runId,
+			stepId: args.stepId,
+			spoolPrefix: `__sealed_spool/${args.stepId}`,
+		};
+	}
+
+	return {
+		runId: args.runId,
+		stepId: args.stepId,
+		spoolPrefix: `__sealed_spool/${args.stepId}`,
+		async recordObservation(event: {
+			tool_call_id: string;
+			tool_name?: string;
+			result: unknown;
+			control?: Record<string, unknown>;
+			elapsed_ms?: number;
+		}) {
+			const outputId = `observation_${event.tool_call_id}`;
+
+			return spoolValue({
+				artifactStore: args.artifactStore,
+				runId: args.runId,
+				stepId: args.stepId,
+				outputId,
+				value: event.result,
+				toolCallId: event.tool_call_id,
+				toolName: event.tool_name,
+				control: event.control,
+				elapsedMs: event.elapsed_ms,
+				maxPreviewBytes,
+			});
+		},
+	};
+}
+
 function missingAdapterCapabilities(
 	adapter: SessionAdapter,
 	required: Partial<SessionAdapterCapabilities>,
@@ -803,6 +909,17 @@ export function assertWorkflowSessionAdapter(
 	workflow: WorkflowDefinition,
 ) {
 	if (!workflowRequiresSealedRuntime(workflow)) return;
+
+	const sealedCaps = getRuntimeSealedCapabilities(api);
+	if (
+		!sealedCaps?.toolResultInterception ||
+		!sealedCaps?.transcriptFirewall ||
+		!sealedCaps?.artifactSink
+	) {
+		throw new Error(
+			"Cannot run workflow requiring sealed tool_worker enforcement: runtime does not explicitly advertise sealed interception/firewall/artifact capabilities.",
+		);
+	}
 
 	selectAdapter(
 		api,
@@ -1063,6 +1180,7 @@ export async function runStep(step, runId, api, options) {
 		const sealed =
 			(options as any).sealed ||
 			(step.kind === "sealed" ? normalizeSealedSpec(step.sealed) : undefined);
+		assertRuntimeSealedCapabilities(api, step, sealed);
 		const adapter = selectAdapter(
 			api,
 			options.sessionAdapter || "auto",
@@ -1138,13 +1256,12 @@ export async function runStep(step, runId, api, options) {
 			sealed,
 			resultPolicy: sealed?.tool_result_policy,
 			transcriptPolicy: sealed?.context_firewall,
-			artifactSink: sealed
-				? {
-						runId,
-						stepId: step.id,
-						spoolPrefix: `__sealed_spool/${step.id}`,
-					}
-				: undefined,
+			artifactSink: buildSealedArtifactSink({
+				sealed,
+				artifactStore,
+				runId,
+				stepId: step.id,
+			}),
 			cronDeliveryMode,
 			cronDeliveryChannel,
 			cronDeliveryTo,
@@ -1211,12 +1328,7 @@ export async function runStep(step, runId, api, options) {
 					? options.getStepState()
 					: null;
 
-			if (
-				(step.complete_when === "outputs" ||
-					step.complete_when === "handoff_or_outputs") &&
-				step.outputs &&
-				step.outputs.length > 0
-			) {
+			if (usesOutputCompletion(step)) {
 				outputCheck = await runOutputCheck();
 
 				if (outputCheck.passed) {
@@ -2326,6 +2438,7 @@ export function createStepRunner(adapter) {
 			const sealed =
 				(options as any).sealed ||
 				(step.kind === "sealed" ? normalizeSealedSpec(step.sealed) : undefined);
+			assertRuntimeSealedCapabilities(_api, step, sealed);
 			assertAdapterCanRunSealedToolWorker(adapter, step, sealed);
 			const signalingPreamble = buildWorkflowSignalingPreamble({
 				step,
@@ -2355,13 +2468,12 @@ export function createStepRunner(adapter) {
 				sealed,
 				resultPolicy: sealed?.tool_result_policy,
 				transcriptPolicy: sealed?.context_firewall,
-				artifactSink: sealed
-					? {
-							runId,
-							stepId: step.id,
-							spoolPrefix: `__sealed_spool/${step.id}`,
-						}
-					: undefined,
+				artifactSink: buildSealedArtifactSink({
+					sealed,
+					artifactStore: options.artifactStore,
+					runId,
+					stepId: step.id,
+				}),
 			});
 			sessionKey = spawnResult.sessionKey;
 
@@ -2403,11 +2515,7 @@ export function createStepRunner(adapter) {
 						? options.getStepState()
 						: null;
 
-				if (
-					(step.complete_when === "outputs" ||
-						step.complete_when === "handoff_or_outputs") &&
-					step.outputs?.length
-				) {
+				if (usesOutputCompletion(step)) {
 					outputCheck = await runOutputCheck();
 
 					if (outputCheck.passed) {
