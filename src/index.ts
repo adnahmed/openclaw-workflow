@@ -7,6 +7,7 @@ import {
 	readObservationJsonPath,
 	readResultSlice,
 	searchObservationText,
+	spoolValue,
 } from "./sealed-spool.js";
 import {
 	FilesystemArtifactStore,
@@ -23,7 +24,11 @@ import {
 	validateStepContract,
 	writeStepCacheManifest,
 } from "./step-contract.js";
-import { cancelStepSession, runStep } from "./step-runner.js";
+import {
+	cancelStepSession,
+	resolveActiveSealedRunForToolResult,
+	runStep,
+} from "./step-runner.js";
 import {
 	WorkflowCancelParameters,
 	WorkflowListOutputsParameters,
@@ -591,6 +596,82 @@ export default definePluginEntry({
 					}
 				}
 			}
+
+			// ── Sealed tool-result middleware (fail-closed) ─────────────────────
+			let middlewareRegistered = false;
+
+			if (typeof api.registerAgentToolResultMiddleware === "function") {
+				try {
+					api.registerAgentToolResultMiddleware(
+						async (event, ctx) => {
+							const active = resolveActiveSealedRunForToolResult(event, ctx);
+
+							// Non-workflow / non-sealed runs pass through untouched.
+							if (!active) {
+								return;
+							}
+
+							const outputId = `observation_${event.toolCallId}`;
+
+							const envelope = await spoolValue({
+								artifactStore: active.artifactStore,
+								runId: active.runId,
+								stepId: active.stepId,
+								outputId,
+								value: event.result,
+								toolCallId: event.toolCallId,
+								toolName: event.toolName,
+								control: {
+									ok: !event.isError,
+									status: event.isError ? "failed" : "ok",
+								},
+								maxPreviewBytes: active.maxPreviewBytes ?? 2048,
+							});
+
+							return {
+								result: {
+									content: [
+										{
+											type: "text",
+											text: JSON.stringify(envelope),
+										},
+									],
+									details: {
+										openclaw_workflow_sealed: true,
+										observation_ref:
+											envelope.observation_ref ?? envelope.result_ref,
+										tool_call_id: event.toolCallId,
+										tool_name: event.toolName,
+										bytes: envelope.bytes,
+										kind: envelope.kind,
+										truncated_for_context: envelope.truncated_for_context,
+									},
+								},
+							};
+						},
+						{ runtimes: ["pi", "codex"] },
+					);
+					middlewareRegistered = true;
+				} catch (err) {
+					middlewareRegistered = false;
+					logger.warn(
+						`[workflow] agentToolResultMiddleware registration failed: ${
+							err instanceof Error ? err.message : String(err)
+						}`,
+					);
+				}
+			} else {
+				logger.warn(
+					"[workflow] api.registerAgentToolResultMiddleware is not available; sealed tool_worker observation spooling is disabled.",
+				);
+			}
+
+			if (!middlewareRegistered && config.requireSealedToolResultMiddleware) {
+				throw new Error(
+					"openclaw-workflow requires agentToolResultMiddleware for sealed browser/model workers.",
+				);
+			}
+			// ─────────────────────────────────────────────────────────────────────
 
 			if (config.autoResumeOnStartup && api.registrationMode === "full") {
 				api.registerService?.({

@@ -34,7 +34,71 @@ openclaw plugins install openclaw-workflow --dangerously-force-unsafe-install
 
 `--dangerously-force-unsafe-install` is currently required because the plugin intentionally imports `node:child_process` for the CLI session fallback used when OpenClaw does not expose a stable native session API to plugins.
 
-Configure the plugin in your OpenClaw settings:
+> **Note:** When installing via `--link` (local development), use the long form `--link .` rather than the shorthand `-l .` to avoid a known OpenClaw CLI argument-parsing ambiguity where `-l` may not be recognized.
+
+---
+
+## Sealed Tool-Result Middleware: Patch & Install
+
+Sealed `tool_worker` steps intercept every tool result **before** the model sees it, spool the raw payload to the artifact store, and return only a bounded envelope to the model. This requires the plugin to register `agentToolResultMiddleware` — an API that OpenClaw currently restricts to bundled (first-party) plugins.
+
+### Why two steps are needed
+
+| Step | Command | What it does |
+|------|---------|--------------|
+| **1. Patch** | `node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow` | Edits the OpenClaw gateway source to whitelist `openclaw-workflow` as a trusted external plugin for `registerAgentToolResultMiddleware`. Without this, OpenClaw rejects the middleware registration at startup with "only bundled plugins can register agent tool result middleware". |
+| **2. Install** | `openclaw plugins install --link . --dangerously-force-unsafe-install` | Installs the plugin from your local checkout as a linked (symlinked) plugin. `--link` means OpenClaw loads directly from your working directory — no copy step needed. `--dangerously-force-unsafe-install` bypasses the unsafe-import check that would otherwise block the plugin because it uses `node:child_process`. |
+
+### Full setup sequence (development)
+
+```bash
+# 1. Build the plugin
+npm install
+npm run build
+
+# 2. Patch OpenClaw to trust this plugin for agentToolResultMiddleware
+node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow
+
+# 3. Install as a linked plugin
+openclaw plugins install --link . --dangerously-force-unsafe-install
+
+# 4. Restart the OpenClaw gateway so it picks up the patch and the linked install
+```
+
+Re-run the patch after every OpenClaw update — it only modifies the specific guard line and leaves everything else untouched. Use `--dry-run` to preview what it would change, or `--restore` to revert:
+
+```bash
+# Preview changes without writing anything
+node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow --dry-run
+
+# Revert the patch
+node scripts/patch-openclaw-trust-workflow-middleware.mjs --restore
+```
+
+### What the patch actually changes
+
+The script locates the OpenClaw gateway source file that contains both `registerAgentToolResultMiddleware` and the string `"only bundled plugins can register agent tool result middleware"`, then narrows the guard:
+
+```js
+// Before patch:
+if (record.origin !== "bundled") { /* reject */ }
+
+// After patch:
+if (record.origin !== "bundled" && record.id !== "openclaw-workflow") { /* reject */ }
+```
+
+Nothing else is modified. The patch is idempotent — running it twice is safe.
+
+### When middleware is not registered
+
+If the patch was not applied and the middleware registration fails, behavior depends on your config:
+
+- **Default (no `requireSealedToolResultMiddleware`):** Plugin starts normally; sealed `tool_worker` steps that need `recordObservationBeforeModel` will throw at runtime when they attempt to assert that capability.
+- **`requireSealedToolResultMiddleware: true`:** Plugin refuses to start entirely, which makes the failure visible at gateway startup rather than at step execution time.
+
+---
+
+Plugin config lives in `~/.openclaw/openclaw.json` under `plugins.entries."openclaw-workflow".config`:
 
 ```json
 {
@@ -55,13 +119,20 @@ Configure the plugin in your OpenClaw settings:
           "redisUrl": "redis://localhost:6379",
           "redisMcpToolPrefix": "MCP_DOCKER",
           "filesystemFallback": true,
-          "materializeOutputs": "on_demand"
+          "materializeOutputs": "on_demand",
+
+          "requireSealedToolResultMiddleware": true,
+          "sealedMaxPreviewBytes": 2048
         }
       }
     }
   }
 }
 ```
+
+> **`requireSealedToolResultMiddleware`** — Set to `true` (default) after applying the trust patch so the plugin fails at gateway startup if middleware registration is rejected, rather than silently degrading at step runtime. Set to `false` if you are not using sealed `tool_worker` steps.
+>
+> **`sealedMaxPreviewBytes`** — Controls how many bytes of each intercepted tool result are inlined into the model context. Everything beyond this limit is spooled to the artifact store and retrievable via `workflow_observation_read`. Default `2048`.
 
 State/artifact backend config notes:
 - `stateBackend`: `filesystem` \| `redis` \| `auto` \| `dual` (default `filesystem`)

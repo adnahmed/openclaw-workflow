@@ -775,6 +775,40 @@ function assertRuntimeSealedCapabilities(
 			`Cannot run sealed tool_worker "${step.id}": runtime does not explicitly advertise enforced artifact sink support.`,
 		);
 	}
+
+	if (!sealedCaps?.recordObservationBeforeModel) {
+		throw new Error(
+			`Cannot run sealed tool_worker "${step.id}": runtime does not advertise recordObservationBeforeModel — register agentToolResultMiddleware for sealed observation spooling.`,
+		);
+	}
+}
+
+export type ActiveSealedRun = {
+	artifactStore: unknown;
+	runId: string;
+	stepId: string;
+	maxPreviewBytes: number;
+};
+
+/**
+ * Registry of currently-running sealed tool_worker steps keyed by sessionKey
+ * (which Pi reports back as the threadId in agentToolResultMiddleware events).
+ */
+export const activeSealedRuns = new Map<string, ActiveSealedRun>();
+
+/**
+ * Look up the active sealed run for an incoming middleware tool-result event.
+ * Returns undefined for non-workflow / non-sealed tool calls.
+ */
+export function resolveActiveSealedRunForToolResult(
+	event: { threadId?: string; toolCallId?: string; cwd?: string },
+	_ctx?: unknown,
+): ActiveSealedRun | undefined {
+	if (event.threadId) {
+		const run = activeSealedRuns.get(event.threadId);
+		if (run) return run;
+	}
+	return undefined;
 }
 
 function buildSealedArtifactSink(args: {
@@ -792,11 +826,9 @@ function buildSealedArtifactSink(args: {
 			: 2048;
 
 	if (!args.artifactStore) {
-		return {
-			runId: args.runId,
-			stepId: args.stepId,
-			spoolPrefix: `__sealed_spool/${args.stepId}`,
-		};
+		throw new Error(
+			`Cannot run sealed tool_worker "${args.stepId}": artifactStore is required for sealed observation spooling.`,
+		);
 	}
 
 	return {
@@ -1174,6 +1206,7 @@ export async function runStep(step, runId, api, options) {
 
 	const startTime = Date.now();
 	let sessionKey = null;
+	let sealedRunKey: string | null = null;
 
 	try {
 		const model = step.model || defaultModel || null;
@@ -1271,6 +1304,21 @@ export async function runStep(step, runId, api, options) {
 			cronPollTimeoutMs,
 		});
 		sessionKey = spawnResult.sessionKey;
+
+		if (sealed && artifactStore) {
+			const maxPreviewBytes =
+				typeof sealed?.tool_result_policy?.max_context_injection_bytes ===
+				"number"
+					? Math.max(64, sealed.tool_result_policy.max_context_injection_bytes)
+					: 2048;
+			sealedRunKey = sessionKey;
+			activeSealedRuns.set(sealedRunKey, {
+				artifactStore,
+				runId,
+				stepId: step.id,
+				maxPreviewBytes,
+			});
+		}
 
 		if (options.onSpawn) {
 			try {
@@ -1493,6 +1541,8 @@ export async function runStep(step, runId, api, options) {
 			logs: null,
 			duration_ms: Date.now() - startTime,
 		};
+	} finally {
+		if (sealedRunKey) activeSealedRuns.delete(sealedRunKey);
 	}
 }
 
@@ -2432,6 +2482,7 @@ export function createStepRunner(adapter) {
 		const startTime = Date.now();
 		let sessionKey = null;
 		let failureKind: string | null = null;
+		let sealedRunKey: string | null = null;
 
 		try {
 			const model = step.model || options.defaultModel || null;
@@ -2476,6 +2527,24 @@ export function createStepRunner(adapter) {
 				}),
 			});
 			sessionKey = spawnResult.sessionKey;
+
+			if (sealed && options.artifactStore) {
+				const maxPreviewBytes =
+					typeof sealed?.tool_result_policy?.max_context_injection_bytes ===
+					"number"
+						? Math.max(
+								64,
+								sealed.tool_result_policy.max_context_injection_bytes,
+							)
+						: 2048;
+				sealedRunKey = sessionKey;
+				activeSealedRuns.set(sealedRunKey, {
+					artifactStore: options.artifactStore,
+					runId,
+					stepId: step.id,
+					maxPreviewBytes,
+				});
+			}
 
 			const timeoutMs = step.timeout * 1000;
 			const deadline = Date.now() + timeoutMs;
@@ -2669,6 +2738,8 @@ export function createStepRunner(adapter) {
 				error: err.message,
 				duration_ms: Date.now() - startTime,
 			};
+		} finally {
+			if (sealedRunKey) activeSealedRuns.delete(sealedRunKey);
 		}
 	};
 }

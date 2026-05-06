@@ -125,6 +125,19 @@ function firstString(
 	return undefined;
 }
 
+function firstStringByteLength(
+	obj: Record<string, unknown>,
+	keys: string[],
+): number | undefined {
+	for (const key of keys) {
+		const value = obj[key];
+		if (typeof value === "string") {
+			return Buffer.byteLength(value, "utf8");
+		}
+	}
+	return undefined;
+}
+
 function firstBoolean(
 	obj: Record<string, unknown>,
 	keys: string[],
@@ -289,15 +302,12 @@ export function deriveObservationControl(args: {
 		visible_text_bytes:
 			supplied.visible_text_bytes ??
 			(obj
-				? (() => {
-						const text = firstString(obj, [
-							"visible_text",
-							"text",
-							"body_text",
-							"content",
-						]);
-						return text ? Buffer.byteLength(text, "utf8") : undefined;
-					})()
+				? firstStringByteLength(obj, [
+						"visible_text",
+						"text",
+						"body_text",
+						"content",
+					])
 				: typeof value === "string"
 					? Buffer.byteLength(value, "utf8")
 					: undefined),

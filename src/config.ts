@@ -42,6 +42,7 @@ type RawPluginConfig = {
 	redisMcpServerDefinition?: Record<string, unknown> | null;
 	filesystemFallback?: boolean;
 	materializeOutputs?: "never" | "on_demand" | "always";
+	requireSealedToolResultMiddleware?: boolean;
 };
 
 type RuntimeConfig = {
@@ -125,5 +126,7 @@ export function normalizePluginConfig(
 		redisMcpServerDefinition: rawConfig.redisMcpServerDefinition ?? null,
 		filesystemFallback: rawConfig.filesystemFallback !== false,
 		materializeOutputs: rawConfig.materializeOutputs || "on_demand",
+		requireSealedToolResultMiddleware:
+			rawConfig.requireSealedToolResultMiddleware === true,
 	};
 }

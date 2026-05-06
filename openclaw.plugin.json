@@ -4,6 +4,10 @@
   "description": "YAML/JSON-driven workflow orchestration for OpenClaw agents with dependency graphs, parallel execution, retries, output gates, dry runs, cancellation, resume, and persisted run state.",
   "version": "1.0.0",
   "contracts": {
+    "agentToolResultMiddleware": [
+      "pi",
+      "codex"
+    ],
     "tools": [
       "workflow_run",
       "workflow_status",
@@ -20,7 +24,7 @@
   },
   "configSchema": {
     "type": "object",
-    "additionalProperties": false,
+    "additionalProperties": true,
     "properties": {
       "workflowsDir": {
         "type": "string",
@@ -169,6 +173,16 @@
           "always"
         ],
         "description": "Controls when artifact outputs are materialized to filesystem paths."
+      },
+      "requireSealedToolResultMiddleware": {
+        "type": "boolean",
+        "default": true,
+        "description": "When true, plugin startup fails if agentToolResultMiddleware could not be registered. Requires the openclaw-workflow trust patch to be applied. Defaults to true."
+      },
+      "sealedMaxPreviewBytes": {
+        "type": "number",
+        "default": 2048,
+        "description": "Maximum bytes of a sealed tool-result payload to inline into the model context window. The rest is spooled to the artifact store and accessible via observation tools."
       }
     }
   },
@@ -247,6 +261,17 @@
     "filesystemFallback": {
       "label": "Filesystem fallback",
       "help": "Fallback to filesystem when Redis is unavailable.",
+      "advanced": true
+    },
+    "requireSealedToolResultMiddleware": {
+      "label": "Require sealed middleware",
+      "help": "Fail plugin startup if agentToolResultMiddleware could not be registered. Only effective after applying the openclaw-workflow trust patch.",
+      "advanced": true
+    },
+    "sealedMaxPreviewBytes": {
+      "label": "Sealed preview bytes",
+      "help": "Bytes of a sealed tool result to inline into the model context. Remainder is spooled to artifact store.",
+      "placeholder": "2048",
       "advanced": true
     }
   }
