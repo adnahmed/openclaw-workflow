@@ -1,8 +1,13 @@
+import { Type } from "@sinclair/typebox";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizePluginConfig } from "./config.js";
 import { writeDeclaredOutput } from "./output-writer.js";
 import { createDefaultRegistry } from "./plugin-operations.js";
 import { resolveRedisClient } from "./redis-client.js";
+import {
+	getSealedMiddlewareCapabilities,
+	markSealedMiddlewareReady,
+} from "./sealed-middleware-status.js";
 import {
 	deriveToolResultControl,
 	readObservationJsonPath,
@@ -601,21 +606,6 @@ export default definePluginEntry({
 			// ── Sealed tool-result middleware (fail-closed) ─────────────────────
 			let middlewareRegistered = false;
 
-			function markSealedMiddlewareReady(api: any) {
-				api.runtime ??= {};
-				api.runtime.subagent ??= {};
-				api.runtime.subagent.capabilities ??= {};
-				api.runtime.subagent.capabilities.sealed ??= {};
-
-				Object.assign(api.runtime.subagent.capabilities.sealed, {
-					toolResultInterception: true,
-					transcriptFirewall: true,
-					artifactSink: true,
-					recordObservationBeforeModel: true,
-					source: "agentToolResultMiddleware",
-				});
-			}
-
 			const PASSTHROUGH_TOOLS = new Set([
 				"workflow_observation_read",
 				"workflow_observation_search",
@@ -687,7 +677,7 @@ export default definePluginEntry({
 						{ runtimes: ["pi", "codex"] },
 					);
 					middlewareRegistered = true;
-					markSealedMiddlewareReady(api);
+					markSealedMiddlewareReady();
 				} catch (err) {
 					middlewareRegistered = false;
 					logger.warn(
@@ -1954,26 +1944,15 @@ export default definePluginEntry({
 			api.registerTool({
 				name: "workflow_runtime_patch_status",
 				description: "Report sealed tool-result middleware status.",
-				parameters: {},
+				parameters: Type.Object({}, { additionalProperties: false }),
 				optional: true,
 				async execute() {
-					const caps =
-						(api as any).runtime?.subagent?.capabilities?.sealed ?? null;
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify(
-									{
-										ok: Boolean(caps?.recordObservationBeforeModel),
-										capabilities: caps,
-									},
-									null,
-									2,
-								),
-							},
-						],
-					};
+					const caps = getSealedMiddlewareCapabilities();
+
+					return textResult({
+						ok: Boolean(caps?.recordObservationBeforeModel),
+						capabilities: caps,
+					});
 				},
 			});
 		} catch (err) {

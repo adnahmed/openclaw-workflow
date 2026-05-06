@@ -46,6 +46,7 @@ import {
 	filterSubagentMcpServers,
 } from "./native-state-boundary.js";
 import { checkOutputs, checkStepContract } from "./output-checker.js";
+import { isSealedMiddlewareReady } from "./sealed-middleware-status.js";
 import { normalizeSealedSpec } from "./sealed-policy.js";
 import { spoolValue } from "./sealed-spool.js";
 import {
@@ -737,49 +738,14 @@ function requiresSealedRuntime(step, sealed = step?.sealed): boolean {
 	);
 }
 
-function getRuntimeSealedCapabilities(
-	api: any,
-): Record<string, unknown> | null {
-	const sealedCaps =
-		api?.runtime?.subagent?.capabilities?.sealed ??
-		api?.runtime?.subagent?.sealedCapabilities ??
-		null;
-
-	return sealedCaps && typeof sealedCaps === "object"
-		? (sealedCaps as Record<string, unknown>)
-		: null;
-}
-
 function assertRuntimeSealedCapabilities(
-	api: any,
+	_api: any,
 	step,
 	sealed = step?.sealed,
 ) {
-	if (!requiresSealedRuntime(step, sealed)) return;
-
-	const sealedCaps = getRuntimeSealedCapabilities(api);
-
-	if (!sealedCaps?.toolResultInterception) {
+	if (requiresSealedRuntime(step, sealed) && !isSealedMiddlewareReady()) {
 		throw new Error(
-			`Cannot run sealed tool_worker "${step.id}": runtime does not explicitly advertise enforced tool-result interception.`,
-		);
-	}
-
-	if (!sealedCaps?.transcriptFirewall) {
-		throw new Error(
-			`Cannot run sealed tool_worker "${step.id}": runtime does not explicitly advertise enforced transcript firewalling.`,
-		);
-	}
-
-	if (!sealedCaps?.artifactSink) {
-		throw new Error(
-			`Cannot run sealed tool_worker "${step.id}": runtime does not explicitly advertise enforced artifact sink support.`,
-		);
-	}
-
-	if (!sealedCaps?.recordObservationBeforeModel) {
-		throw new Error(
-			`Cannot run sealed tool_worker "${step.id}": runtime does not advertise recordObservationBeforeModel — register agentToolResultMiddleware for sealed observation spooling.`,
+			`Cannot run sealed tool_worker "${step.id}": agentToolResultMiddleware is not registered.`,
 		);
 	}
 }
@@ -952,14 +918,9 @@ export function assertWorkflowSessionAdapter(
 ) {
 	if (!workflowRequiresSealedRuntime(workflow)) return;
 
-	const sealedCaps = getRuntimeSealedCapabilities(api);
-	if (
-		!sealedCaps?.toolResultInterception ||
-		!sealedCaps?.transcriptFirewall ||
-		!sealedCaps?.artifactSink
-	) {
+	if (!isSealedMiddlewareReady()) {
 		throw new Error(
-			"Cannot run workflow requiring sealed tool_worker enforcement: runtime does not explicitly advertise sealed interception/firewall/artifact capabilities.",
+			"Cannot run workflow requiring sealed tool_worker enforcement: agentToolResultMiddleware is not registered.",
 		);
 	}
 
