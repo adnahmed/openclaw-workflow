@@ -74,6 +74,8 @@ import {
 } from "./step-runner.js";
 import { validateWorkflowTemplates } from "./template-schema-validator.js";
 import type {
+	PluginOperationContext,
+	PluginOperationResult,
 	RunState,
 	StateDrainSpec,
 	StepState,
@@ -710,13 +712,63 @@ export async function executeWorkflow(
 		const prefix = drainIterationPrefix(parentStep.id, iteration);
 		const innerIds = new Set(innerSteps.map((s) => s.id));
 
-		return {
-			...substitutedChild,
-			depends_on: (substitutedChild.depends_on ?? []).map((depId) => {
-				if (innerIds.has(depId)) return prefix + depId;
-				return depId;
-			}),
+		const remapLocal = (value: unknown): unknown => {
+			if (typeof value === "string" && innerIds.has(value)) {
+				return prefix + value;
+			}
+			return value;
 		};
+
+		const remapFromStepObject = (value: unknown): unknown => {
+			if (!value || typeof value !== "object" || Array.isArray(value)) {
+				return value;
+			}
+
+			const record = value as Record<string, unknown>;
+
+			return {
+				...record,
+				from_step: remapLocal(record.from_step),
+			};
+		};
+
+		const remapFromStepSpec = (value: unknown): unknown => {
+			if (Array.isArray(value)) {
+				return value.map(remapFromStepObject);
+			}
+			return remapFromStepObject(value);
+		};
+
+		const remapped: WorkflowStep = {
+			...substitutedChild,
+			depends_on: (substitutedChild.depends_on ?? []).map(
+				(depId) => remapLocal(depId) as string,
+			),
+		};
+
+		if (remapped.state_complete) {
+			remapped.state_complete = remapFromStepSpec(
+				remapped.state_complete,
+			) as WorkflowStep["state_complete"];
+		}
+
+		if (remapped.state_publish) {
+			remapped.state_publish = remapFromStepSpec(
+				remapped.state_publish,
+			) as WorkflowStep["state_publish"];
+		}
+
+		if (remapped.input?.claim?.from_step) {
+			remapped.input = {
+				...remapped.input,
+				claim: {
+					...remapped.input.claim,
+					from_step: remapLocal(remapped.input.claim.from_step) as string,
+				},
+			};
+		}
+
+		return remapped;
 	}
 
 	async function appendDrainIteration(
@@ -1148,6 +1200,103 @@ export async function executeWorkflow(
 		const start = Date.now();
 		const usesId = step.uses;
 
+		async function runPluginOperationSafe(args: {
+			registry: PluginOperationRegistry;
+			operation: string;
+			ctx: PluginOperationContext;
+		}): Promise<PluginOperationResult> {
+			const startedAt = Date.now();
+
+			try {
+				const operation = args.registry.get(args.operation);
+
+				if (!operation) {
+					return {
+						status: "failed",
+						retryable: false,
+						output_check: {
+							passed: false,
+							decision: "fail",
+							missing_files: [],
+							checked_files: [],
+							validations: [
+								{
+									path: "",
+									exists: false,
+									decision: "fail",
+									errors: [
+										`Unknown plugin operation "${args.operation}".`,
+									],
+								},
+							],
+						},
+						error: `Unknown plugin operation "${args.operation}".`,
+						logs: null,
+						duration_ms: Date.now() - startedAt,
+					};
+				}
+
+				const result = await operation.run(args.ctx);
+
+				if (!result || typeof result !== "object") {
+					return {
+						status: "failed",
+						retryable: false,
+						output_check: {
+							passed: false,
+							decision: "fail",
+							missing_files: [],
+							checked_files: [],
+							validations: [
+								{
+									path: "",
+									exists: false,
+									decision: "fail",
+									errors: [
+										`Plugin operation "${args.operation}" returned an invalid result.`,
+									],
+								},
+							],
+						},
+						error: `Plugin operation "${args.operation}" returned an invalid result.`,
+						logs: null,
+						duration_ms: Date.now() - startedAt,
+					};
+				}
+
+				return result;
+			} catch (error) {
+				return {
+					status: "failed",
+					retryable: true,
+					output_check: {
+						passed: false,
+						decision: "fail",
+						missing_files: [],
+						checked_files: [],
+						validations: [
+							{
+								path: "",
+								exists: false,
+								decision: "fail",
+								errors: [
+									error instanceof Error
+										? error.stack ?? error.message
+										: String(error),
+								],
+							},
+						],
+					},
+					error:
+						error instanceof Error
+							? error.stack ?? error.message
+							: String(error),
+					logs: null,
+					duration_ms: Date.now() - startedAt,
+				};
+			}
+		}
+
 		if (!usesId) {
 			return {
 				status: "failed" as const,
@@ -1172,8 +1321,7 @@ export async function executeWorkflow(
 			};
 		}
 
-		const operation = ctx.pluginRegistry?.get(usesId);
-		if (!operation) {
+		if (!ctx.pluginRegistry) {
 			const available = ctx.pluginRegistry
 				? ctx.pluginRegistry
 						.list()
@@ -1217,33 +1365,11 @@ export async function executeWorkflow(
 			validators: ctx.workflow.validators || {},
 		};
 
-		let opResult;
-		try {
-			opResult = await operation.run(opCtx);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			return {
-				status: "failed" as const,
-				retryable: true,
-				output_check: {
-					passed: false,
-					decision: "fail" as const,
-					missing_files: [],
-					checked_files: [],
-					validations: [
-						{
-							path: "",
-							exists: false,
-							decision: "fail" as const,
-							errors: [msg],
-						},
-					],
-				},
-				error: msg,
-				logs: null,
-				duration_ms: Date.now() - start,
-			};
-		}
+		const opResult = await runPluginOperationSafe({
+			registry: ctx.pluginRegistry,
+			operation: usesId,
+			ctx: opCtx,
+		});
 
 		// Map to StepRunResult shape
 		return {
@@ -1354,18 +1480,56 @@ export async function executeWorkflow(
 				}
 
 				let result;
-				let injected = { context: {}, logs: [] as string[] };
+				let injectedContext: Record<string, unknown> = {};
+				let injectedContextLogs: string[] = [];
 
 				if (step.kind !== "plugin") {
-					injected = await resolveInjectedContextForStep({
-						artifactStore,
-						runId,
-						step,
-					});
+					try {
+						const resolved = await resolveInjectedContextForStep({
+							artifactStore,
+							runId,
+							step,
+						});
+						injectedContext = resolved.context;
+						injectedContextLogs = resolved.logs;
+					} catch (error) {
+						const message =
+							error instanceof Error ? error.message : String(error);
+
+						result = {
+							status: "failed",
+							retryable: false,
+							error: `Claim context resolution failed for step "${step.id}": ${message}`,
+							logs: JSON.stringify(
+								{
+									phase: "claim_context_resolution",
+									step_id: step.id,
+									error: message,
+								},
+								null,
+								2,
+							),
+							output_check: {
+								passed: false,
+								decision: "fail",
+								missing_files: [],
+								checked_files: [],
+								validations: [
+									{
+										path: "",
+										exists: false,
+										decision: "fail",
+										errors: [message],
+									},
+								],
+							},
+							duration_ms: 0,
+						} as PluginOperationResult;
+					}
 				}
 
 				// ── Plugin step path ──────────────────────────────────────────────────────
-				if (step.kind === "plugin") {
+				if (!result && step.kind === "plugin") {
 					result = await runPluginStep(step, {
 						workflow,
 						runId,
@@ -1375,7 +1539,7 @@ export async function executeWorkflow(
 						pluginRegistry,
 						redis,
 					});
-				} else if (step.kind === "sealed") {
+				} else if (!result && step.kind === "sealed") {
 					result = await runSealedStep(step, runId, api, {
 						pollIntervalMs,
 						baseDir,
@@ -1397,8 +1561,8 @@ export async function executeWorkflow(
 						artifactStore,
 						filesystemFallback: config.filesystemFallback !== false,
 						workflow,
-						injectedContext: injected.context,
-						injectedContextLogs: injected.logs,
+						injectedContext,
+						injectedContextLogs,
 						getStepState: () => state.steps[step.id],
 						onSpawn: async (spawn) => {
 							await mutateState(() =>
@@ -1413,7 +1577,7 @@ export async function executeWorkflow(
 							);
 						},
 					});
-				} else {
+				} else if (!result) {
 					try {
 						result = await stepRunner(step, runId, api, {
 							pollIntervalMs,
@@ -1436,8 +1600,8 @@ export async function executeWorkflow(
 							artifactStore,
 							filesystemFallback: config.filesystemFallback !== false,
 							workflow,
-							injectedContext: injected.context,
-							injectedContextLogs: injected.logs,
+							injectedContext,
+							injectedContextLogs,
 							getStepState: () => state.steps[step.id],
 
 							onSpawn: async (spawn) => {
@@ -1464,8 +1628,8 @@ export async function executeWorkflow(
 					}
 				} // end else (subagent path)
 
-				if (injected.logs.length > 0) {
-					result.logs = [result.logs, ...injected.logs]
+				if (injectedContextLogs.length > 0) {
+					result.logs = [result.logs, ...injectedContextLogs]
 						.filter(Boolean)
 						.join("\n");
 				}
