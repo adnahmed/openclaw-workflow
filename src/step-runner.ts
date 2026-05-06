@@ -765,7 +765,7 @@ export const activeSealedRuns = new Map<string, ActiveSealedRun>();
 
 /**
  * Look up the active sealed run for an incoming middleware tool-result event.
- * Resolves by multiple keys: threadId, sessionKey, sessionId, runId.
+ * Resolves by multiple keys: threadId, sessionKey, sessionId, and runtime run IDs.
  * Returns undefined for non-workflow / non-sealed tool calls.
  */
 export function resolveActiveSealedRunForToolResult(
@@ -776,8 +776,10 @@ export function resolveActiveSealedRunForToolResult(
 		event?.threadId && `threadId:${event.threadId}`,
 		ctx?.sessionKey && `sessionKey:${ctx.sessionKey}`,
 		ctx?.sessionId && `sessionId:${ctx.sessionId}`,
-		ctx?.runId && `runId:${ctx.runId}`,
-	].filter(Boolean);
+		// OpenClaw runtime runId may alias the Pi embedded session/run id.
+		ctx?.runId && `sessionId:${ctx.runId}`,
+		ctx?.runId && `runtimeRunId:${ctx.runId}`,
+	].filter(Boolean) as string[];
 
 	if (
 		process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||
@@ -1345,6 +1347,7 @@ export async function runStep(step, runId, api, options) {
 			addActiveKey(`sessionKey:${sessionKey}`);
 			if (spawnResult.sessionId) {
 				addActiveKey(`sessionId:${spawnResult.sessionId}`);
+				addActiveKey(`runtimeRunId:${spawnResult.sessionId}`);
 			}
 			if (runId) {
 				addActiveKey(`runId:${runId}`);
@@ -2645,6 +2648,7 @@ export function createStepRunner(adapter) {
 				addActiveKey(`sessionKey:${sessionKey}`);
 				if (spawnResult.sessionId) {
 					addActiveKey(`sessionId:${spawnResult.sessionId}`);
+					addActiveKey(`runtimeRunId:${spawnResult.sessionId}`);
 				}
 				if (runId) {
 					addActiveKey(`runId:${runId}`);

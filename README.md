@@ -46,7 +46,7 @@ Sealed `tool_worker` steps intercept every tool result **before** the model sees
 
 | Step | Command | What it does |
 |------|---------|--------------|
-| **1. Patch** | `node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow` | Edits the OpenClaw gateway source to whitelist `openclaw-workflow` as a trusted external plugin for `registerAgentToolResultMiddleware`. Without this, OpenClaw rejects the middleware registration at startup with "only bundled plugins can register agent tool result middleware". |
+| **1. Patch** | `node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow` | Edits the OpenClaw gateway/runtime so `openclaw-workflow` is trusted for `registerAgentToolResultMiddleware` **and** Pi middleware receives stable session/run context (`sessionId`, `sessionKey`, `runId`). Without this, OpenClaw either rejects the middleware registration entirely or emits Pi `tool_result` events without enough identity to resolve the active sealed run reliably. |
 | **2. Install** | `openclaw plugins install --link . --dangerously-force-unsafe-install` | Installs the plugin from your local checkout as a linked (symlinked) plugin. `--link` means OpenClaw loads directly from your working directory — no copy step needed. `--dangerously-force-unsafe-install` bypasses the unsafe-import check that would otherwise block the plugin because it uses `node:child_process`. |
 
 ### Full setup sequence (development)
@@ -56,7 +56,7 @@ Sealed `tool_worker` steps intercept every tool result **before** the model sees
 npm install
 npm run build
 
-# 2. Patch OpenClaw to trust this plugin for agentToolResultMiddleware
+# 2. Patch OpenClaw middleware trust + Pi runtime context
 node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow
 
 # 3. Install as a linked plugin
@@ -65,7 +65,7 @@ openclaw plugins install --link . --dangerously-force-unsafe-install
 # 4. Restart the OpenClaw gateway so it picks up the patch and the linked install
 ```
 
-Re-run the patch after every OpenClaw update — it only modifies the specific guard line and leaves everything else untouched. Use `--dry-run` to preview what it would change, or `--restore` to revert:
+Re-run the patch after every OpenClaw update — it only modifies the middleware trust guard and, when a source checkout is available, the Pi embedded-runner middleware context wiring. Use `--dry-run` to preview what it would change, or `--restore` to revert:
 
 ```bash
 # Preview changes without writing anything
@@ -77,7 +77,7 @@ node scripts/patch-openclaw-trust-workflow-middleware.mjs --restore
 
 ### What the patch actually changes
 
-The script locates the OpenClaw gateway source file that contains both `registerAgentToolResultMiddleware` and the string `"only bundled plugins can register agent tool result middleware"`, then narrows the guard:
+The script locates the OpenClaw gateway/runtime files that contain the middleware trust guard and patches that guard:
 
 ```js
 // Before patch:
@@ -88,6 +88,32 @@ if (record.origin !== "bundled" && record.id !== "openclaw-workflow") { /* rejec
 ```
 
 Nothing else is modified. The patch is idempotent — running it twice is safe.
+
+When the OpenClaw source checkout contains `src/agents/pi-embedded-runner/extensions.ts`, the same script also patches the Pi `tool_result` extension boundary so the middleware runner is built with stable identity from `sessionManager`:
+
+```ts
+const middlewareCtx = {
+  runtime: "pi",
+  agentId: sessionManagerAny.agentId ?? sessionManagerAny.agent?.id,
+  sessionId:
+    sessionManagerAny.sessionId ??
+    sessionManagerAny.session?.id ??
+    sessionManagerAny.currentSessionId,
+  sessionKey:
+    sessionManagerAny.sessionKey ??
+    sessionManagerAny.session?.key ??
+    sessionManagerAny.key,
+  runId: sessionManagerAny.runId ?? sessionManagerAny.currentRunId,
+};
+```
+
+With `OPENCLAW_WORKFLOW_TRACE=1`, the patched Pi extension also logs:
+
+```text
+[openclaw-trace] pi.tool_result.middleware_context
+```
+
+so you can verify the middleware context before and after the fix.
 
 ### When middleware is not registered
 
