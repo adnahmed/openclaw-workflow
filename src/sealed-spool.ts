@@ -420,6 +420,10 @@ export function deriveToolResultControl(
 		event?.result?.details && typeof event.result.details === "object"
 			? event.result.details
 			: {};
+	const configuredMaxPreviewBytes =
+		typeof config?.sealedMaxPreviewBytes === "number"
+			? config.sealedMaxPreviewBytes
+			: undefined;
 
 	return deriveObservationControl({
 		value: details,
@@ -442,14 +446,21 @@ export function deriveToolResultControl(
 				"loaded",
 				"ready",
 			]),
-			visible_item_count: firstArrayLength(details as Record<string, unknown>, [
-				"visible_item_count",
-				"item_count",
-				"items",
-				"element_count",
-			]),
+			visible_item_count:
+				firstNumber(details as Record<string, unknown>, [
+					"visible_item_count",
+					"item_count",
+					"element_count",
+				]) ??
+				firstArrayLength(details as Record<string, unknown>, [
+					"items",
+					"results",
+					"rows",
+					"elements",
+				]),
 			extra: {
 				runtime_tool_name: event.toolName,
+				configured_max_preview_bytes: configuredMaxPreviewBytes,
 			},
 		},
 	});

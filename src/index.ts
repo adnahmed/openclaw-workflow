@@ -4,6 +4,7 @@ import { writeDeclaredOutput } from "./output-writer.js";
 import { createDefaultRegistry } from "./plugin-operations.js";
 import { resolveRedisClient } from "./redis-client.js";
 import {
+	deriveToolResultControl,
 	readObservationJsonPath,
 	readResultSlice,
 	searchObservationText,
@@ -600,13 +601,33 @@ export default definePluginEntry({
 			// ── Sealed tool-result middleware (fail-closed) ─────────────────────
 			let middlewareRegistered = false;
 
+			function markSealedMiddlewareReady(api: any) {
+				api.runtime ??= {};
+				api.runtime.subagent ??= {};
+				api.runtime.subagent.capabilities ??= {};
+				api.runtime.subagent.capabilities.sealed ??= {};
+
+				Object.assign(api.runtime.subagent.capabilities.sealed, {
+					toolResultInterception: true,
+					transcriptFirewall: true,
+					artifactSink: true,
+					recordObservationBeforeModel: true,
+					source: "agentToolResultMiddleware",
+				});
+			}
+
 			const PASSTHROUGH_TOOLS = new Set([
 				"workflow_observation_read",
 				"workflow_observation_search",
 				"workflow_observation_json_path",
 				"write_output",
+				"read_output",
+				"list_outputs",
+				"materialize_output",
 				"workflow_step_update",
 				"workflow_step_complete",
+				"workflow_state_get",
+				"workflow_runtime_patch_status",
 			]);
 
 			if (typeof api.registerAgentToolResultMiddleware === "function") {
@@ -635,10 +656,7 @@ export default definePluginEntry({
 								value: event.result,
 								toolCallId: event.toolCallId,
 								toolName: event.toolName,
-								control: {
-									ok: !event.isError,
-									status: event.isError ? "failed" : "ok",
-								},
+								control: deriveToolResultControl(event, config),
 								maxPreviewBytes:
 									active.maxPreviewBytes ??
 									config.sealedMaxPreviewBytes ??
@@ -669,6 +687,7 @@ export default definePluginEntry({
 						{ runtimes: ["pi", "codex"] },
 					);
 					middlewareRegistered = true;
+					markSealedMiddlewareReady(api);
 				} catch (err) {
 					middlewareRegistered = false;
 					logger.warn(

@@ -1216,7 +1216,7 @@ export async function runStep(step, runId, api, options) {
 
 	const startTime = Date.now();
 	let sessionKey = null;
-	let sealedRunKey: string | null = null;
+	const sealedRunKeys: string[] = [];
 
 	try {
 		const model = step.model || defaultModel || null;
@@ -1321,22 +1321,25 @@ export async function runStep(step, runId, api, options) {
 				"number"
 					? Math.max(64, sealed.tool_result_policy.max_context_injection_bytes)
 					: ((api.config as any)?.sealedMaxPreviewBytes ?? 2048);
-			sealedRunKey = sessionKey;
 			const activeRun = {
 				artifactStore,
 				runId,
 				stepId: step.id,
 				maxPreviewBytes,
 			};
-			activeSealedRuns.set(`sessionKey:${sessionKey}`, activeRun);
+			const addActiveKey = (key: string) => {
+				activeSealedRuns.set(key, activeRun);
+				sealedRunKeys.push(key);
+			};
+			addActiveKey(`sessionKey:${sessionKey}`);
 			if (spawnResult.sessionId) {
-				activeSealedRuns.set(`sessionId:${spawnResult.sessionId}`, activeRun);
+				addActiveKey(`sessionId:${spawnResult.sessionId}`);
 			}
 			if (runId) {
-				activeSealedRuns.set(`runId:${runId}`, activeRun);
+				addActiveKey(`runId:${runId}`);
 			}
 			if (runId && step.id) {
-				activeSealedRuns.set(`runStep:${runId}:${step.id}`, activeRun);
+				addActiveKey(`runStep:${runId}:${step.id}`);
 			}
 		}
 
@@ -1562,7 +1565,9 @@ export async function runStep(step, runId, api, options) {
 			duration_ms: Date.now() - startTime,
 		};
 	} finally {
-		if (sealedRunKey) activeSealedRuns.delete(sealedRunKey);
+		for (const key of sealedRunKeys) {
+			activeSealedRuns.delete(key);
+		}
 	}
 }
 
@@ -2502,7 +2507,7 @@ export function createStepRunner(adapter) {
 		const startTime = Date.now();
 		let sessionKey = null;
 		let failureKind: string | null = null;
-		let sealedRunKey: string | null = null;
+		const sealedRunKeys: string[] = [];
 
 		try {
 			const model = step.model || options.defaultModel || null;
@@ -2557,22 +2562,25 @@ export function createStepRunner(adapter) {
 								sealed.tool_result_policy.max_context_injection_bytes,
 							)
 						: ((_api.config as any)?.sealedMaxPreviewBytes ?? 2048);
-				sealedRunKey = sessionKey;
 				const activeRun = {
 					artifactStore: options.artifactStore,
 					runId,
 					stepId: step.id,
 					maxPreviewBytes,
 				};
-				activeSealedRuns.set(`sessionKey:${sessionKey}`, activeRun);
+				const addActiveKey = (key: string) => {
+					activeSealedRuns.set(key, activeRun);
+					sealedRunKeys.push(key);
+				};
+				addActiveKey(`sessionKey:${sessionKey}`);
 				if (spawnResult.sessionId) {
-					activeSealedRuns.set(`sessionId:${spawnResult.sessionId}`, activeRun);
+					addActiveKey(`sessionId:${spawnResult.sessionId}`);
 				}
 				if (runId) {
-					activeSealedRuns.set(`runId:${runId}`, activeRun);
+					addActiveKey(`runId:${runId}`);
 				}
 				if (runId && step.id) {
-					activeSealedRuns.set(`runStep:${runId}:${step.id}`, activeRun);
+					addActiveKey(`runStep:${runId}:${step.id}`);
 				}
 			}
 
@@ -2769,7 +2777,9 @@ export function createStepRunner(adapter) {
 				duration_ms: Date.now() - startTime,
 			};
 		} finally {
-			if (sealedRunKey) activeSealedRuns.delete(sealedRunKey);
+			for (const key of sealedRunKeys) {
+				activeSealedRuns.delete(key);
+			}
 		}
 	};
 }
