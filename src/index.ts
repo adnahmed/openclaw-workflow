@@ -179,6 +179,15 @@ export default definePluginEntry({
 	register(api) {
 		try {
 			const logger = getLogger(api);
+			const WORKFLOW_TRACE =
+				process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||
+				process.env.OPENCLAW_WORKFLOW_TRACE === "true";
+
+			function trace(label: string, data: Record<string, unknown> = {}) {
+				if (!WORKFLOW_TRACE) return;
+				logger.warn(`[workflow-trace] ${label}`, data);
+			}
+
 			logger.info("[workflow] plugin api capabilities", {
 				hasTopLevelSessions: !!api?.sessions,
 				hasTopLevelSessionsSpawn: typeof api?.sessions?.spawn === "function",
@@ -624,8 +633,31 @@ export default definePluginEntry({
 				try {
 					api.registerAgentToolResultMiddleware(
 						async (event, ctx) => {
+							trace("middleware.entry", {
+								toolName: event?.toolName,
+								toolCallId: event?.toolCallId,
+								isError: event?.isError,
+								threadId: event?.threadId,
+								ctxSessionKey: ctx?.sessionKey,
+								ctxSessionId: ctx?.sessionId,
+								ctxRunId: ctx?.runId,
+								ctxRuntime: ctx?.runtime,
+								resultContentTypes: Array.isArray(event?.result?.content)
+									? event.result.content.map((c: any) => c?.type)
+									: null,
+								resultDetailsKeys:
+									event?.result?.details &&
+									typeof event.result.details === "object"
+										? Object.keys(event.result.details)
+										: null,
+							});
+
 							// Bypass known safe workflow control/read tools.
 							if (PASSTHROUGH_TOOLS.has(event.toolName)) {
+								trace("middleware.passthrough", {
+									toolName: event.toolName,
+									toolCallId: event.toolCallId,
+								});
 								return;
 							}
 
@@ -633,6 +665,14 @@ export default definePluginEntry({
 
 							// Non-workflow / non-sealed runs pass through untouched.
 							if (!active) {
+								trace("middleware.no_active_run", {
+									toolName: event.toolName,
+									toolCallId: event.toolCallId,
+									threadId: event.threadId,
+									ctxSessionKey: ctx?.sessionKey,
+									ctxSessionId: ctx?.sessionId,
+									ctxRunId: ctx?.runId,
+								});
 								return;
 							}
 
@@ -651,6 +691,19 @@ export default definePluginEntry({
 									active.maxPreviewBytes ??
 									config.sealedMaxPreviewBytes ??
 									2048,
+							});
+
+							trace("middleware.sealed", {
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+								runId: active.runId,
+								stepId: active.stepId,
+								outputId,
+								observationRef: envelope.observation_ref ?? envelope.result_ref,
+								bytes: envelope.bytes,
+								kind: envelope.kind,
+								truncatedForContext: envelope.truncated_for_context,
+								control: envelope.control,
 							});
 
 							return {
@@ -729,6 +782,19 @@ export default definePluginEntry({
 							handoff_token,
 						} = params;
 
+						trace("write_output.entry", {
+							run_id,
+							step_id,
+							output_id,
+							path,
+							hasData: typeof data !== "undefined",
+							hasText: typeof text !== "undefined",
+							attempt,
+							session_key,
+							subagent_run_id,
+							hasHandoffToken: Boolean(handoff_token),
+						});
+
 						try {
 							if (!run_id || !step_id) {
 								return errorResult(
@@ -779,6 +845,28 @@ export default definePluginEntry({
 								handoff_token,
 							});
 
+							trace("write_output.attempt_match", {
+								run_id,
+								step_id,
+								output_id,
+								path,
+								ok: attemptMatch.ok,
+								reason: attemptMatch.ok ? null : attemptMatch.reason,
+								provided: {
+									attempt,
+									session_key,
+									subagent_run_id,
+									hasHandoffToken: Boolean(handoff_token),
+								},
+								currentStep: {
+									status: step.status,
+									attempts: step.attempts,
+									session_key: step.session_key,
+									subagent_run_id: (step as any).subagent_run_id,
+									handoff_token: (step as any).handoff_token ? true : false,
+								},
+							});
+
 							if (!attemptMatch.ok) {
 								return textResult({
 									ok: false,
@@ -808,6 +896,18 @@ export default definePluginEntry({
 								handoff_token,
 							});
 
+							trace("write_output.result", {
+								run_id,
+								step_id,
+								requestedOutputId: output_id,
+								requestedPath: path,
+								ok: result.ok,
+								committed: result.committed,
+								decision: result.decision,
+								message: (result as any).message,
+								provenance: result.provenance,
+							});
+
 							if (!result.ok || !result.committed) {
 								return textResult(result);
 							}
@@ -824,6 +924,13 @@ export default definePluginEntry({
 								output_writes: outputWrites,
 								last_update_at: now,
 								last_message: `Committed declared output: ${outputKey}`,
+							});
+
+							trace("write_output.committed", {
+								run_id,
+								step_id,
+								outputKey,
+								outputWrites: Object.keys(outputWrites),
 							});
 
 							return textResult({

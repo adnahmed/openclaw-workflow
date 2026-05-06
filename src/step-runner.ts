@@ -779,9 +779,46 @@ export function resolveActiveSealedRunForToolResult(
 		ctx?.runId && `runId:${ctx.runId}`,
 	].filter(Boolean);
 
+	if (
+		process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||
+		process.env.OPENCLAW_WORKFLOW_TRACE === "true"
+	) {
+		console.warn("[workflow-trace] sealed_run.resolve_attempt", {
+			eventToolCallId: event?.toolCallId,
+			eventThreadId: event?.threadId,
+			ctxSessionKey: ctx?.sessionKey,
+			ctxSessionId: ctx?.sessionId,
+			ctxRunId: ctx?.runId,
+			candidateKeys: keys,
+			activeKeys: [...activeSealedRuns.keys()],
+		});
+	}
+
 	for (const key of keys) {
 		const run = activeSealedRuns.get(key as string);
-		if (run) return run;
+		if (run) {
+			if (
+				process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||
+				process.env.OPENCLAW_WORKFLOW_TRACE === "true"
+			) {
+				console.warn("[workflow-trace] sealed_run.resolve_hit", {
+					key,
+					runId: run.runId,
+					stepId: run.stepId,
+				});
+			}
+			return run;
+		}
+	}
+
+	if (
+		process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||
+		process.env.OPENCLAW_WORKFLOW_TRACE === "true"
+	) {
+		console.warn("[workflow-trace] sealed_run.resolve_miss", {
+			candidateKeys: keys,
+			activeKeys: [...activeSealedRuns.keys()],
+		});
 	}
 
 	return undefined;
@@ -1291,6 +1328,19 @@ export async function runStep(step, runId, api, options) {
 			const addActiveKey = (key: string) => {
 				activeSealedRuns.set(key, activeRun);
 				sealedRunKeys.push(key);
+
+				if (
+					process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||
+					process.env.OPENCLAW_WORKFLOW_TRACE === "true"
+				) {
+					console.warn("[workflow-trace] sealed_run.key_added", {
+						key,
+						workflowRunId: runId,
+						stepId: step.id,
+						spawnSessionId: spawnResult.sessionId,
+						spawnSessionKey: spawnResult.sessionKey,
+					});
+				}
 			};
 			addActiveKey(`sessionKey:${sessionKey}`);
 			if (spawnResult.sessionId) {
@@ -1301,6 +1351,19 @@ export async function runStep(step, runId, api, options) {
 			}
 			if (runId && step.id) {
 				addActiveKey(`runStep:${runId}:${step.id}`);
+			}
+
+			if (
+				process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||
+				process.env.OPENCLAW_WORKFLOW_TRACE === "true"
+			) {
+				console.warn("[workflow-trace] sealed_run.registered", {
+					workflowRunId: runId,
+					stepId: step.id,
+					spawnSessionId: spawnResult.sessionId,
+					spawnSessionKey: spawnResult.sessionKey,
+					keys: sealedRunKeys,
+				});
 			}
 		}
 
@@ -1362,6 +1425,28 @@ export async function runStep(step, runId, api, options) {
 
 			if (usesOutputCompletion(step)) {
 				outputCheck = await runOutputCheck();
+
+				if (
+					process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||
+					process.env.OPENCLAW_WORKFLOW_TRACE === "true"
+				) {
+					console.warn("[workflow-trace] output_check.poll", {
+						runId,
+						stepId: step.id,
+						attempt: attempts,
+						passed: outputCheck.passed,
+						decision: outputCheck.decision,
+						missing: outputCheck.missing_files,
+						validations: outputCheck.validations?.map((v: any) => ({
+							output_id: v.output_id,
+							path: v.path,
+							decision: v.decision,
+							ok: v.ok,
+							error: v.error,
+							provenance: v.provenance,
+						})),
+					});
+				}
 
 				if (outputCheck.passed) {
 					const hasCurrentAttemptProvenance =
