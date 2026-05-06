@@ -1454,6 +1454,30 @@ export async function runStep(step, runId, api, options) {
 		}
 
 		if (finalStatus === null) {
+			const liveStepState =
+				typeof options.getStepState === "function"
+					? options.getStepState()
+					: null;
+
+			if (
+				usesOutputCompletion(step) &&
+				outputCheck.passed &&
+				outputCheckHasCurrentAttemptProvenance({
+					stepState: liveStepState,
+					outputCheck,
+					runId,
+					stepId: step.id,
+					attempt: attempts,
+				})
+			) {
+				const mapped = statusFromOutputDecision(outputCheck);
+				finalStatus = mapped.finalStatus;
+				retryable = mapped.retryable;
+				errorMsg = mapped.errorMsg;
+			}
+		}
+
+		if (finalStatus === null) {
 			cancelResult = await (
 				adapter.cancel?.(spawnResult.sessionId, {
 					...options,
