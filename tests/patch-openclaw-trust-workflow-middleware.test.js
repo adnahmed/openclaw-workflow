@@ -90,6 +90,13 @@ factories.push(buildAgentToolResultMiddlewareFactory());
 
 	assert.match(patched, /openclaw-workflow pi middleware context patch/);
 	assert.match(patched, /sessionManager: SessionManager;/);
+	assert.match(patched, /const rawEventAny = recordFromUnknown\(rawEvent\);/);
+	assert.match(patched, /const embeddedRunId =/);
+	assert.match(patched, /embeddedRunId \?\?/);
+	assert.match(
+		patched,
+		/\(typeof event\.threadId === "string" && event\.threadId\.trim\(\)\) \?\?/,
+	);
 	assert.match(patched, /const middlewareCtx = \{/);
 	assert.match(
 		patched,
