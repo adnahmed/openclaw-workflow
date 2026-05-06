@@ -19,7 +19,11 @@
       "materialize_output",
       "workflow_state_get",
       "workflow_step_update",
-      "workflow_step_complete"
+      "workflow_step_complete",
+      "workflow_observation_read",
+      "workflow_observation_search",
+      "workflow_observation_json_path",
+      "workflow_runtime_patch_status"
     ]
   },
   "configSchema": {

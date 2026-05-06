@@ -412,6 +412,49 @@ function makeBoundedPreview(
 	};
 }
 
+export function deriveToolResultControl(
+	event: any,
+	config?: any,
+): ObservationControl {
+	const details =
+		event?.result?.details && typeof event.result.details === "object"
+			? event.result.details
+			: {};
+
+	return deriveObservationControl({
+		value: details,
+		status: event.isError ? "failed" : "ok",
+		control: {
+			ok: !event.isError,
+			status: event.isError ? "failed" : "ok",
+			url: firstString(details as Record<string, unknown>, [
+				"url",
+				"current_url",
+				"href",
+				"location",
+			]),
+			title: firstString(details as Record<string, unknown>, [
+				"title",
+				"page_title",
+			]),
+			page_loaded: firstBoolean(details as Record<string, unknown>, [
+				"page_loaded",
+				"loaded",
+				"ready",
+			]),
+			visible_item_count: firstArrayLength(details as Record<string, unknown>, [
+				"visible_item_count",
+				"item_count",
+				"items",
+				"element_count",
+			]),
+			extra: {
+				runtime_tool_name: event.toolName,
+			},
+		},
+	});
+}
+
 export async function spoolValue(args: {
 	artifactStore: WorkflowArtifactStore;
 	runId: string;

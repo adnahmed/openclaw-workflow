@@ -600,10 +600,24 @@ export default definePluginEntry({
 			// ── Sealed tool-result middleware (fail-closed) ─────────────────────
 			let middlewareRegistered = false;
 
+			const PASSTHROUGH_TOOLS = new Set([
+				"workflow_observation_read",
+				"workflow_observation_search",
+				"workflow_observation_json_path",
+				"write_output",
+				"workflow_step_update",
+				"workflow_step_complete",
+			]);
+
 			if (typeof api.registerAgentToolResultMiddleware === "function") {
 				try {
 					api.registerAgentToolResultMiddleware(
 						async (event, ctx) => {
+							// Bypass known safe workflow control/read tools.
+							if (PASSTHROUGH_TOOLS.has(event.toolName)) {
+								return;
+							}
+
 							const active = resolveActiveSealedRunForToolResult(event, ctx);
 
 							// Non-workflow / non-sealed runs pass through untouched.
@@ -625,7 +639,10 @@ export default definePluginEntry({
 									ok: !event.isError,
 									status: event.isError ? "failed" : "ok",
 								},
-								maxPreviewBytes: active.maxPreviewBytes ?? 2048,
+								maxPreviewBytes:
+									active.maxPreviewBytes ??
+									config.sealedMaxPreviewBytes ??
+									2048,
 							});
 
 							return {
@@ -1912,6 +1929,32 @@ export default definePluginEntry({
 
 						return errorResult(err);
 					}
+				},
+			});
+
+			api.registerTool({
+				name: "workflow_runtime_patch_status",
+				description: "Report sealed tool-result middleware status.",
+				parameters: {},
+				optional: true,
+				async execute() {
+					const caps =
+						(api as any).runtime?.subagent?.capabilities?.sealed ?? null;
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify(
+									{
+										ok: Boolean(caps?.recordObservationBeforeModel),
+										capabilities: caps,
+									},
+									null,
+									2,
+								),
+							},
+						],
+					};
 				},
 			});
 		} catch (err) {

@@ -62,6 +62,7 @@ import {
 	type StepState,
 	type ValidationDecision,
 	type ValidatorSpec,
+	type WorkflowArtifactStore,
 	type WorkflowDefinition,
 } from "./types.js";
 import { getLocalISOString } from "./workflow-state.js";
@@ -784,7 +785,7 @@ function assertRuntimeSealedCapabilities(
 }
 
 export type ActiveSealedRun = {
-	artifactStore: unknown;
+	artifactStore: WorkflowArtifactStore;
 	runId: string;
 	stepId: string;
 	maxPreviewBytes: number;
@@ -798,16 +799,25 @@ export const activeSealedRuns = new Map<string, ActiveSealedRun>();
 
 /**
  * Look up the active sealed run for an incoming middleware tool-result event.
+ * Resolves by multiple keys: threadId, sessionKey, sessionId, runId.
  * Returns undefined for non-workflow / non-sealed tool calls.
  */
 export function resolveActiveSealedRunForToolResult(
 	event: { threadId?: string; toolCallId?: string; cwd?: string },
-	_ctx?: unknown,
+	ctx?: any,
 ): ActiveSealedRun | undefined {
-	if (event.threadId) {
-		const run = activeSealedRuns.get(event.threadId);
+	const keys = [
+		event?.threadId && `threadId:${event.threadId}`,
+		ctx?.sessionKey && `sessionKey:${ctx.sessionKey}`,
+		ctx?.sessionId && `sessionId:${ctx.sessionId}`,
+		ctx?.runId && `runId:${ctx.runId}`,
+	].filter(Boolean);
+
+	for (const key of keys) {
+		const run = activeSealedRuns.get(key as string);
 		if (run) return run;
 	}
+
 	return undefined;
 }
 
@@ -1310,14 +1320,24 @@ export async function runStep(step, runId, api, options) {
 				typeof sealed?.tool_result_policy?.max_context_injection_bytes ===
 				"number"
 					? Math.max(64, sealed.tool_result_policy.max_context_injection_bytes)
-					: 2048;
+					: ((api.config as any)?.sealedMaxPreviewBytes ?? 2048);
 			sealedRunKey = sessionKey;
-			activeSealedRuns.set(sealedRunKey, {
+			const activeRun = {
 				artifactStore,
 				runId,
 				stepId: step.id,
 				maxPreviewBytes,
-			});
+			};
+			activeSealedRuns.set(`sessionKey:${sessionKey}`, activeRun);
+			if (spawnResult.sessionId) {
+				activeSealedRuns.set(`sessionId:${spawnResult.sessionId}`, activeRun);
+			}
+			if (runId) {
+				activeSealedRuns.set(`runId:${runId}`, activeRun);
+			}
+			if (runId && step.id) {
+				activeSealedRuns.set(`runStep:${runId}:${step.id}`, activeRun);
+			}
 		}
 
 		if (options.onSpawn) {
@@ -2536,14 +2556,24 @@ export function createStepRunner(adapter) {
 								64,
 								sealed.tool_result_policy.max_context_injection_bytes,
 							)
-						: 2048;
+						: ((_api.config as any)?.sealedMaxPreviewBytes ?? 2048);
 				sealedRunKey = sessionKey;
-				activeSealedRuns.set(sealedRunKey, {
+				const activeRun = {
 					artifactStore: options.artifactStore,
 					runId,
 					stepId: step.id,
 					maxPreviewBytes,
-				});
+				};
+				activeSealedRuns.set(`sessionKey:${sessionKey}`, activeRun);
+				if (spawnResult.sessionId) {
+					activeSealedRuns.set(`sessionId:${spawnResult.sessionId}`, activeRun);
+				}
+				if (runId) {
+					activeSealedRuns.set(`runId:${runId}`, activeRun);
+				}
+				if (runId && step.id) {
+					activeSealedRuns.set(`runStep:${runId}:${step.id}`, activeRun);
+				}
 			}
 
 			const timeoutMs = step.timeout * 1000;

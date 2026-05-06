@@ -43,6 +43,7 @@ type RawPluginConfig = {
 	filesystemFallback?: boolean;
 	materializeOutputs?: "never" | "on_demand" | "always";
 	requireSealedToolResultMiddleware?: boolean;
+	sealedMaxPreviewBytes?: number;
 };
 
 type RuntimeConfig = {
@@ -127,6 +128,9 @@ export function normalizePluginConfig(
 		filesystemFallback: rawConfig.filesystemFallback !== false,
 		materializeOutputs: rawConfig.materializeOutputs || "on_demand",
 		requireSealedToolResultMiddleware:
-			rawConfig.requireSealedToolResultMiddleware === true,
+			rawConfig.requireSealedToolResultMiddleware !== false,
+		sealedMaxPreviewBytes: Number.isFinite(rawConfig.sealedMaxPreviewBytes)
+			? Math.max(64, Math.floor(rawConfig.sealedMaxPreviewBytes!))
+			: 2048,
 	};
 }
