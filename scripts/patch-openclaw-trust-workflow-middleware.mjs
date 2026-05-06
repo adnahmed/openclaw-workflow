@@ -2,35 +2,31 @@
 /**
  * Patch OpenClaw so one trusted external plugin can register
  * agentToolResultMiddleware, and so Pi tool-result middleware receives
- * stable session/run context.
+ * stable workflow/subagent identity.
  *
- * This script is intentionally bounded and noisy:
- *   - no `where openclaw`
- *   - no recursive node_modules crawl
- *   - no silent target discovery
- *   - checks only known OpenClaw package roots
- *   - scans only bounded candidate files under dist/
- *   - fails closed if the Pi context patch is required but not applied/found
+ * v6:
+ *   - targeted by default: patches known OpenClaw 2026.4.29 chunks only
+ *   - no broad dist scan unless --discover is passed
+ *   - idempotent: upgrades stale prior openclaw-workflow patches in-place
+ *   - no restore required before repatching
+ *   - patches trust guard for one external plugin
+ *   - patches PI middleware context factory
+ *   - patches buildEmbeddedExtensionFactories callsites to pass:
+ *       runId: params.runId
+ *       sessionId: params.sessionId
+ *       sessionKey: params.sessionKey
+ *   - fixes previous sessionKey fallback bug caused by false ?? fallback
  *
  * Usage:
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --print-targets
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --dry-run
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow --dry-run
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow --all
  *
- * Exact file:
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --file "C:\...\dist\loader-XXX.js" --dry-run
+ * Discovery fallback for future OpenClaw builds:
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow --discover --dry-run
  *
- * Exact package root:
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --root "C:\...\node_modules\openclaw" --dry-run
- *
- * Patch every ~/.openclaw/plugin-runtime-deps/openclaw-* runtime copy:
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --all
- *
- * Restore latest backup for discovered targets:
+ * Restore latest backup for targeted files:
  *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --restore
- *
- * Disable required Pi-context patch check:
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --require-pi-context=false
  */
 
 import fs from "node:fs";
@@ -42,23 +38,30 @@ import { pathToFileURL } from "node:url";
 const DEFAULT_PLUGIN_ID = "openclaw-workflow";
 
 const TRUST_PATCH_MARKER =
-	"openclaw-workflow trusted external agentToolResultMiddleware patch";
+  "openclaw-workflow trusted external agentToolResultMiddleware patch";
 
 const PI_CONTEXT_PATCH_MARKER = "openclaw-workflow pi middleware context patch";
+const PI_CONTEXT_PATCH_VERSION = 6;
+const PI_CONTEXT_PATCH_VERSION_MARKER =
+  `${PI_CONTEXT_PATCH_MARKER} v${PI_CONTEXT_PATCH_VERSION}`;
 
 const FUNCTION_NAME = "registerAgentToolResultMiddleware";
 
 const DIAGNOSTIC =
-	"only bundled plugins can register agent tool result middleware";
-
-const PI_EXTENSIONS_RELATIVE_PATH = path.join(
-	"src",
-	"agents",
-	"pi-embedded-runner",
-	"extensions.ts",
-);
+  "only bundled plugins can register agent tool result middleware";
 
 const MAX_CANDIDATE_BYTES = 80 * 1024 * 1024;
+
+/**
+ * Known target chunks from your OpenClaw 2026.4.29 dry run.
+ * These are exact default targets. Broad discovery is opt-in via --discover.
+ */
+const KNOWN_TARGET_RELATIVE_FILES = [
+  "dist/compact-D7fdm3i4.js",
+  "dist/selection-CwAy0mf2.js",
+  "dist/compaction-successor-transcript-DQe2lN3x.js",
+  "dist/loader-CLyHx60E.js",
+];
 
 const args = parseArgs(process.argv.slice(2));
 
@@ -66,1077 +69,1275 @@ const pluginId = String(args.plugin ?? DEFAULT_PLUGIN_ID);
 const dryRun = Boolean(args["dry-run"]);
 const restore = Boolean(args.restore);
 const all = Boolean(args.all);
+const discover = Boolean(args.discover);
+const verbose = Boolean(args.verbose);
 const printTargets = Boolean(args["print-targets"]);
 const exactFile = args.file ? path.resolve(String(args.file)) : null;
 const explicitRoot = args.root ? path.resolve(String(args.root)) : null;
 const requirePiContext = args["require-pi-context"] !== "false";
+const requirePiCallsite = args["require-pi-callsite"] !== "false";
 
 if (isDirectExecution(import.meta.url)) {
-	main();
+  main();
 }
 
 function main() {
-	assertSafePluginId(pluginId);
+  assertSafePluginId(pluginId);
 
-	console.log(`Plugin allowed for middleware: ${pluginId}`);
-	console.log(`Dry run: ${dryRun ? "yes" : "no"}`);
-	console.log(`Restore: ${restore ? "yes" : "no"}`);
-	console.log(`Patch all runtime deps: ${all ? "yes" : "no"}`);
-	console.log(`Require Pi context patch: ${requirePiContext ? "yes" : "no"}`);
+  console.log(`Plugin allowed for middleware: ${pluginId}`);
+  console.log(`Dry run: ${dryRun ? "yes" : "no"}`);
+  console.log(`Restore: ${restore ? "yes" : "no"}`);
+  console.log(`Patch all runtime deps: ${all ? "yes" : "no"}`);
+  console.log(`Discover mode: ${discover ? "yes" : "no"}`);
+  console.log(`Verbose scan: ${verbose ? "yes" : "no"}`);
+  console.log(`Require Pi context patch: ${requirePiContext ? "yes" : "no"}`);
+  console.log(`Require Pi callsite patch: ${requirePiCallsite ? "yes" : "no"}`);
 
-	const targets = exactFile
-		? uniqueExistingFiles([exactFile])
-		: findTargets({ explicitRoot, all });
+  const targets = exactFile
+    ? uniqueExistingFiles([exactFile])
+    : findTargets({ explicitRoot, all, discover });
 
-	if (targets.length === 0) {
-		throw new Error(
-			[
-				"Could not find any OpenClaw files containing the middleware trust guard or Pi middleware target.",
-				"",
-				"Expected locations include:",
-				`  ${path.join(os.homedir(), ".openclaw", "plugin-runtime-deps", "openclaw-*", "dist", "*.js")}`,
-				process.env.APPDATA
-					? `  ${path.join(process.env.APPDATA, "nvm", "node_modules", "openclaw", "dist", "*.js")}`
-					: "  %APPDATA%\\nvm\\node_modules\\openclaw\\dist\\*.js",
-				"",
-				"Try exact-file mode against the loader from your stack trace:",
-				'  node scripts/patch-openclaw-trust-workflow-middleware.mjs --file "C:\\path\\to\\openclaw\\dist\\loader-XXX.js" --dry-run',
-			].join("\n"),
-		);
-	}
+  if (targets.length === 0) {
+    throw new Error(
+      [
+        "Could not find OpenClaw patch targets.",
+        "",
+        "Default mode only checks known OpenClaw 2026.4.29 target chunks:",
+        ...KNOWN_TARGET_RELATIVE_FILES.map((value) => `  - ${value}`),
+        "",
+        "If your OpenClaw build changed chunk names, run discovery mode:",
+        "  node scripts/patch-openclaw-trust-workflow-middleware.mjs --discover --dry-run",
+        "",
+        "Or exact-file mode:",
+        '  node scripts/patch-openclaw-trust-workflow-middleware.mjs --file "C:\\path\\to\\openclaw\\dist\\some-chunk.js" --dry-run',
+      ].join("\n"),
+    );
+  }
 
-	console.log("\nTarget file(s):");
-	for (const target of targets) {
-		console.log(`  - ${target}`);
-	}
+  console.log("\nTarget file(s):");
+  for (const target of targets) {
+    console.log(`  - ${target}`);
+  }
 
-	if (printTargets) {
-		return;
-	}
+  if (printTargets) {
+    return;
+  }
 
-	if (restore) {
-		for (const target of targets) {
-			restoreLatestBackupForFile(target);
-		}
-		return;
-	}
+  if (restore) {
+    for (const target of targets) {
+      restoreLatestBackupForFile(target);
+    }
+    return;
+  }
 
-	const summary = {
-		trust: {
-			found: false,
-			patchedOrAlreadyPresent: false,
-			files: [],
-		},
-		piContext: {
-			found: false,
-			patchedOrAlreadyPresent: false,
-			files: [],
-		},
-	};
+  const summary = {
+    trust: { found: false, patchedOrAlreadyPresent: false, files: [] },
+    piContext: { found: false, patchedOrAlreadyPresent: false, files: [] },
+    piCallsite: { found: false, patchedOrAlreadyPresent: false, files: [] },
+  };
 
-	for (const target of targets) {
-		const result = patchTargetFile(target, pluginId, { dryRun });
+  for (const target of targets) {
+    const result = patchTargetFile(target, pluginId, { dryRun });
 
-		if (result.trustTargetFound) {
-			summary.trust.found = true;
-		}
+    if (result.trustTargetFound) {
+      summary.trust.found = true;
+    }
+    if (result.trustPatched || result.trustAlreadyPatched) {
+      summary.trust.patchedOrAlreadyPresent = true;
+      summary.trust.files.push(target);
+    }
 
-		if (result.trustPatched || result.trustAlreadyPatched) {
-			summary.trust.patchedOrAlreadyPresent = true;
-			summary.trust.files.push(target);
-		}
+    if (result.piContextTargetFound) {
+      summary.piContext.found = true;
+    }
+    if (result.piContextPatched || result.piContextAlreadyPatched) {
+      summary.piContext.patchedOrAlreadyPresent = true;
+      summary.piContext.files.push(target);
+    }
 
-		if (result.piContextTargetFound) {
-			summary.piContext.found = true;
-		}
+    if (result.piCallsiteTargetFound) {
+      summary.piCallsite.found = true;
+    }
+    if (result.piCallsitePatched || result.piCallsiteAlreadyPatched) {
+      summary.piCallsite.patchedOrAlreadyPresent = true;
+      summary.piCallsite.files.push(target);
+    }
+  }
 
-		if (result.piContextPatched || result.piContextAlreadyPatched) {
-			summary.piContext.patchedOrAlreadyPresent = true;
-			summary.piContext.files.push(target);
-		}
-	}
+  printSummary(summary);
 
-	printSummary(summary);
+  if (!summary.trust.patchedOrAlreadyPresent) {
+    throw new Error("OpenClaw trust guard was not patched or already present.");
+  }
 
-	if (!summary.trust.patchedOrAlreadyPresent) {
-		throw new Error("OpenClaw trust guard was not patched or already present.");
-	}
+  if (requirePiContext && !summary.piContext.patchedOrAlreadyPresent) {
+    throw new Error(
+      "Pi middleware context patch was not applied. Browser tool-result sealing is not guaranteed.",
+    );
+  }
 
-	if (requirePiContext && !summary.piContext.patchedOrAlreadyPresent) {
-		if (!summary.piContext.found) {
-			console.error(
-				"\nERROR: Pi middleware context target was not found. Browser tool results will not be sealed.",
-			);
-		}
+  if (requirePiCallsite && !summary.piCallsite.patchedOrAlreadyPresent) {
+    throw new Error(
+      "Pi callsite patch was not applied. buildEmbeddedExtensionFactories may still lack run/session identity. Try --discover --dry-run.",
+    );
+  }
 
-		throw new Error(
-			"Pi middleware context patch was not applied. Sealed browser spooling is not guaranteed.",
-		);
-	}
-
-	console.log("\nDone.");
-	console.log(
-		"Restart OpenClaw/gateway, then run workflow_runtime_patch_status and verify browser tool calls produce middleware.sealed traces.",
-	);
+  console.log("\nDone.");
+  console.log(
+    "Restart OpenClaw/gateway, run one browser tool call inside a workflow step, then check workflow_runtime_patch_status.",
+  );
+  console.log('Expected: "sealed" increases and "no_active_run" stays near 0.');
 }
 
-function findTargets({ explicitRoot, all }) {
-	console.log("\n[patch] target discovery started");
+function findTargets({ explicitRoot, all, discover }) {
+  console.log("\n[patch] target discovery started");
 
-	if (explicitRoot) {
-		console.log(`[patch] using explicit root: ${explicitRoot}`);
-		return findRuntimeFilesInPackageRoot(explicitRoot);
-	}
+  if (explicitRoot) {
+    console.log(`[patch] using explicit root: ${explicitRoot}`);
+    return findRuntimeFilesInPackageRoot(explicitRoot, { discover });
+  }
 
-	const roots = [];
+  const roots = [
+    ...knownGlobalOpenClawPackageRoots(),
+    ...runtimeDependencyRoots({ all }),
+  ];
 
-	for (const root of knownGlobalOpenClawPackageRoots()) {
-		roots.push(root);
-	}
+  const uniqueRoots = uniqueExistingDirs(roots);
 
-	for (const root of runtimeDependencyRoots({ all })) {
-		roots.push(root);
-	}
+  console.log(`[patch] package roots found: ${uniqueRoots.length}`);
+  for (const root of uniqueRoots) {
+    console.log(`  - ${root}`);
+  }
 
-	const uniqueRoots = uniqueExistingDirs(roots);
+  const targets = [];
 
-	console.log(`[patch] package roots found: ${uniqueRoots.length}`);
-	for (const root of uniqueRoots) {
-		console.log(`  - ${root}`);
-	}
+  for (const root of uniqueRoots) {
+    console.log(`[patch] checking root: ${root}`);
+    targets.push(...findRuntimeFilesInPackageRoot(root, { discover }));
+  }
 
-	const targets = [];
+  const uniqueTargets = uniqueExistingFiles(targets);
 
-	for (const root of uniqueRoots) {
-		console.log(`[patch] scanning root: ${root}`);
-		targets.push(...findRuntimeFilesInPackageRoot(root));
-	}
+  console.log(
+    `[patch] target discovery finished: ${uniqueTargets.length} file(s)`,
+  );
 
-	const uniqueTargets = uniqueExistingFiles(targets);
-
-	console.log(
-		`[patch] target discovery finished: ${uniqueTargets.length} file(s)`,
-	);
-
-	return uniqueTargets;
+  return uniqueTargets;
 }
 
 function knownGlobalOpenClawPackageRoots() {
-	const roots = [];
+  const roots = [];
 
-	if (process.platform === "win32") {
-		if (process.env.APPDATA) {
-			roots.push(
-				path.join(process.env.APPDATA, "nvm", "node_modules", "openclaw"),
-			);
-			roots.push(
-				path.join(process.env.APPDATA, "npm", "node_modules", "openclaw"),
-			);
-			roots.push(
-				path.join(
-					process.env.APPDATA,
-					"npm",
-					"node_modules",
-					"@openclaw",
-					"openclaw",
-				),
-			);
-		}
-	} else {
-		roots.push("/usr/local/lib/node_modules/openclaw");
-		roots.push("/opt/homebrew/lib/node_modules/openclaw");
-		roots.push("/usr/local/lib/node_modules/@openclaw/openclaw");
-		roots.push("/opt/homebrew/lib/node_modules/@openclaw/openclaw");
-	}
+  if (process.platform === "win32") {
+    if (process.env.APPDATA) {
+      roots.push(path.join(process.env.APPDATA, "nvm", "node_modules", "openclaw"));
+      roots.push(path.join(process.env.APPDATA, "npm", "node_modules", "openclaw"));
+      roots.push(
+        path.join(
+          process.env.APPDATA,
+          "npm",
+          "node_modules",
+          "@openclaw",
+          "openclaw",
+        ),
+      );
+    }
+  } else {
+    roots.push("/usr/local/lib/node_modules/openclaw");
+    roots.push("/opt/homebrew/lib/node_modules/openclaw");
+    roots.push("/usr/local/lib/node_modules/@openclaw/openclaw");
+    roots.push("/opt/homebrew/lib/node_modules/@openclaw/openclaw");
+  }
 
-	return roots;
+  return roots;
 }
 
 function runtimeDependencyRoots({ all }) {
-	const runtimeDepsRoot = path.join(
-		os.homedir(),
-		".openclaw",
-		"plugin-runtime-deps",
-	);
+  const runtimeDepsRoot = path.join(
+    os.homedir(),
+    ".openclaw",
+    "plugin-runtime-deps",
+  );
 
-	if (!fs.existsSync(runtimeDepsRoot)) {
-		console.log(`[patch] runtime deps root missing: ${runtimeDepsRoot}`);
-		return [];
-	}
+  if (!fs.existsSync(runtimeDepsRoot)) {
+    console.log(`[patch] runtime deps root missing: ${runtimeDepsRoot}`);
+    return [];
+  }
 
-	const packages = fs
-		.readdirSync(runtimeDepsRoot, { withFileTypes: true })
-		.filter((entry) => entry.isDirectory())
-		.filter((entry) => entry.name.startsWith("openclaw-"))
-		.map((entry) => {
-			const full = path.join(runtimeDepsRoot, entry.name);
-			const stat = fs.statSync(full);
+  const packages = fs
+    .readdirSync(runtimeDepsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.name.startsWith("openclaw-"))
+    .map((entry) => {
+      const full = path.join(runtimeDepsRoot, entry.name);
+      const stat = fs.statSync(full);
+      return {
+        full,
+        name: entry.name,
+        mtimeMs: stat.mtimeMs,
+      };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-			return {
-				full,
-				name: entry.name,
-				mtimeMs: stat.mtimeMs,
-			};
-		})
-		.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const selected = all ? packages : packages.slice(0, 1);
 
-	const selected = all ? packages : packages.slice(0, 1);
+  console.log(
+    `[patch] runtime dep packages selected: ${selected.length}/${packages.length}`,
+  );
 
-	console.log(
-		`[patch] runtime dep packages selected: ${selected.length}/${packages.length}`,
-	);
-
-	return selected.map((pkg) => pkg.full);
+  return selected.map((pkg) => pkg.full);
 }
 
-function findRuntimeFilesInPackageRoot(packageRoot) {
-	const root = path.resolve(packageRoot);
-	const candidates = candidateFilesForPackageRoot(root);
+function findRuntimeFilesInPackageRoot(packageRoot, { discover }) {
+  const root = path.resolve(packageRoot);
 
-	console.log(`[patch] candidate files under ${root}: ${candidates.length}`);
+  const knownTargets = knownTargetFilesForPackageRoot(root);
+  const existingKnownTargets = uniqueExistingFiles(knownTargets);
 
-	const matches = [];
+  console.log(
+    `[patch] known target files under ${root}: ${existingKnownTargets.length}/${knownTargets.length}`,
+  );
 
-	for (const file of candidates) {
-		const kind = inspectCandidateFile(file);
+  if (existingKnownTargets.length > 0) {
+    for (const file of existingKnownTargets) {
+      console.log(`[patch] known target: ${file}`);
+    }
+  }
 
-		if (!kind.match) {
-			continue;
-		}
+  const missingKnownTargets = knownTargets.filter((file) => !fs.existsSync(file));
+  if (missingKnownTargets.length > 0) {
+    console.log(`[patch] missing known targets under ${root}:`);
+    for (const file of missingKnownTargets) {
+      console.log(`  - ${file}`);
+    }
+  }
 
-		console.log(`[patch] matched ${kind.reason}: ${file}`);
-		matches.push(file);
-	}
+  if (!discover) {
+    return existingKnownTargets;
+  }
 
-	return uniqueExistingFiles(matches);
+  console.log(`[patch] discover mode enabled for ${root}`);
+
+  const discovered = discoverCandidateFilesForPackageRoot(root);
+
+  return uniqueExistingFiles([...existingKnownTargets, ...discovered]);
+}
+
+function knownTargetFilesForPackageRoot(root) {
+  return KNOWN_TARGET_RELATIVE_FILES.map((relative) =>
+    path.join(root, ...relative.split("/")),
+  );
+}
+
+function discoverCandidateFilesForPackageRoot(root) {
+  const candidates = candidateFilesForPackageRoot(root);
+
+  console.log(`[patch] discovery candidates under ${root}: ${candidates.length}`);
+
+  const matches = [];
+  const scanStats = {
+    skippedByNeedle: 0,
+    inspected: 0,
+  };
+
+  for (const file of candidates) {
+    const kind = inspectCandidateFile(file, scanStats);
+    if (!kind.match) {
+      continue;
+    }
+
+    console.log(`[patch] discovered ${kind.reason}: ${file}`);
+    matches.push(file);
+  }
+
+  console.log(
+    `[patch] discovery summary under ${root}: inspected=${scanStats.inspected}, skipped_by_prefilter=${scanStats.skippedByNeedle}, matches=${matches.length}`,
+  );
+
+  return uniqueExistingFiles(matches);
 }
 
 function candidateFilesForPackageRoot(root) {
-	const out = [];
+  const out = [];
 
-	out.push(path.join(root, PI_EXTENSIONS_RELATIVE_PATH));
-	out.push(path.join(root, "src", "plugins", "registry.ts"));
-	out.push(path.join(root, "src", "plugins", "registry.js"));
+  out.push(path.join(root, "src", "agents", "pi-embedded-runner", "extensions.ts"));
+  out.push(path.join(root, "src", "agents", "pi-embedded-runner", "run", "attempt.ts"));
+  out.push(path.join(root, "src", "plugins", "registry.ts"));
+  out.push(path.join(root, "src", "plugins", "registry.js"));
 
-	const dist = path.join(root, "dist");
+  const dist = path.join(root, "dist");
 
-	if (!fs.existsSync(dist) || !fs.statSync(dist).isDirectory()) {
-		return out;
-	}
+  if (fs.existsSync(dist) && fs.statSync(dist).isDirectory()) {
+    const entries = fs
+      .readdirSync(dist, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .filter((entry) => /\.(js|mjs|cjs)$/.test(entry.name))
+      .map((entry) => path.join(dist, entry.name))
+      .sort();
 
-	const entries = fs
-		.readdirSync(dist, { withFileTypes: true })
-		.filter((entry) => entry.isFile())
-		.filter((entry) => {
-			const name = entry.name;
+    out.push(...entries);
+  }
 
-			return (
-				/^loader-[A-Za-z0-9_-]+\.(js|mjs|cjs)$/.test(name) ||
-				/^registry-[A-Za-z0-9_-]+\.(js|mjs|cjs)$/.test(name) ||
-				/^agent-tool-result-middleware.*\.(js|mjs|cjs)$/.test(name) ||
-				/^compaction-successor-transcript-[A-Za-z0-9_-]+\.(js|mjs|cjs)$/.test(
-					name,
-				)
-			);
-		})
-		.map((entry) => path.join(dist, entry.name))
-		.sort();
+  out.push(
+    path.join(root, "dist", "agents", "pi-embedded-runner", "extensions.js"),
+    path.join(root, "dist", "agents", "pi-embedded-runner", "extensions.mjs"),
+    path.join(root, "dist", "agents", "pi-embedded-runner", "extensions.cjs"),
+    path.join(root, "dist", "agents", "pi-embedded-runner", "run", "attempt.js"),
+    path.join(root, "dist", "agents", "pi-embedded-runner", "run", "attempt.mjs"),
+    path.join(root, "dist", "agents", "pi-embedded-runner", "run", "attempt.cjs"),
+  );
 
-	out.push(...entries);
-
-	const knownNested = [
-		path.join(dist, "agents", "pi-embedded-runner", "extensions.js"),
-		path.join(dist, "agents", "pi-embedded-runner", "extensions.mjs"),
-		path.join(dist, "agents", "pi-embedded-runner", "extensions.cjs"),
-	];
-
-	out.push(...knownNested);
-
-	return uniqueExistingFiles(out);
+  return uniqueExistingFiles(out);
 }
 
-function inspectCandidateFile(file) {
-	if (!fs.existsSync(file)) {
-		return { match: false, reason: "missing" };
-	}
+function inspectCandidateFile(file, scanStats = undefined) {
+  if (!fs.existsSync(file)) return { match: false, reason: "missing" };
 
-	const stat = fs.statSync(file);
+  const stat = fs.statSync(file);
+  if (!stat.isFile()) return { match: false, reason: "not-file" };
 
-	if (!stat.isFile()) {
-		return { match: false, reason: "not-file" };
-	}
+  if (stat.size > MAX_CANDIDATE_BYTES) {
+    console.warn(`[patch] skipping large candidate (${stat.size} bytes): ${file}`);
+    return { match: false, reason: "too-large" };
+  }
 
-	if (stat.size > MAX_CANDIDATE_BYTES) {
-		console.warn(
-			`[patch] skipping large candidate (${stat.size} bytes): ${file}`,
-		);
-		return { match: false, reason: "too-large" };
-	}
+  const text = fs.readFileSync(file, "utf8");
 
-	console.log(`[patch] inspecting: ${file}`);
+  if (!hasAnyPatchNeedle(text)) {
+    if (scanStats) scanStats.skippedByNeedle += 1;
+    return { match: false, reason: "prefilter" };
+  }
 
-	const text = fs.readFileSync(file, "utf8");
+  if (scanStats) scanStats.inspected += 1;
+  if (verbose) console.log(`[patch] inspecting: ${file}`);
 
-	if (isRelevantRuntimeFile(text) || isAlreadyPatchedTrustFile(text)) {
-		return { match: true, reason: "trust_guard" };
-	}
+  if (isRelevantRuntimeFile(text) || isAlreadyPatchedTrustFile(text)) {
+    return { match: true, reason: "trust_guard" };
+  }
 
-	if (isRelevantPiExtensionsFile(file, text)) {
-		return { match: true, reason: "pi_context_source" };
-	}
+  if (isRelevantPiContextFile(file, text)) {
+    return { match: true, reason: "pi_context" };
+  }
 
-	if (isRelevantPiCompiledFile(file, text)) {
-		return { match: true, reason: "pi_context_compiled" };
-	}
+  const callsite = getPiCallsitePatchInfo(text);
+  if (callsite.found) {
+    return {
+      match: true,
+      reason: callsite.current ? "pi_callsite_current" : "pi_callsite",
+    };
+  }
 
-	if (isAlreadyPatchedPiFile(file, text)) {
-		return { match: true, reason: "pi_context_already_patched" };
-	}
+  return { match: false, reason: "not-relevant" };
+}
 
-	return { match: false, reason: "not-relevant" };
+function hasAnyPatchNeedle(source) {
+  return (
+    source.includes(FUNCTION_NAME) ||
+    source.includes(DIAGNOSTIC) ||
+    source.includes(TRUST_PATCH_MARKER) ||
+    source.includes(PI_CONTEXT_PATCH_MARKER) ||
+    source.includes("buildAgentToolResultMiddlewareFactory") ||
+    source.includes("createAgentToolResultMiddlewareRunner") ||
+    source.includes("buildEmbeddedExtensionFactories")
+  );
 }
 
 function patchTargetFile(target, pluginId, options = {}) {
-	const before = fs.readFileSync(target, "utf8");
+  const before = fs.readFileSync(target, "utf8");
 
-	const trustTargetFound =
-		isRelevantRuntimeFile(before) || isAlreadyPatchedTrustFile(before);
+  const trustTargetFound =
+    isRelevantRuntimeFile(before) || isAlreadyPatchedTrustFile(before);
 
-	const piContextTargetFound =
-		isRelevantPiExtensionsFile(target, before) ||
-		isRelevantPiCompiledFile(target, before) ||
-		isAlreadyPatchedPiFile(target, before);
+  const piContextTargetFound = isRelevantPiContextFile(target, before);
+  const piCallsiteTargetFound = getPiCallsitePatchInfo(before).found;
 
-	let after = before;
-	let trustPatched = false;
-	let piContextPatched = false;
+  let after = before;
+  let trustPatched = false;
+  let piContextPatched = false;
+  let piCallsitePatched = false;
 
-	if (isRelevantRuntimeFile(after) && !after.includes(TRUST_PATCH_MARKER)) {
-		const next = patchRuntimeFile(after, pluginId);
+  if (isRelevantRuntimeFile(after)) {
+    const next = patchRuntimeFile(after, pluginId);
+    if (next !== after) {
+      after = next;
+      trustPatched = true;
+    }
+  }
 
-		if (next !== after) {
-			after = next;
-			trustPatched = true;
-		}
-	}
+  if (isRelevantPiContextFile(target, after)) {
+    const next = patchPiContextFile(after, target);
+    if (next !== after) {
+      after = next;
+      piContextPatched = true;
+    }
+  }
 
-	if (
-		isRelevantPiExtensionsFile(target, after) &&
-		!after.includes(PI_CONTEXT_PATCH_MARKER)
-	) {
-		const next = patchPiExtensionsFile(after);
+  if (getPiCallsitePatchInfo(after).found) {
+    const next = patchPiCallsiteFile(after);
+    if (next !== after) {
+      after = next;
+      piCallsitePatched = true;
+    }
+  }
 
-		if (next !== after) {
-			after = next;
-			piContextPatched = true;
-		}
-	}
+  const changed = after !== before;
 
-	if (
-		isRelevantPiCompiledFile(target, after) &&
-		!after.includes(PI_CONTEXT_PATCH_MARKER)
-	) {
-		const next = patchPiCompiledFile(after);
+  const trustAlreadyPatched =
+    trustTargetFound && !trustPatched && after.includes(TRUST_PATCH_MARKER);
 
-		if (next !== after) {
-			after = next;
-			piContextPatched = true;
-		}
-	}
+  const piContextAlreadyPatched =
+    piContextTargetFound && !piContextPatched && isCurrentPiContextPatched(after);
 
-	const changed = after !== before;
+  const piCallsiteAlreadyPatched =
+    piCallsiteTargetFound &&
+    !piCallsitePatched &&
+    getPiCallsitePatchInfo(after).current;
 
-	const trustAlreadyPatched =
-		trustTargetFound && !trustPatched && before.includes(TRUST_PATCH_MARKER);
+  if (!changed) {
+    if (trustAlreadyPatched || piContextAlreadyPatched || piCallsiteAlreadyPatched) {
+      console.log(`\nAlready patched/current: ${target}`);
+    } else if (trustTargetFound || piContextTargetFound || piCallsiteTargetFound) {
+      console.warn(`\nFound target but could not apply patch: ${target}`);
+      printPatchDiagnosticSnippet(after, target);
+    } else {
+      console.log(`\nNo patch needed: ${target}`);
+    }
 
-	const piContextAlreadyPatched =
-		piContextTargetFound &&
-		!piContextPatched &&
-		before.includes(PI_CONTEXT_PATCH_MARKER);
+    return {
+      trustTargetFound,
+      trustPatched: false,
+      trustAlreadyPatched,
+      piContextTargetFound,
+      piContextPatched: false,
+      piContextAlreadyPatched,
+      piCallsiteTargetFound,
+      piCallsitePatched: false,
+      piCallsiteAlreadyPatched,
+    };
+  }
 
-	if (!changed) {
-		if (trustAlreadyPatched || piContextAlreadyPatched) {
-			console.log(`\nAlready patched: ${target}`);
-		} else if (trustTargetFound || piContextTargetFound) {
-			console.warn(`\nFound target but could not apply patch: ${target}`);
-			printPatchDiagnosticSnippet(before, target);
-		} else {
-			console.warn(`Skipping non-matching file: ${target}`);
-		}
+  verifyPatched(after, target, pluginId, {
+    trustPatchApplied: trustPatched || trustAlreadyPatched,
+    piContextPatchApplied: piContextPatched || piContextAlreadyPatched,
+    piCallsitePatchApplied: piCallsitePatched || piCallsiteAlreadyPatched,
+  });
 
-		return {
-			trustTargetFound,
-			trustPatched: false,
-			trustAlreadyPatched,
-			piContextTargetFound,
-			piContextPatched: false,
-			piContextAlreadyPatched,
-		};
-	}
+  if (options.dryRun) {
+    console.log(`\nWould patch: ${target}`);
+    printPatchSnippet(after, {
+      trustPatched,
+      piContextPatched,
+      piCallsitePatched,
+    });
+  } else {
+    const backup = `${target}.bak-openclaw-workflow-${timestamp()}`;
+    fs.copyFileSync(target, backup);
+    fs.writeFileSync(target, after, "utf8");
 
-	verifyPatched(after, target, pluginId, {
-		trustPatchApplied: trustPatched,
-		piContextPatchApplied: piContextPatched,
-	});
+    console.log(`\nPatched: ${target}`);
+    console.log(`Backup:  ${backup}`);
+  }
 
-	if (options.dryRun) {
-		console.log(`\nWould patch: ${target}`);
-		printPatchSnippet(after);
-	} else {
-		const backup = `${target}.bak-openclaw-workflow-${timestamp()}`;
-		fs.copyFileSync(target, backup);
-		fs.writeFileSync(target, after, "utf8");
-
-		console.log(`\nPatched: ${target}`);
-		console.log(`Backup:  ${backup}`);
-	}
-
-	return {
-		trustTargetFound,
-		trustPatched,
-		trustAlreadyPatched: false,
-		piContextTargetFound,
-		piContextPatched,
-		piContextAlreadyPatched: false,
-	};
+  return {
+    trustTargetFound,
+    trustPatched,
+    trustAlreadyPatched: false,
+    piContextTargetFound,
+    piContextPatched,
+    piContextAlreadyPatched: false,
+    piCallsiteTargetFound,
+    piCallsitePatched,
+    piCallsiteAlreadyPatched: false,
+  };
 }
 
 function isRelevantRuntimeFile(source) {
-	return (
-		source.includes(FUNCTION_NAME) &&
-		source.includes(DIAGNOSTIC) &&
-		source.includes("record.origin")
-	);
+  return (
+    source.includes(FUNCTION_NAME) &&
+    source.includes(DIAGNOSTIC) &&
+    source.includes("record.origin")
+  );
 }
 
 function isAlreadyPatchedTrustFile(source) {
-	return (
-		source.includes(TRUST_PATCH_MARKER) &&
-		source.includes(FUNCTION_NAME) &&
-		source.includes(DIAGNOSTIC)
-	);
+  return (
+    source.includes(TRUST_PATCH_MARKER) &&
+    source.includes(FUNCTION_NAME) &&
+    source.includes(DIAGNOSTIC)
+  );
 }
 
-function isRelevantPiExtensionsFile(file, source) {
-	const normalizedFile = file.replaceAll("\\", "/");
-	const normalizedRelative = PI_EXTENSIONS_RELATIVE_PATH.replaceAll("\\", "/");
+function isRelevantPiContextFile(file, source) {
+  if (!/\.(ts|js|mjs|cjs)$/.test(file)) return false;
 
-	if (!normalizedFile.endsWith(normalizedRelative)) {
-		return false;
-	}
+  const hasFactory = /function\s+buildAgentToolResultMiddlewareFactory\s*\(/.test(source);
+  const hasRunner = /createAgentToolResultMiddlewareRunner\s*\(/.test(source);
+  const hasPiToolResult = /pi\.on\s*\(\s*["']tool_result["']/.test(source);
+  const hasApply = /applyToolResultMiddleware\s*\(/.test(source);
 
-	return (
-		/buildAgentToolResultMiddlewareFactory\s*\(\s*\)\s*:\s*ExtensionFactory/.test(
-			source,
-		) &&
-		/createAgentToolResultMiddlewareRunner\s*\(\s*\{\s*runtime:\s*["']pi["']\s*\}\s*\)/.test(
-			source,
-		) &&
-		/pi\.on\s*\(\s*["']tool_result["']/.test(source)
-	);
+  return hasFactory && hasRunner && hasPiToolResult && hasApply;
 }
 
-function isRelevantPiCompiledFile(file, source) {
-	const normalized = file.replaceAll("\\", "/");
+function getPiCallsitePatchInfo(source) {
+  const calls = findBuildEmbeddedExtensionFactoryCalls(source);
+  const patchable = calls.filter((call) => /\bsessionManager\b/.test(call.body));
 
-	if (!normalized.includes("/dist/")) return false;
-	if (!/\.(js|mjs|cjs)$/.test(file)) return false;
+  if (patchable.length === 0) {
+    return { found: false, current: false, count: 0, currentCount: 0 };
+  }
 
-	return (
-		/buildAgentToolResultMiddlewareFactory\s*\(\s*\)\s*\{/.test(source) &&
-		/createAgentToolResultMiddlewareRunner\s*\(\s*\{\s*runtime:\s*["']pi["']\s*\}\s*\)/.test(
-			source,
-		) &&
-		/pi\.on\s*\(\s*["']tool_result["']/.test(source) &&
-		/runner\.applyToolResultMiddleware\s*\(/.test(source)
-	);
+  const currentCount = patchable.filter((call) =>
+    callHasIdentityParams(call.body),
+  ).length;
+
+  return {
+    found: true,
+    current: currentCount === patchable.length,
+    count: patchable.length,
+    currentCount,
+  };
 }
 
-function isAlreadyPatchedPiFile(file, source) {
-	const normalized = file.replaceAll("\\", "/");
+function callHasIdentityParams(body) {
+  return (
+    /runId\s*:\s*params\.runId/.test(body) &&
+    /sessionId\s*:\s*params\.sessionId/.test(body) &&
+    /sessionKey\s*:\s*params\.sessionKey/.test(body)
+  );
+}
 
-	return (
-		source.includes(PI_CONTEXT_PATCH_MARKER) &&
-		(normalized.includes("/dist/") ||
-			normalized.endsWith(PI_EXTENSIONS_RELATIVE_PATH.replaceAll("\\", "/"))) &&
-		/buildAgentToolResultMiddlewareFactory/.test(source) &&
-		/applyToolResultMiddleware/.test(source)
-	);
+function isCurrentPiContextPatched(source) {
+  return (
+    source.includes(PI_CONTEXT_PATCH_VERSION_MARKER) &&
+    source.includes("params.runId") &&
+    source.includes("params.sessionId") &&
+    source.includes("params.sessionKey") &&
+    source.includes("normalizedThreadId") &&
+    source.includes("createAgentToolResultMiddlewareRunner(middlewareCtx)")
+  );
 }
 
 function patchRuntimeFile(source, pluginId) {
-	const functionIndex = source.indexOf(`const ${FUNCTION_NAME}`);
+  if (source.includes(TRUST_PATCH_MARKER)) return source;
 
-	const symbolIndex =
-		functionIndex >= 0 ? functionIndex : source.indexOf(FUNCTION_NAME);
+  const functionIndex = source.indexOf(`const ${FUNCTION_NAME}`);
+  const symbolIndex =
+    functionIndex >= 0 ? functionIndex : source.indexOf(FUNCTION_NAME);
 
-	if (symbolIndex < 0) {
-		return source;
-	}
+  if (symbolIndex < 0) return source;
 
-	const diagnosticIndex = source.indexOf(DIAGNOSTIC, symbolIndex);
+  const diagnosticIndex = source.indexOf(DIAGNOSTIC, symbolIndex);
+  if (diagnosticIndex < 0) return source;
 
-	if (diagnosticIndex < 0) {
-		return source;
-	}
+  const windowStart = Math.max(0, symbolIndex - 700);
+  const windowEnd = Math.min(source.length, diagnosticIndex + 1600);
+  const window = source.slice(windowStart, windowEnd);
 
-	const windowStart = Math.max(0, symbolIndex - 500);
-	const windowEnd = Math.min(source.length, diagnosticIndex + 1200);
-	const window = source.slice(windowStart, windowEnd);
+  const patchedWindow = patchMiddlewareWindow(window, pluginId);
+  if (patchedWindow === window) return source;
 
-	if (window.includes(TRUST_PATCH_MARKER)) {
-		return source;
-	}
-
-	const patchedWindow = patchMiddlewareWindow(window, pluginId);
-
-	if (patchedWindow === window) {
-		return source;
-	}
-
-	return source.slice(0, windowStart) + patchedWindow + source.slice(windowEnd);
+  return source.slice(0, windowStart) + patchedWindow + source.slice(windowEnd);
 }
 
 function patchMiddlewareWindow(window, pluginId) {
-	const pluginLiteral = JSON.stringify(pluginId);
+  const pluginLiteral = JSON.stringify(pluginId);
 
-	const functionMatch = new RegExp(
-		String.raw`${FUNCTION_NAME}\s*=\s*\(\s*([A-Za-z_$][\w$]*)\s*,`,
-	).exec(window);
+  const functionMatch = new RegExp(
+    String.raw`${FUNCTION_NAME}\s*=\s*\(\s*([A-Za-z_$][\w$]*)\s*,`,
+  ).exec(window);
 
-	const recordVar = functionMatch?.[1] ?? "record";
+  const recordVar = functionMatch?.[1] ?? "record";
 
-	const patterns = [
-		new RegExp(
-			String.raw`if\s*\(\s*${escapeRegExp(recordVar)}\.origin\s*!==\s*(["'])bundled\1\s*\)\s*\{`,
-			"g",
-		),
-		new RegExp(
-			String.raw`if\s*\(\s*${escapeRegExp(recordVar)}\.origin!==(["'])bundled\1\s*\)\s*\{`,
-			"g",
-		),
-		/if\s*\(\s*([A-Za-z_$][\w$]*)\.origin\s*!==\s*(["'])bundled\2\s*\)\s*\{/g,
-	];
+  const patterns = [
+    new RegExp(
+      String.raw`if\s*\(\s*${escapeRegExp(recordVar)}\.origin\s*!==\s*(["'])bundled\1\s*\)\s*\{`,
+      "g",
+    ),
+    /if\s*\(\s*([A-Za-z_$][\w$]*)\.origin\s*!==\s*(["'])bundled\2\s*\)\s*\{/g,
+  ];
 
-	const matches = [];
+  const matches = [];
 
-	for (const pattern of patterns) {
-		for (const match of window.matchAll(pattern)) {
-			matches.push({ pattern, match });
-		}
-	}
+  for (const pattern of patterns) {
+    for (const match of window.matchAll(pattern)) {
+      matches.push({ pattern, match });
+    }
+  }
 
-	if (matches.length === 0) {
-		return window;
-	}
+  if (matches.length === 0) return window;
 
-	const diagnosticIndex = window.indexOf(DIAGNOSTIC);
+  const diagnosticIndex = window.indexOf(DIAGNOSTIC);
 
-	matches.sort((a, b) => {
-		const ai = a.match.index ?? 0;
-		const bi = b.match.index ?? 0;
+  matches.sort((a, b) => {
+    const ai = a.match.index ?? 0;
+    const bi = b.match.index ?? 0;
+    return Math.abs(diagnosticIndex - ai) - Math.abs(diagnosticIndex - bi);
+  });
 
-		return Math.abs(diagnosticIndex - ai) - Math.abs(diagnosticIndex - bi);
-	});
+  const selected = matches[0];
+  const match = selected.match;
+  const original = match[0];
 
-	const selected = matches[0];
-	const match = selected.match;
-	const original = match[0];
+  let variable = recordVar;
+  let quote = '"';
 
-	let variable = recordVar;
-	let quote = '"';
+  if (selected.pattern === patterns[1]) {
+    variable = match[1];
+    quote = match[2];
+  } else {
+    quote = match[1];
+  }
 
-	if (selected.pattern === patterns[2]) {
-		variable = match[1];
-		quote = match[2];
-	} else {
-		quote = match[1];
-	}
+  const allowExpression =
+    `${variable}.id !== ${pluginLiteral} && ` +
+    `${variable}.pluginId !== ${pluginLiteral} && ` +
+    `${variable}.manifest?.id !== ${pluginLiteral}`;
 
-	const allowExpression =
-		`${variable}.id !== ${pluginLiteral} && ` +
-		`${variable}.pluginId !== ${pluginLiteral} && ` +
-		`${variable}.manifest?.id !== ${pluginLiteral}`;
+  const replacement =
+    `/* ${TRUST_PATCH_MARKER}: allow ${pluginId} */\n` +
+    `                if (${variable}.origin !== ${quote}bundled${quote} && ${allowExpression}) {`;
 
-	const replacement =
-		`/* ${TRUST_PATCH_MARKER}: allow ${pluginId} */\n` +
-		`                if (${variable}.origin !== ${quote}bundled${quote} && ${allowExpression}) {`;
-
-	return (
-		window.slice(0, match.index) +
-		replacement +
-		window.slice((match.index ?? 0) + original.length)
-	);
+  return (
+    window.slice(0, match.index) +
+    replacement +
+    window.slice((match.index ?? 0) + original.length)
+  );
 }
 
-function patchPiExtensionsFile(source) {
-	let out = source;
+function patchPiContextFile(source, file) {
+  let out = source;
 
-	const signaturePattern =
-		/function buildAgentToolResultMiddlewareFactory\(\): ExtensionFactory \{/;
+  out = patchPiFactorySignature(out, file);
 
-	if (signaturePattern.test(out)) {
-		out = out.replace(
-			signaturePattern,
-			[
-				"function buildAgentToolResultMiddlewareFactory(params: {",
-				"  sessionManager: SessionManager;",
-				"}): ExtensionFactory {",
-			].join("\n"),
-		);
-	}
+  out = out.replace(
+    /^[ \t]*const runner = createAgentToolResultMiddlewareRunner\s*\(\s*\{\s*runtime\s*:\s*["']pi["']\s*\}\s*\);[ \t]*\n/m,
+    "",
+  );
 
-	out = out.replace(
-		/^[ \t]*const runner = createAgentToolResultMiddlewareRunner\s*\(\s*\{\s*runtime:\s*["']pi["']\s*\}\s*\);[ \t]*\n/m,
-		"",
-	);
+  out = replaceExistingPiContextPatch(out);
 
-	if (!out.includes(PI_CONTEXT_PATCH_MARKER)) {
-		out = out.replace(
-			/(^[ \t]*)const result = await runner\.applyToolResultMiddleware\s*\(/m,
-			(_match, indent) =>
-				[
-					`${indent}/* ${PI_CONTEXT_PATCH_MARKER} */`,
-					`${indent}const sessionManagerAny = params.sessionManager as any;`,
-					`${indent}const rawEventAny = recordFromUnknown(rawEvent);`,
-					`${indent}const embeddedRunId =`,
-					`${indent}  (typeof (event as any).runId === "string" && (event as any).runId.trim()) ||`,
-					`${indent}  (typeof (event as any).sessionId === "string" && (event as any).sessionId.trim()) ||`,
-					`${indent}  (typeof (event as any).runtimeRunId === "string" && (event as any).runtimeRunId.trim()) ||`,
-					`${indent}  (typeof rawEventAny.runId === "string" && rawEventAny.runId.trim()) ||`,
-					`${indent}  (typeof rawEventAny.sessionId === "string" && rawEventAny.sessionId.trim()) ||`,
-					`${indent}  (typeof rawEventAny.runtimeRunId === "string" && rawEventAny.runtimeRunId.trim()) ||`,
-					`${indent}  (typeof rawEventAny.subagentRunId === "string" && rawEventAny.subagentRunId.trim()) ||`,
-					`${indent}  (typeof rawEventAny.subagent?.runId === "string" && rawEventAny.subagent.runId.trim()) ||`,
-					`${indent}  undefined;`,
-					`${indent}const middlewareCtx = {`,
-					`${indent}  runtime: "pi" as const,`,
-					`${indent}  agentId:`,
-					`${indent}    sessionManagerAny.agentId ??`,
-					`${indent}    sessionManagerAny.agent?.id ??`,
-					`${indent}    undefined,`,
-					`${indent}  sessionId:`,
-					`${indent}    embeddedRunId ??`,
-					`${indent}    sessionManagerAny.sessionId ??`,
-					`${indent}    sessionManagerAny.session?.id ??`,
-					`${indent}    sessionManagerAny.currentSessionId ??`,
-					`${indent}    undefined,`,
-					`${indent}  sessionKey:`,
-					`${indent}    (typeof event.threadId === "string" && event.threadId.trim()) ??`,
-					`${indent}    sessionManagerAny.sessionKey ??`,
-					`${indent}    sessionManagerAny.session?.key ??`,
-					`${indent}    sessionManagerAny.key ??`,
-					`${indent}    undefined,`,
-					`${indent}  runId:`,
-					`${indent}    embeddedRunId ??`,
-					`${indent}    sessionManagerAny.runId ??`,
-					`${indent}    sessionManagerAny.currentRunId ??`,
-					`${indent}    undefined,`,
-					`${indent}};`,
-					`${indent}const runner = createAgentToolResultMiddlewareRunner(middlewareCtx);`,
-					`${indent}if (`,
-					`${indent}  process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||`,
-					`${indent}  process.env.OPENCLAW_WORKFLOW_TRACE === "true"`,
-					`${indent}) {`,
-					`${indent}  console.warn("[openclaw-trace] pi.tool_result.middleware_context", {`,
-					`${indent}    toolName: event.toolName,`,
-					`${indent}    toolCallId,`,
-					`${indent}    rawEventKeys: Object.keys(rawEventAny),`,
-					`${indent}    rawEventThreadId: event.threadId,`,
-					`${indent}    embeddedRunId,`,
-					`${indent}    sessionManagerKeys: Object.keys(sessionManagerAny),`,
-					`${indent}    middlewareCtx,`,
-					`${indent}  });`,
-					`${indent}}`,
-					`${indent}const result = await runner.applyToolResultMiddleware(`,
-				].join("\n"),
-		);
-	}
+  if (!out.includes(PI_CONTEXT_PATCH_VERSION_MARKER)) {
+    out = insertPiContextPatch(out);
+  }
 
-	const factoryCall =
-		"factories.push(buildAgentToolResultMiddlewareFactory());";
+  out = patchPiFactoryCall(out);
 
-	if (out.includes(factoryCall)) {
-		out = out.replace(
-			factoryCall,
-			[
-				"factories.push(",
-				"  buildAgentToolResultMiddlewareFactory({",
-				"    sessionManager: params.sessionManager,",
-				"  }),",
-				");",
-			].join("\n"),
-		);
-	}
-
-	return out;
+  return out;
 }
 
-function patchPiCompiledFile(source) {
-	let out = source;
+function patchPiFactorySignature(source, file) {
+  const isTs = file.endsWith(".ts");
 
-	if (out.includes(PI_CONTEXT_PATCH_MARKER)) {
-		return out;
-	}
+  if (isTs) {
+    return source
+      .replace(
+        /function\s+buildAgentToolResultMiddlewareFactory\s*\(\s*\)\s*:\s*ExtensionFactory\s*\{/,
+        [
+          "function buildAgentToolResultMiddlewareFactory(params: {",
+          "  sessionManager?: SessionManager;",
+          "  runId?: string;",
+          "  sessionId?: string;",
+          "  sessionKey?: string;",
+          "} = {}): ExtensionFactory {",
+        ].join("\n"),
+      )
+      .replace(
+        /function\s+buildAgentToolResultMiddlewareFactory\s*\(\s*params\s*:\s*\{[\s\S]*?\}\s*=\s*\{\}\s*\)\s*:\s*ExtensionFactory\s*\{/,
+        [
+          "function buildAgentToolResultMiddlewareFactory(params: {",
+          "  sessionManager?: SessionManager;",
+          "  runId?: string;",
+          "  sessionId?: string;",
+          "  sessionKey?: string;",
+          "} = {}): ExtensionFactory {",
+        ].join("\n"),
+      );
+  }
 
-	const signaturePattern =
-		/function buildAgentToolResultMiddlewareFactory\(\)\s*\{/;
+  return source
+    .replace(
+      /function\s+buildAgentToolResultMiddlewareFactory\s*\(\s*\)\s*\{/,
+      "function buildAgentToolResultMiddlewareFactory(params = {}) {",
+    )
+    .replace(
+      /function\s+buildAgentToolResultMiddlewareFactory\s*\(\s*params\s*\)\s*\{/,
+      "function buildAgentToolResultMiddlewareFactory(params = {}) {",
+    );
+}
 
-	if (signaturePattern.test(out)) {
-		out = out.replace(
-			signaturePattern,
-			"function buildAgentToolResultMiddlewareFactory(params = {}) {",
-		);
-	}
+function replaceExistingPiContextPatch(source) {
+  const markerIndex = source.indexOf(PI_CONTEXT_PATCH_MARKER);
+  if (markerIndex < 0) return source;
 
-	out = out.replace(
-		/^[ \t]*const runner = createAgentToolResultMiddlewareRunner\s*\(\s*\{\s*runtime:\s*["']pi["']\s*\}\s*\);[ \t]*\n/m,
-		"",
-	);
+  const start = findLineStart(source, markerIndex);
+  const resultIndex = source.indexOf(
+    "const result = await runner.applyToolResultMiddleware",
+    markerIndex,
+  );
 
-	out = out.replace(
-		/(^[ \t]*)const result = await runner\.applyToolResultMiddleware\s*\(/m,
-		(_match, indent) =>
-			[
-				`${indent}/* ${PI_CONTEXT_PATCH_MARKER} */`,
-				`${indent}const sessionManagerAny = params.sessionManager || {};`,
-				`${indent}const rawEventAny = rawEvent && typeof rawEvent === "object" ? rawEvent : {};`,
-				`${indent}const embeddedRunId =`,
-				`${indent}  (typeof event.runId === "string" && event.runId.trim()) ||`,
-				`${indent}  (typeof event.sessionId === "string" && event.sessionId.trim()) ||`,
-				`${indent}  (typeof event.runtimeRunId === "string" && event.runtimeRunId.trim()) ||`,
-				`${indent}  (typeof rawEventAny.runId === "string" && rawEventAny.runId.trim()) ||`,
-				`${indent}  (typeof rawEventAny.sessionId === "string" && rawEventAny.sessionId.trim()) ||`,
-				`${indent}  (typeof rawEventAny.runtimeRunId === "string" && rawEventAny.runtimeRunId.trim()) ||`,
-				`${indent}  (typeof rawEventAny.subagentRunId === "string" && rawEventAny.subagentRunId.trim()) ||`,
-				`${indent}  (rawEventAny.subagent != null && typeof rawEventAny.subagent.runId === "string" && rawEventAny.subagent.runId.trim()) ||`,
-				`${indent}  void 0;`,
-				`${indent}const middlewareCtx = {`,
-				`${indent}  runtime: "pi",`,
-				`${indent}  agentId:`,
-				`${indent}    sessionManagerAny.agentId ??`,
-				`${indent}    (sessionManagerAny.agent != null ? sessionManagerAny.agent.id : undefined),`,
-				`${indent}  sessionId:`,
-				`${indent}    embeddedRunId ??`,
-				`${indent}    sessionManagerAny.sessionId ??`,
-				`${indent}    (sessionManagerAny.session != null ? sessionManagerAny.session.id : undefined) ??`,
-				`${indent}    sessionManagerAny.currentSessionId,`,
-				`${indent}  sessionKey:`,
-				`${indent}    (typeof event.threadId === "string" && event.threadId.trim()) ??`,
-				`${indent}    sessionManagerAny.sessionKey ??`,
-				`${indent}    (sessionManagerAny.session != null ? sessionManagerAny.session.key : undefined) ??`,
-				`${indent}    sessionManagerAny.key,`,
-				`${indent}  runId:`,
-				`${indent}    embeddedRunId ??`,
-				`${indent}    sessionManagerAny.runId ??`,
-				`${indent}    sessionManagerAny.currentRunId,`,
-				`${indent}};`,
-				`${indent}const runner = createAgentToolResultMiddlewareRunner(middlewareCtx);`,
-				`${indent}if (`,
-				`${indent}  process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||`,
-				`${indent}  process.env.OPENCLAW_WORKFLOW_TRACE === "true"`,
-				`${indent}) {`,
-				`${indent}  console.warn("[openclaw-trace] pi.tool_result.middleware_context", {`,
-				`${indent}    toolName: event.toolName,`,
-				`${indent}    toolCallId,`,
-				`${indent}    rawEventKeys: Object.keys(rawEventAny),`,
-				`${indent}    rawEventThreadId: event.threadId,`,
-				`${indent}    embeddedRunId,`,
-				`${indent}    sessionManagerKeys: Object.keys(sessionManagerAny),`,
-				`${indent}    middlewareCtx,`,
-				`${indent}  });`,
-				`${indent}}`,
-				`${indent}const result = await runner.applyToolResultMiddleware(`,
-			].join("\n"),
-	);
+  if (resultIndex < 0) return source;
 
-	const factoryCallPattern =
-		/factories\.push\s*\(\s*buildAgentToolResultMiddlewareFactory\s*\(\s*\)\s*\)\s*;/;
+  return source.slice(0, start) + source.slice(resultIndex);
+}
 
-	if (factoryCallPattern.test(out)) {
-		out = out.replace(
-			factoryCallPattern,
-			[
-				"factories.push(",
-				"  buildAgentToolResultMiddlewareFactory({",
-				"    sessionManager: params.sessionManager,",
-				"  }),",
-				");",
-			].join("\n"),
-		);
-	}
+function insertPiContextPatch(source) {
+  return source.replace(
+    /(^[ \t]*)const result = await runner\.applyToolResultMiddleware\s*\(/m,
+    (_match, indent) =>
+      `${buildPiContextPatchBlock(indent)}\n${indent}const result = await runner.applyToolResultMiddleware(`,
+  );
+}
 
-	return out;
+function buildPiContextPatchBlock(indent) {
+  return [
+    `${indent}/* ${PI_CONTEXT_PATCH_VERSION_MARKER} */`,
+    `${indent}const sessionManagerAny = params.sessionManager || {};`,
+    `${indent}const rawEventAny = rawEvent && typeof rawEvent === "object" ? rawEvent : {};`,
+    `${indent}const normalizeOpenClawWorkflowIdentity = (value) => {`,
+    `${indent}  if (typeof value !== "string") return void 0;`,
+    `${indent}  const trimmed = value.trim();`,
+    `${indent}  return trimmed.length > 0 ? trimmed : void 0;`,
+    `${indent}};`,
+    `${indent}const normalizedThreadId = normalizeOpenClawWorkflowIdentity(event.threadId);`,
+    `${indent}const embeddedRunId =`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(params.runId) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(event.runId) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(event.runtimeRunId) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(event.sessionId) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(rawEventAny.runId) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(rawEventAny.runtimeRunId) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(rawEventAny.sessionId) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(rawEventAny.subagentRunId) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(rawEventAny.subagent != null ? rawEventAny.subagent.runId : void 0) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(rawEventAny.details != null ? rawEventAny.details.runId : void 0) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(rawEventAny.details != null ? rawEventAny.details.runtimeRunId : void 0) ??`,
+    `${indent}  normalizeOpenClawWorkflowIdentity(rawEventAny.details != null ? rawEventAny.details.sessionId : void 0);`,
+    `${indent}const middlewareCtx = {`,
+    `${indent}  runtime: "pi",`,
+    `${indent}  agentId:`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.agentId) ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.agent != null ? sessionManagerAny.agent.id : void 0),`,
+    `${indent}  sessionId:`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(params.runId) ??`,
+    `${indent}    embeddedRunId ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(params.sessionId) ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.sessionId) ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.session != null ? sessionManagerAny.session.id : void 0) ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.currentSessionId),`,
+    `${indent}  sessionKey:`,
+    `${indent}    normalizedThreadId ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(params.sessionKey) ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.sessionKey) ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.session != null ? sessionManagerAny.session.key : void 0) ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.key),`,
+    `${indent}  runId:`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(params.runId) ??`,
+    `${indent}    embeddedRunId ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.runId) ??`,
+    `${indent}    normalizeOpenClawWorkflowIdentity(sessionManagerAny.currentRunId),`,
+    `${indent}};`,
+    `${indent}const runner = createAgentToolResultMiddlewareRunner(middlewareCtx);`,
+    `${indent}if (`,
+    `${indent}  process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||`,
+    `${indent}  process.env.OPENCLAW_WORKFLOW_TRACE === "true"`,
+    `${indent}) {`,
+    `${indent}  console.warn("[openclaw-trace] pi.tool_result.middleware_context", {`,
+    `${indent}    toolName: event.toolName,`,
+    `${indent}    toolCallId,`,
+    `${indent}    rawEventKeys: Object.keys(rawEventAny),`,
+    `${indent}    rawEventThreadId: event.threadId,`,
+    `${indent}    normalizedThreadId,`,
+    `${indent}    embeddedRunId,`,
+    `${indent}    paramsRunId: params.runId,`,
+    `${indent}    paramsSessionId: params.sessionId,`,
+    `${indent}    paramsSessionKey: params.sessionKey,`,
+    `${indent}    sessionManagerKeys: Object.keys(sessionManagerAny),`,
+    `${indent}    middlewareCtx,`,
+    `${indent}  });`,
+    `${indent}}`,
+  ].join("\n");
+}
+
+function patchPiFactoryCall(source) {
+  const replacement = [
+    "factories.push(",
+    "  buildAgentToolResultMiddlewareFactory({",
+    "    sessionManager: params.sessionManager,",
+    "    runId: params.runId,",
+    "    sessionId: params.sessionId,",
+    "    sessionKey: params.sessionKey,",
+    "  }),",
+    ");",
+  ].join("\n");
+
+  let out = source.replace(
+    /factories\.push\s*\(\s*buildAgentToolResultMiddlewareFactory\s*\(\s*\)\s*\)\s*;/g,
+    replacement,
+  );
+
+  out = out.replace(
+    /factories\.push\s*\(\s*buildAgentToolResultMiddlewareFactory\s*\(\s*\{[\s\S]*?sessionManager\s*:\s*params\.sessionManager[\s\S]*?\}\s*\)\s*,?\s*\)\s*;/g,
+    replacement,
+  );
+
+  return out;
+}
+
+function patchPiCallsiteFile(source) {
+  const calls = findBuildEmbeddedExtensionFactoryCalls(source);
+  if (calls.length === 0) return source;
+
+  let out = "";
+  let cursor = 0;
+  let changed = false;
+
+  for (const call of calls) {
+    if (!/\bsessionManager\b/.test(call.body) || callHasIdentityParams(call.body)) {
+      continue;
+    }
+
+    const patchedCall = patchBuildEmbeddedExtensionFactoryCall(call.text);
+    if (patchedCall === call.text) continue;
+
+    out += source.slice(cursor, call.start) + patchedCall;
+    cursor = call.end;
+    changed = true;
+  }
+
+  if (!changed) return source;
+
+  out += source.slice(cursor);
+  return out;
+}
+
+function findBuildEmbeddedExtensionFactoryCalls(source) {
+  const calls = [];
+  const needle = "buildEmbeddedExtensionFactories";
+  let searchFrom = 0;
+
+  while (true) {
+    const nameIndex = source.indexOf(needle, searchFrom);
+    if (nameIndex < 0) break;
+
+    const openParen = skipWhitespace(source, nameIndex + needle.length);
+    if (source[openParen] !== "(") {
+      searchFrom = nameIndex + needle.length;
+      continue;
+    }
+
+    const openObject = skipWhitespace(source, openParen + 1);
+    if (source[openObject] !== "{") {
+      searchFrom = openParen + 1;
+      continue;
+    }
+
+    const closeObject = findMatchingBrace(source, openObject, "{", "}");
+    if (closeObject < 0) {
+      searchFrom = openObject + 1;
+      continue;
+    }
+
+    const closeParen = skipWhitespace(source, closeObject + 1);
+    if (source[closeParen] !== ")") {
+      searchFrom = closeObject + 1;
+      continue;
+    }
+
+    calls.push({
+      start: nameIndex,
+      end: closeParen + 1,
+      text: source.slice(nameIndex, closeParen + 1),
+      body: source.slice(openObject + 1, closeObject),
+    });
+
+    searchFrom = closeParen + 1;
+  }
+
+  return calls;
+}
+
+function patchBuildEmbeddedExtensionFactoryCall(callText) {
+  const openObject = callText.indexOf("{");
+  const closeObject = findMatchingBrace(callText, openObject, "{", "}");
+  if (openObject < 0 || closeObject < 0) return callText;
+
+  const body = callText.slice(openObject + 1, closeObject);
+  if (callHasIdentityParams(body)) return callText;
+
+  const sessionManagerMatch =
+    /(^|\n)([ \t]*)(sessionManager\s*(?::\s*[^,\n}]+)?\s*,?)/m.exec(body);
+
+  if (!sessionManagerMatch) return callText;
+
+  const insertAt = (sessionManagerMatch.index ?? 0) + sessionManagerMatch[0].length;
+  const indent = sessionManagerMatch[2] ?? "";
+  const prefixNewline = sessionManagerMatch[0].endsWith("\n") ? "" : "\n";
+
+  const addition = [
+    `${prefixNewline}${indent}runId: params.runId,`,
+    `${indent}sessionId: params.sessionId,`,
+    `${indent}sessionKey: params.sessionKey,`,
+  ].join("\n");
+
+  const newBody = body.slice(0, insertAt) + addition + body.slice(insertAt);
+
+  return callText.slice(0, openObject + 1) + newBody + callText.slice(closeObject);
+}
+
+function skipWhitespace(source, index) {
+  let i = index;
+  while (i < source.length && /\s/.test(source[i])) i += 1;
+  return i;
+}
+
+function findMatchingBrace(source, openIndex, openChar, closeChar) {
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let templateExpressionDepth = 0;
+
+  for (let i = openIndex; i < source.length; i += 1) {
+    const ch = source[i];
+    const next = source[i + 1];
+
+    if (inLineComment) {
+      if (ch === "\n") inLineComment = false;
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === "*" && next === "/") {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+
+      if (quote === "`" && ch === "$" && next === "{") {
+        templateExpressionDepth += 1;
+        i += 1;
+        continue;
+      }
+
+      if (quote === "`" && templateExpressionDepth > 0 && ch === "}") {
+        templateExpressionDepth -= 1;
+        continue;
+      }
+
+      if (ch === quote && templateExpressionDepth === 0) {
+        quote = null;
+      }
+
+      continue;
+    }
+
+    if (ch === "/" && next === "/") {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (ch === "/" && next === "*") {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+
+    if (ch === openChar) depth += 1;
+
+    if (ch === closeChar) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+
+  return -1;
 }
 
 function verifyPatched(
-	source,
-	file,
-	pluginId,
-	{ trustPatchApplied, piContextPatchApplied },
+  source,
+  file,
+  pluginId,
+  { trustPatchApplied, piContextPatchApplied, piCallsitePatchApplied },
 ) {
-	const required = [];
+  const required = [];
 
-	if (trustPatchApplied) {
-		required.push(
-			TRUST_PATCH_MARKER,
-			pluginId,
-			FUNCTION_NAME,
-			DIAGNOSTIC,
-			`record.id !== ${JSON.stringify(pluginId)}`,
-		);
-	}
+  if (trustPatchApplied) {
+    required.push(TRUST_PATCH_MARKER, pluginId, FUNCTION_NAME, DIAGNOSTIC);
+  }
 
-	if (piContextPatchApplied) {
-		required.push(
-			PI_CONTEXT_PATCH_MARKER,
-			"const middlewareCtx = {",
-			"const runner = createAgentToolResultMiddlewareRunner(middlewareCtx);",
-			"[openclaw-trace] pi.tool_result.middleware_context",
-			"sessionManager",
-		);
+  if (piContextPatchApplied) {
+    required.push(
+      PI_CONTEXT_PATCH_VERSION_MARKER,
+      "const middlewareCtx = {",
+      "const runner = createAgentToolResultMiddlewareRunner(middlewareCtx);",
+      "normalizeOpenClawWorkflowIdentity",
+      "normalizedThreadId",
+      "params.runId",
+      "params.sessionId",
+      "params.sessionKey",
+      "[openclaw-trace] pi.tool_result.middleware_context",
+    );
+  }
 
-		const normalized = file.replaceAll("\\", "/");
+  if (piCallsitePatchApplied) {
+    required.push(
+      "runId: params.runId",
+      "sessionId: params.sessionId",
+      "sessionKey: params.sessionKey",
+    );
+  }
 
-		if (
-			normalized.endsWith(PI_EXTENSIONS_RELATIVE_PATH.replaceAll("\\", "/"))
-		) {
-			required.push("sessionManager: SessionManager;");
-			required.push("sessionManager: params.sessionManager");
-		} else {
-			required.push("params.sessionManager");
-			required.push(
-				"function buildAgentToolResultMiddlewareFactory(params = {})",
-			);
-		}
-	}
-
-	for (const needle of required) {
-		if (!source.includes(needle)) {
-			throw new Error(
-				`Patch verification failed for ${file}: missing ${needle}`,
-			);
-		}
-	}
+  for (const needle of required) {
+    if (!source.includes(needle)) {
+      throw new Error(`Patch verification failed for ${file}: missing ${needle}`);
+    }
+  }
 }
 
 function restoreLatestBackupForFile(file) {
-	const dir = path.dirname(file);
-	const base = path.basename(file);
-	const prefix = `${base}.bak-openclaw-workflow-`;
+  const dir = path.dirname(file);
+  const base = path.basename(file);
+  const prefix = `${base}.bak-openclaw-workflow-`;
 
-	if (!fs.existsSync(dir)) {
-		throw new Error(`Directory does not exist: ${dir}`);
-	}
+  if (!fs.existsSync(dir)) {
+    throw new Error(`Directory does not exist: ${dir}`);
+  }
 
-	const backups = fs
-		.readdirSync(dir)
-		.filter((name) => name.startsWith(prefix))
-		.map((name) => path.join(dir, name))
-		.sort();
+  const backups = fs
+    .readdirSync(dir)
+    .filter((name) => name.startsWith(prefix))
+    .map((name) => path.join(dir, name))
+    .sort();
 
-	if (backups.length === 0) {
-		throw new Error(`No backups found for ${file}`);
-	}
+  if (backups.length === 0) {
+    throw new Error(`No backups found for ${file}`);
+  }
 
-	const latest = backups[backups.length - 1];
+  const latest = backups[backups.length - 1];
 
-	if (dryRun) {
-		console.log(`Would restore ${file}`);
-		console.log(`From:          ${latest}`);
-	} else {
-		fs.copyFileSync(latest, file);
-		console.log(`Restored ${file}`);
-		console.log(`From:     ${latest}`);
-	}
+  if (dryRun) {
+    console.log(`Would restore ${file}`);
+    console.log(`From:          ${latest}`);
+  } else {
+    fs.copyFileSync(latest, file);
+    console.log(`Restored ${file}`);
+    console.log(`From:     ${latest}`);
+  }
 }
 
 function printSummary(summary) {
-	console.log("\nPatch summary:");
+  console.log("\nPatch summary:");
+  printSummaryBlock("trust_guard", summary.trust);
+  printSummaryBlock("pi_context", summary.piContext);
+  printSummaryBlock("pi_callsite", summary.piCallsite);
+}
 
-	console.log("  trust_guard:");
-	console.log(`    found: ${summary.trust.found ? "yes" : "no"}`);
-	console.log(
-		`    patched_or_already_present: ${
-			summary.trust.patchedOrAlreadyPresent ? "yes" : "no"
-		}`,
-	);
+function printSummaryBlock(name, block) {
+  console.log(`  ${name}:`);
+  console.log(`    found: ${block.found ? "yes" : "no"}`);
+  console.log(
+    `    patched_or_already_present: ${
+      block.patchedOrAlreadyPresent ? "yes" : "no"
+    }`,
+  );
 
-	if (summary.trust.files.length > 0) {
-		console.log("    files:");
-
-		for (const file of uniqueStrings(summary.trust.files)) {
-			console.log(`      - ${file}`);
-		}
-	}
-
-	console.log("  pi_context:");
-	console.log(`    found: ${summary.piContext.found ? "yes" : "no"}`);
-	console.log(
-		`    patched_or_already_present: ${
-			summary.piContext.patchedOrAlreadyPresent ? "yes" : "no"
-		}`,
-	);
-
-	if (summary.piContext.files.length > 0) {
-		console.log("    files:");
-
-		for (const file of uniqueStrings(summary.piContext.files)) {
-			console.log(`      - ${file}`);
-		}
-	}
+  if (block.files.length > 0) {
+    console.log("    files:");
+    for (const file of uniqueStrings(block.files)) {
+      console.log(`      - ${file}`);
+    }
+  }
 }
 
 function printPatchDiagnosticSnippet(source, file) {
-	const candidates = [
-		source.indexOf(TRUST_PATCH_MARKER),
-		source.indexOf(PI_CONTEXT_PATCH_MARKER),
-		source.indexOf(FUNCTION_NAME),
-		source.indexOf("buildAgentToolResultMiddlewareFactory"),
-		source.indexOf("runner.applyToolResultMiddleware"),
-		source.indexOf("pi.on"),
-	].filter((index) => index >= 0);
+  const candidates = [
+    source.indexOf(TRUST_PATCH_MARKER),
+    source.indexOf(PI_CONTEXT_PATCH_MARKER),
+    source.indexOf(FUNCTION_NAME),
+    source.indexOf("buildAgentToolResultMiddlewareFactory"),
+    source.indexOf("runner.applyToolResultMiddleware"),
+    source.indexOf("buildEmbeddedExtensionFactories"),
+    source.indexOf("pi.on"),
+  ].filter((index) => index >= 0);
 
-	const index = candidates.length > 0 ? Math.min(...candidates) : 0;
+  const index = candidates.length > 0 ? Math.min(...candidates) : 0;
+  const start = Math.max(0, index - 800);
+  const end = Math.min(source.length, index + 2800);
 
-	const start = Math.max(0, index - 600);
-	const end = Math.min(source.length, index + 2400);
-
-	console.log(`\nDiagnostic snippet for ${file}:`);
-	console.log(source.slice(start, end));
+  console.log(`\nDiagnostic snippet for ${file}:`);
+  console.log(source.slice(start, end));
 }
 
-function printPatchSnippet(source) {
-	const candidates = [
-		source.indexOf(TRUST_PATCH_MARKER),
-		source.indexOf(PI_CONTEXT_PATCH_MARKER),
-	].filter((index) => index >= 0);
+function printPatchSnippet(
+  source,
+  { trustPatched, piContextPatched, piCallsitePatched } = {},
+) {
+  let index = -1;
 
-	const index = candidates.length > 0 ? Math.min(...candidates) : 0;
+  if (piContextPatched) {
+    index = source.indexOf(PI_CONTEXT_PATCH_VERSION_MARKER);
+  }
 
-	const start = Math.max(0, index - 500);
-	const end = Math.min(source.length, index + 1800);
+  if (index < 0 && piCallsitePatched) {
+    index = source.indexOf("buildEmbeddedExtensionFactories({");
+  }
 
-	console.log("\nPatched snippet:");
-	console.log(source.slice(start, end));
+  if (index < 0 && trustPatched) {
+    index = source.indexOf(TRUST_PATCH_MARKER);
+  }
+
+  if (index < 0) {
+    index =
+      [
+        source.indexOf(TRUST_PATCH_MARKER),
+        source.indexOf(PI_CONTEXT_PATCH_VERSION_MARKER),
+        source.indexOf("buildEmbeddedExtensionFactories"),
+      ].find((value) => value >= 0) ?? 0;
+  }
+
+  const start = Math.max(0, index - 500);
+  const end = Math.min(source.length, index + 2400);
+
+  console.log("\nPatched snippet:");
+  console.log(source.slice(start, end));
+}
+
+function findLineStart(source, index) {
+  const prev = source.lastIndexOf("\n", index);
+  return prev < 0 ? 0 : prev + 1;
 }
 
 function uniqueExistingDirs(values) {
-	const out = [];
-	const seen = new Set();
+  const out = [];
+  const seen = new Set();
 
-	for (const value of values) {
-		if (!value) continue;
+  for (const value of values) {
+    if (!value) continue;
 
-		try {
-			const real = fs.realpathSync(path.resolve(value));
+    try {
+      const real = fs.realpathSync(path.resolve(value));
 
-			if (!fs.existsSync(real)) continue;
-			if (!fs.statSync(real).isDirectory()) continue;
-			if (seen.has(real)) continue;
+      if (!fs.existsSync(real)) continue;
+      if (!fs.statSync(real).isDirectory()) continue;
+      if (seen.has(real)) continue;
 
-			seen.add(real);
-			out.push(real);
-		} catch {
-			// ignore
-		}
-	}
+      seen.add(real);
+      out.push(real);
+    } catch {
+      // ignore
+    }
+  }
 
-	return out;
+  return out;
 }
 
 function uniqueExistingFiles(values) {
-	const out = [];
-	const seen = new Set();
+  const out = [];
+  const seen = new Set();
 
-	for (const value of values) {
-		if (!value) continue;
+  for (const value of values) {
+    if (!value) continue;
 
-		try {
-			const real = fs.realpathSync(path.resolve(value));
+    try {
+      const real = fs.realpathSync(path.resolve(value));
 
-			if (!fs.existsSync(real)) continue;
-			if (!fs.statSync(real).isFile()) continue;
-			if (seen.has(real)) continue;
+      if (!fs.existsSync(real)) continue;
+      if (!fs.statSync(real).isFile()) continue;
+      if (seen.has(real)) continue;
 
-			seen.add(real);
-			out.push(real);
-		} catch {
-			// ignore
-		}
-	}
+      seen.add(real);
+      out.push(real);
+    } catch {
+      // ignore
+    }
+  }
 
-	return out;
+  return out;
 }
 
 function uniqueStrings(values) {
-	return [...new Set(values)];
+  return [...new Set(values)];
 }
 
 function parseArgs(argv) {
-	const out = {};
+  const out = {};
 
-	for (let i = 0; i < argv.length; i += 1) {
-		const arg = argv[i];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
 
-		if (!arg.startsWith("--")) continue;
+    if (!arg.startsWith("--")) continue;
 
-		const eq = arg.indexOf("=");
+    const eq = arg.indexOf("=");
 
-		if (eq >= 0) {
-			out[arg.slice(2, eq)] = arg.slice(eq + 1);
-			continue;
-		}
+    if (eq >= 0) {
+      out[arg.slice(2, eq)] = arg.slice(eq + 1);
+      continue;
+    }
 
-		const key = arg.slice(2);
-		const next = argv[i + 1];
+    const key = arg.slice(2);
+    const next = argv[i + 1];
 
-		if (!next || next.startsWith("--")) {
-			out[key] = true;
-		} else {
-			out[key] = next;
-			i += 1;
-		}
-	}
+    if (!next || next.startsWith("--")) {
+      out[key] = true;
+    } else {
+      out[key] = next;
+      i += 1;
+    }
+  }
 
-	return out;
+  return out;
 }
 
 function assertSafePluginId(value) {
-	if (!/^[a-zA-Z0-9._@/-]+$/.test(value)) {
-		throw new Error(`Unsafe plugin id: ${value}`);
-	}
+  if (!/^[a-zA-Z0-9._@/-]+$/.test(value)) {
+    throw new Error(`Unsafe plugin id: ${value}`);
+  }
 }
 
 function escapeRegExp(value) {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function timestamp() {
-	return new Date()
-		.toISOString()
-		.replace(/[-:]/g, "")
-		.replace(/\.\d{3}Z$/, "Z");
+  return new Date()
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "Z");
 }
 
 function isDirectExecution(moduleUrl) {
-	const entry = process.argv[1];
-
-	if (!entry) return false;
-
-	return pathToFileURL(path.resolve(entry)).href === moduleUrl;
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return pathToFileURL(path.resolve(entry)).href === moduleUrl;
 }
 
 export {
-	candidateFilesForPackageRoot,
-	findRuntimeFilesInPackageRoot,
-	inspectCandidateFile,
-	isAlreadyPatchedPiFile,
-	isAlreadyPatchedTrustFile,
-	isRelevantPiCompiledFile,
-	isRelevantPiExtensionsFile,
-	isRelevantRuntimeFile,
-	patchPiCompiledFile,
-	patchPiExtensionsFile,
-	patchRuntimeFile,
+  candidateFilesForPackageRoot,
+  discoverCandidateFilesForPackageRoot,
+  findRuntimeFilesInPackageRoot,
+  inspectCandidateFile,
+  isRelevantPiContextFile,
+  isRelevantRuntimeFile,
+  patchPiCallsiteFile,
+  patchPiContextFile,
+  patchRuntimeFile,
 };
