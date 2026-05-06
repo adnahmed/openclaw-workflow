@@ -384,7 +384,7 @@ outputs:
 | `with`         | object    | ❌       | `{}`    | Parameter map passed to a `kind: plugin` operation. Supports [variable substitution](#variable-substitution). |
 | `depends_on`   | string[]  | ❌       | `[]`    | IDs of steps that must complete (`ok`) before this step runs. |
 | `outputs`      | array     | ❌       | `[]`    | Output validation rules. Supports simple file existence checks or detailed objects with custom validators and schemas. Supports [variable substitution](#variable-substitution). |
-| `for_each`     | string    | ❌       | —       | Variable containing a list to iterate over (e.g., `"{songs}"`). |
+| `for_each`     | string\|object    | ❌       | —       | List source for loop expansion. Supports variable/path strings (e.g., `"{songs}"`) and artifact refs (`{ from_step, output }`). |
 | `parser`       | string    | ❌       | `"auto"` | Parser to use for the loop list (`"json"`, `"csv"`, `"newline"`, `"auto"`). |
 | `item_schema`    | object    | ❌       | —       | Optional schema to validate each item in the loop list (type, required fields, patterns). |
 | `steps`        | array     | ❌       | `[]`    | Steps to execute for each item in the `for_each` list. |
@@ -1973,6 +1973,10 @@ The engine resolves the list based on the format of the `for_each` value:
    - The resulting path is then resolved as a file.
 3. **Explicit Paths** (e.g., `songs.txt`):
    - Resolved directly as a file.
+4. **Artifact References** (e.g., `{ from_step: build_alert_execution_manifest, output: alerts_execution_manifest }`):
+  - Reads the declared artifact directly from the run artifact store.
+  - Supports list payloads (`data` array) and single payloads (wrapped as one-item list).
+  - If the artifact is missing, loop expansion fails the loop step (`failed`), including optional loops.
 
 - **Expansion**: A loop step is expanded into multiple unique step instances, one for each item in the list. An instance ID follows the pattern `loop_id:index:inner_step_id`.
 - **Dynamic Tasks**: Use the `{item}` variable in `task` or `outputs` fields to refer to the current iteration's value.
@@ -1997,6 +2001,19 @@ The engine resolves the list based on the format of the `for_each` value:
       steps:
         - id: transcribe
           task: "Transcribe {item}..."
+  ```
+
+- **Artifact-backed example:**
+  ```yaml
+  - id: process_alerts
+    depends_on: [build_alert_execution_manifest]
+    for_each:
+      from_step: build_alert_execution_manifest
+      output: alerts_execution_manifest
+      parser: json
+    steps:
+      - id: notify
+        task: "Send notification for {item.alert_key}"
   ```
 
 - **Example with Validation:**

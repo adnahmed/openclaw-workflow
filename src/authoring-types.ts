@@ -1,6 +1,7 @@
 import type {
 	DrainStopWhenSpec,
 	ExternalLandingPreflightSpec,
+	ForEachSpec,
 	SealedStepSpec,
 	StateCompleteSpec,
 	StateConsumeSpec,
@@ -163,7 +164,7 @@ export type AuthoringStepBody = {
 	 * Public authoring form for sealed loops.
 	 * Compiler lowers this into internal loop_subagent + sealed child worker.
 	 */
-	for_each?: string;
+	for_each?: ForEachSpec;
 	parser?: "json" | "csv" | "newline" | "auto";
 	item_schema?: Record<string, unknown>;
 	loop?: "sealed_each";

@@ -974,6 +974,14 @@ export type StateDrainSpec = {
 	stop_when?: DrainStopWhenSpec;
 };
 
+export type ForEachArtifactSpec = {
+	from_step: string;
+	output: string;
+	parser?: string;
+};
+
+export type ForEachSpec = string | ForEachArtifactSpec;
+
 export type WorkflowStep = {
 	id: string;
 	name: string;
@@ -983,7 +991,7 @@ export type WorkflowStep = {
 	with?: Record<string, unknown>;
 	depends_on: string[];
 	outputs: OutputSpec[];
-	for_each?: string;
+	for_each?: ForEachSpec;
 	skip_if_empty?: string;
 	parser?: string;
 	item_schema?: any;

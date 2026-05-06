@@ -419,13 +419,13 @@ export async function executeWorkflow(
 
 		await mutateState(async (current) => {
 			let next = await persistStepPatch(step.id, {
-				status: step.optional ? "ok" : "failed",
+				status: "failed",
 				started_at: current.steps[step.id]?.started_at ?? now,
 				completed_at: now,
 				duration_ms: current.steps[step.id]?.started_at
 					? Date.now() - new Date(current.steps[step.id].started_at).getTime()
 					: 0,
-				error: step.optional ? null : `Loop expansion failed: ${message}`,
+				error: `Loop expansion failed: ${message}`,
 				logs: JSON.stringify(
 					{
 						phase: "expand_loop",
@@ -448,6 +448,49 @@ export async function executeWorkflow(
 
 			return next;
 		});
+	}
+
+	async function resolveForEachList(step, substitutionContext) {
+		const forEachSpec = step.for_each;
+
+		if (
+			forEachSpec &&
+			typeof forEachSpec === "object" &&
+			!Array.isArray(forEachSpec) &&
+			typeof (forEachSpec as { from_step?: unknown }).from_step === "string" &&
+			typeof (forEachSpec as { output?: unknown }).output === "string"
+		) {
+			const resolvedFromStep = substituteDeep(
+				(forEachSpec as { from_step: string }).from_step,
+				substitutionContext,
+			);
+			const resolvedOutput = substituteDeep(
+				(forEachSpec as { output: string }).output,
+				substitutionContext,
+			);
+
+			const artifact = await artifactStore.readArtifact(
+				runId,
+				String(resolvedFromStep),
+				String(resolvedOutput),
+			);
+
+			if (!artifact) {
+				throw new Error(
+					`for_each artifact not found: ${String(resolvedFromStep)}.${String(resolvedOutput)}`,
+				);
+			}
+
+			return Array.isArray(artifact.data) ? artifact.data : [artifact.data];
+		}
+
+		if (typeof forEachSpec !== "string") {
+			throw new Error(
+				`Invalid for_each in step "${step.id}". Expected a string source or an object with { from_step, output }.`,
+			);
+		}
+
+		return resolveList(forEachSpec, substitutionContext, baseDir, step.parser);
 	}
 
 	type DrainControllerRuntime = {
@@ -2061,12 +2104,7 @@ export async function executeWorkflow(
 						);
 
 						try {
-							const list = await resolveList(
-								step.for_each,
-								varCtx,
-								baseDir,
-								step.parser,
-							);
+							const list = await resolveForEachList(step, varCtx);
 							validateLoopItems(step, list);
 
 							const expandedChildren = [];
