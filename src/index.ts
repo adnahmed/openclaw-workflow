@@ -5,7 +5,12 @@ import { writeDeclaredOutput } from "./output-writer.js";
 import { createDefaultRegistry } from "./plugin-operations.js";
 import { resolveRedisClient } from "./redis-client.js";
 import {
+	getMiddlewareCounters,
 	getSealedMiddlewareCapabilities,
+	incrementIntercepted,
+	incrementNoActiveRun,
+	incrementPassthrough,
+	incrementSealed,
 	markSealedMiddlewareReady,
 } from "./sealed-middleware-status.js";
 import {
@@ -651,6 +656,7 @@ export default definePluginEntry({
 										? Object.keys(event.result.details)
 										: null,
 							});
+							incrementIntercepted(event?.toolName ?? "");
 
 							// Bypass known safe workflow control/read tools.
 							if (PASSTHROUGH_TOOLS.has(event.toolName)) {
@@ -658,6 +664,7 @@ export default definePluginEntry({
 									toolName: event.toolName,
 									toolCallId: event.toolCallId,
 								});
+								incrementPassthrough(event.toolName);
 								return;
 							}
 
@@ -673,6 +680,7 @@ export default definePluginEntry({
 									ctxSessionId: ctx?.sessionId,
 									ctxRunId: ctx?.runId,
 								});
+								incrementNoActiveRun(event.toolName);
 								return;
 							}
 
@@ -705,6 +713,7 @@ export default definePluginEntry({
 								truncatedForContext: envelope.truncated_for_context,
 								control: envelope.control,
 							});
+							incrementSealed(event.toolName);
 
 							return {
 								result: {
@@ -2055,10 +2064,15 @@ export default definePluginEntry({
 				optional: true,
 				async execute() {
 					const caps = getSealedMiddlewareCapabilities();
+					const counters = getMiddlewareCounters();
 
 					return textResult({
 						ok: Boolean(caps?.recordObservationBeforeModel),
 						capabilities: caps,
+						middleware: {
+							registered: Boolean(caps?.recordObservationBeforeModel),
+							...counters,
+						},
 					});
 				},
 			});

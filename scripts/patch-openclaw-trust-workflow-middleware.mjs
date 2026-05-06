@@ -62,6 +62,7 @@ const all = Boolean(args.all);
 const printTargets = Boolean(args["print-targets"]);
 const exactFile = args.file ? path.resolve(String(args.file)) : null;
 const explicitRoot = args.root ? path.resolve(String(args.root)) : null;
+const requirePiContext = args["require-pi-context"] !== "false";
 
 if (isDirectExecution(import.meta.url)) {
 	main();
@@ -115,23 +116,77 @@ function main() {
 		return;
 	}
 
-	let patched = 0;
-	let alreadyPatched = 0;
+	let trustPatchedOrPresent = false;
+	let piContextPatchedOrPresent = false;
+	const trustFiles = [];
+	const piContextFiles = [];
 
 	for (const target of targets) {
 		const result = patchTargetFile(target, pluginId, { dryRun });
-		if (result.patched) {
-			patched += 1;
-			continue;
+
+		if (result.trustPatched || result.trustAlreadyPatched) {
+			trustPatchedOrPresent = true;
+			trustFiles.push(target);
 		}
 
-		if (result.alreadyPatched) {
-			alreadyPatched += 1;
+		if (result.piContextPatched || result.piContextAlreadyPatched) {
+			piContextPatchedOrPresent = true;
+			piContextFiles.push(target);
 		}
 	}
 
-	if (patched === 0 && alreadyPatched === 0) {
-		throw new Error("No target was patched.");
+	const piContextTargetFound =
+		piContextPatchedOrPresent ||
+		targets.some((t) => {
+			try {
+				const text = fs.readFileSync(t, "utf8");
+				return (
+					isRelevantPiExtensionsFile(t, text) ||
+					isRelevantPiCompiledFile(t, text) ||
+					isAlreadyPatchedPiCompiledFile(t, text)
+				);
+			} catch {
+				return false;
+			}
+		});
+
+	console.log("\nPatch summary:");
+	console.log("  trust_guard:");
+	console.log(`    found: ${trustPatchedOrPresent ? "yes" : "no"}`);
+	console.log(
+		`    patched_or_already_present: ${trustPatchedOrPresent ? "yes" : "no"}`,
+	);
+	if (trustFiles.length > 0) {
+		console.log("    files:");
+		for (const f of trustFiles) {
+			console.log(`      - ${f}`);
+		}
+	}
+	console.log("  pi_context:");
+	console.log(`    found: ${piContextTargetFound ? "yes" : "no"}`);
+	console.log(
+		`    patched_or_already_present: ${piContextPatchedOrPresent ? "yes" : "no"}`,
+	);
+	if (piContextFiles.length > 0) {
+		console.log("    files:");
+		for (const f of piContextFiles) {
+			console.log(`      - ${f}`);
+		}
+	}
+
+	if (!trustPatchedOrPresent) {
+		throw new Error("OpenClaw trust guard was not patched/found.");
+	}
+
+	if (requirePiContext && !piContextPatchedOrPresent) {
+		if (!piContextTargetFound) {
+			console.error(
+				"\nERROR: Pi middleware context target was not found. Browser tool results will not be sealed.",
+			);
+		}
+		throw new Error(
+			"Pi middleware context patch was not applied. Sealed browser spooling is not guaranteed.",
+		);
 	}
 
 	console.log("\nDone.");
@@ -273,19 +328,12 @@ function findRuntimeFilesInPackageRoot(packageRoot) {
 	candidates.push(path.join(root, "src", "plugins", "registry.ts"));
 	candidates.push(path.join(root, "src", "plugins", "registry.js"));
 
-	// Runtime/package layouts.
+	// Runtime/package layouts — scan all top-level dist JS for both trust guard and Pi compiled targets.
 	if (fs.existsSync(dist) && fs.statSync(dist).isDirectory()) {
 		for (const entry of fs.readdirSync(dist, { withFileTypes: true })) {
 			if (!entry.isFile()) continue;
-
-			const name = entry.name;
-
-			if (
-				/^loader-[A-Za-z0-9_-]+\.(js|mjs|cjs)$/.test(name) ||
-				/^registry-[A-Za-z0-9_-]+\.(js|mjs|cjs)$/.test(name)
-			) {
-				candidates.push(path.join(dist, name));
-			}
+			if (!/\.(js|mjs|cjs)$/.test(entry.name)) continue;
+			candidates.push(path.join(dist, entry.name));
 		}
 	}
 
@@ -298,7 +346,9 @@ function findRuntimeFilesInPackageRoot(packageRoot) {
 			const text = fs.readFileSync(file, "utf8");
 			if (
 				isRelevantRuntimeFile(text) ||
-				isRelevantPiExtensionsFile(file, text)
+				isRelevantPiExtensionsFile(file, text) ||
+				isRelevantPiCompiledFile(file, text) ||
+				isAlreadyPatchedPiCompiledFile(file, text)
 			) {
 				matches.push(file);
 			}
@@ -350,33 +400,82 @@ function isRelevantPiExtensionsFile(file, source) {
 	);
 }
 
+function isRelevantPiCompiledFile(file, source) {
+	const normalized = file.replaceAll("\\", "/");
+
+	if (!normalized.includes("/dist/")) return false;
+	if (!/\.(js|mjs|cjs)$/.test(file)) return false;
+
+	return (
+		source.includes("buildAgentToolResultMiddlewareFactory") &&
+		source.includes(
+			'createAgentToolResultMiddlewareRunner({ runtime: "pi" })',
+		) &&
+		source.includes('pi.on("tool_result"') &&
+		source.includes("runner.applyToolResultMiddleware")
+	);
+}
+
+function isAlreadyPatchedPiCompiledFile(file, source) {
+	const normalized = file.replaceAll("\\", "/");
+
+	if (!normalized.includes("/dist/")) return false;
+	if (!/\.(js|mjs|cjs)$/.test(file)) return false;
+
+	return (
+		source.includes(PI_CONTEXT_PATCH_MARKER) &&
+		source.includes("buildAgentToolResultMiddlewareFactory") &&
+		source.includes("runner.applyToolResultMiddleware")
+	);
+}
+
 function patchTargetFile(target, pluginId, options = {}) {
 	const before = fs.readFileSync(target, "utf8");
 
 	let after = before;
-	let changed = false;
+	let trustChanged = false;
+	let piContextChanged = false;
 
-	if (isRelevantRuntimeFile(before)) {
+	const isTrustTarget = isRelevantRuntimeFile(before);
+	const isPiExtensionsTarget = isRelevantPiExtensionsFile(target, before);
+	const isPiCompiledTarget =
+		isRelevantPiCompiledFile(target, before) ||
+		isAlreadyPatchedPiCompiledFile(target, before);
+	const isPiTarget = isPiExtensionsTarget || isPiCompiledTarget;
+
+	if (isTrustTarget) {
 		const patchedRuntime = patchRuntimeFile(after, pluginId);
 		if (patchedRuntime !== after) {
 			after = patchedRuntime;
-			changed = true;
+			trustChanged = true;
 		}
 	}
 
-	if (isRelevantPiExtensionsFile(target, before)) {
+	if (isPiExtensionsTarget) {
 		const patchedPi = patchPiExtensionsFile(after);
 		if (patchedPi !== after) {
 			after = patchedPi;
-			changed = true;
+			piContextChanged = true;
 		}
 	}
 
+	if (isRelevantPiCompiledFile(target, before)) {
+		const patchedPiCompiled = patchPiCompiledFile(after);
+		if (patchedPiCompiled !== after) {
+			after = patchedPiCompiled;
+			piContextChanged = true;
+		}
+	}
+
+	const changed = trustChanged || piContextChanged;
+
+	const trustAlreadyPatched =
+		isTrustTarget && !trustChanged && before.includes(PATCH_MARKER);
+	const piContextAlreadyPatched =
+		isPiTarget && !piContextChanged && before.includes(PI_CONTEXT_PATCH_MARKER);
+
 	if (!changed) {
-		if (
-			!isRelevantRuntimeFile(before) &&
-			!isRelevantPiExtensionsFile(target, before)
-		) {
+		if (!isTrustTarget && !isPiTarget) {
 			console.warn(`Skipping non-matching file: ${target}`);
 		} else if (
 			before.includes(PATCH_MARKER) ||
@@ -393,10 +492,18 @@ function patchTargetFile(target, pluginId, options = {}) {
 			alreadyPatched:
 				before.includes(PATCH_MARKER) ||
 				before.includes(PI_CONTEXT_PATCH_MARKER),
+			trustPatched: false,
+			trustAlreadyPatched,
+			piContextPatched: false,
+			piContextAlreadyPatched,
+			piContextTargetFound: isPiTarget,
 		};
 	}
 
-	verifyPatched(after, target, pluginId);
+	verifyPatched(after, target, pluginId, {
+		trustPatchApplied: trustChanged,
+		piContextPatchApplied: piContextChanged,
+	});
 
 	if (options.dryRun) {
 		console.log(`\nWould patch: ${target}`);
@@ -410,7 +517,15 @@ function patchTargetFile(target, pluginId, options = {}) {
 		console.log(`Backup:  ${backup}`);
 	}
 
-	return { patched: true };
+	return {
+		patched: true,
+		alreadyPatched: false,
+		trustPatched: trustChanged,
+		trustAlreadyPatched: false,
+		piContextPatched: piContextChanged,
+		piContextAlreadyPatched: false,
+		piContextTargetFound: isPiTarget,
+	};
 }
 
 function patchRuntimeFile(source, pluginId) {
@@ -625,10 +740,101 @@ function patchPiExtensionsFile(source) {
 	return out;
 }
 
-function verifyPatched(source, file, pluginId) {
+function patchPiCompiledFile(source) {
+	let out = source;
+
+	// 1. Patch function signature to accept params.
+	const signaturePattern =
+		/function buildAgentToolResultMiddlewareFactory\(\)\s*\{/;
+	if (signaturePattern.test(out)) {
+		out = out.replace(
+			signaturePattern,
+			"function buildAgentToolResultMiddlewareFactory(params = {}) {",
+		);
+	}
+
+	// 2. Remove top-level runner init — it will be reconstructed with context inside the handler.
+	const runnerInitPattern =
+		/^[ \t]*const runner = createAgentToolResultMiddlewareRunner\(\{ runtime: "pi" \}\);[ \t]*\n/m;
+	if (runnerInitPattern.test(out)) {
+		out = out.replace(runnerInitPattern, "");
+	}
+
+	// 3. Insert middlewareCtx + runner + trace immediately before applyToolResultMiddleware.
+	if (
+		!out.includes(PI_CONTEXT_PATCH_MARKER) &&
+		out.includes("runner.applyToolResultMiddleware(")
+	) {
+		out = out.replace(
+			/^([ \t]*)const result = await runner\.applyToolResultMiddleware\(/m,
+			(match, indent) =>
+				[
+					`${indent}/* ${PI_CONTEXT_PATCH_MARKER} */`,
+					`${indent}const sessionManagerAny = params.sessionManager || {};`,
+					`${indent}const middlewareCtx = {`,
+					`${indent}  runtime: "pi",`,
+					`${indent}  agentId:`,
+					`${indent}    sessionManagerAny.agentId ??`,
+					`${indent}    (sessionManagerAny.agent != null ? sessionManagerAny.agent.id : undefined),`,
+					`${indent}  sessionId:`,
+					`${indent}    sessionManagerAny.sessionId ??`,
+					`${indent}    (sessionManagerAny.session != null ? sessionManagerAny.session.id : undefined) ??`,
+					`${indent}    sessionManagerAny.currentSessionId,`,
+					`${indent}  sessionKey:`,
+					`${indent}    sessionManagerAny.sessionKey ??`,
+					`${indent}    (sessionManagerAny.session != null ? sessionManagerAny.session.key : undefined) ??`,
+					`${indent}    sessionManagerAny.key,`,
+					`${indent}  runId:`,
+					`${indent}    sessionManagerAny.runId ??`,
+					`${indent}    sessionManagerAny.currentRunId,`,
+					`${indent}};`,
+					`${indent}const runner = createAgentToolResultMiddlewareRunner(middlewareCtx);`,
+					`${indent}if (`,
+					`${indent}  process.env.OPENCLAW_WORKFLOW_TRACE === "1" ||`,
+					`${indent}  process.env.OPENCLAW_WORKFLOW_TRACE === "true"`,
+					`${indent}) {`,
+					`${indent}  console.warn("[openclaw-trace] pi.tool_result.middleware_context", {`,
+					`${indent}    toolName: event.toolName,`,
+					`${indent}    toolCallId,`,
+					`${indent}    rawEventKeys: Object.keys(recordFromUnknown(rawEvent)),`,
+					`${indent}    rawEventThreadId: event.threadId,`,
+					`${indent}    sessionManagerKeys: Object.keys(sessionManagerAny),`,
+					`${indent}    middlewareCtx,`,
+					`${indent}  });`,
+					`${indent}}`,
+					`${indent}const result = await runner.applyToolResultMiddleware(`,
+				].join("\n"),
+		);
+	}
+
+	// 4. Patch factory call site.
+	const factoryCallPattern =
+		/factories\.push\(buildAgentToolResultMiddlewareFactory\(\)\);/;
+	if (factoryCallPattern.test(out)) {
+		out = out.replace(
+			factoryCallPattern,
+			[
+				"factories.push(",
+				"  buildAgentToolResultMiddlewareFactory({",
+				"    sessionManager: params.sessionManager,",
+				"  }),",
+				");",
+			].join("\n"),
+		);
+	}
+
+	return out;
+}
+
+function verifyPatched(
+	source,
+	file,
+	pluginId,
+	{ trustPatchApplied, piContextPatchApplied },
+) {
 	const required = [];
 
-	if (isRelevantRuntimeFile(source)) {
+	if (trustPatchApplied) {
 		required.push(
 			PATCH_MARKER,
 			pluginId,
@@ -638,22 +844,19 @@ function verifyPatched(source, file, pluginId) {
 		);
 	}
 
-	if (file.endsWith(PI_EXTENSIONS_RELATIVE_PATH)) {
+	if (piContextPatchApplied) {
+		const isTypescriptSource = file.endsWith(PI_EXTENSIONS_RELATIVE_PATH);
 		required.push(
 			PI_CONTEXT_PATCH_MARKER,
-			"sessionManager: SessionManager;",
 			"const middlewareCtx = {",
 			"const runner = createAgentToolResultMiddlewareRunner(middlewareCtx);",
 			"[openclaw-trace] pi.tool_result.middleware_context",
-			"sessionManager: params.sessionManager,",
 		);
-	}
-
-	for (const needle of required) {
-		if (!source.includes(needle)) {
-			throw new Error(
-				`Patch verification failed for ${file}: missing ${needle}`,
-			);
+		if (isTypescriptSource) {
+			required.push("sessionManager: SessionManager;");
+			required.push("sessionManager: params.sessionManager,");
+		} else {
+			required.push("params.sessionManager");
 		}
 	}
 }
@@ -821,8 +1024,11 @@ function isDirectExecution(moduleUrl) {
 
 export {
 	findRuntimeFilesInPackageRoot,
+	isAlreadyPatchedPiCompiledFile,
+	isRelevantPiCompiledFile,
 	isRelevantPiExtensionsFile,
 	isRelevantRuntimeFile,
+	patchPiCompiledFile,
 	patchPiExtensionsFile,
 	patchRuntimeFile,
 };
