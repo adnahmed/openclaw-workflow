@@ -1,32 +1,28 @@
 #!/usr/bin/env node
-
 /**
  * Patch OpenClaw so one trusted external plugin can register
  * agentToolResultMiddleware.
  *
- * Intended use after each OpenClaw update:
+ * Default:
+ *   - finds active global OpenClaw package via `where openclaw` / `which openclaw`
+ *   - finds latest ~/.openclaw/plugin-runtime-deps/openclaw-*
+ *   - patches dist/loader-*.js only
  *
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --plugin openclaw-workflow
- *
- * Optional:
- *
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --root /path/to/openclaw --plugin openclaw-workflow
+ * Usage:
  *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --dry-run
- *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --restore --root /path/to/openclaw
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs
  *
- * What it patches:
- *   The guard that rejects non-bundled plugins from registering
- *   agentToolResultMiddleware, changing:
+ * Exact file:
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --file "C:\...\dist\loader-XXX.js" --dry-run
  *
- *     if (record.origin !== "bundled") { ... reject ... }
+ * Exact root:
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --root "C:\...\openclaw" --dry-run
  *
- *   into:
+ * Patch all discovered OpenClaw runtime deps:
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --all
  *
- *     if (record.origin !== "bundled" && record.id !== "openclaw-workflow") { ... reject ... }
- *
- * It only patches files containing both:
- *   - registerAgentToolResultMiddleware
- *   - only bundled plugins can register agent tool result middleware
+ * Restore latest backup for targets:
+ *   node scripts/patch-openclaw-trust-workflow-middleware.mjs --restore
  */
 
 import { execFileSync } from "node:child_process";
@@ -35,589 +31,541 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-const PATCH_MARKER =
-	"openclaw-workflow trusted external agentToolResultMiddleware patch";
-
 const DEFAULT_PLUGIN_ID = "openclaw-workflow";
+
+const PATCH_MARKER =
+  "openclaw-workflow trusted external agentToolResultMiddleware patch";
+
+const FUNCTION_NAME = "registerAgentToolResultMiddleware";
+
+const DIAGNOSTIC =
+  "only bundled plugins can register agent tool result middleware";
 
 const args = parseArgs(process.argv.slice(2));
 
-const pluginId = args.plugin ?? DEFAULT_PLUGIN_ID;
+const pluginId = String(args.plugin ?? DEFAULT_PLUGIN_ID);
 const dryRun = Boolean(args["dry-run"]);
 const restore = Boolean(args.restore);
-const verbose = Boolean(args.verbose);
+const all = Boolean(args.all);
+const printTargets = Boolean(args["print-targets"]);
+const exactFile = args.file ? path.resolve(String(args.file)) : null;
+const explicitRoot = args.root ? path.resolve(String(args.root)) : null;
 
-main().catch((err) => {
-	console.error(`\nERROR: ${err?.stack || err?.message || String(err)}`);
-	process.exit(1);
-});
+main();
 
-async function main() {
-	if (!/^[a-zA-Z0-9._@/-]+$/.test(pluginId)) {
-		throw new Error(`Unsafe plugin id: ${pluginId}`);
-	}
+function main() {
+  assertSafePluginId(pluginId);
 
-	const roots = getCandidateRoots(args.root);
+  console.log(`Plugin allowed for middleware: ${pluginId}`);
+  console.log(`Dry run: ${dryRun ? "yes" : "no"}`);
+  console.log(`Restore: ${restore ? "yes" : "no"}`);
+  console.log(`Patch all runtime deps: ${all ? "yes" : "no"}`);
 
-	if (roots.length === 0) {
-		throw new Error(
-			[
-				"Could not discover OpenClaw install root.",
-				"Pass --root explicitly, for example:",
-				'  node scripts/patch-openclaw-trust-workflow-middleware.mjs --root "C:\\Users\\Adnan\\AppData\\Roaming\\npm\\node_modules\\openclaw"',
-				"or:",
-				"  OPENCLAW_ROOT=/path/to/openclaw node scripts/patch-openclaw-trust-workflow-middleware.mjs",
-			].join("\n"),
-		);
-	}
+  const targets = exactFile
+    ? [exactFile]
+    : findTargets({
+        explicitRoot,
+        all,
+      });
 
-	log(`Plugin allowed for middleware: ${pluginId}`);
-	log(`Dry run: ${dryRun ? "yes" : "no"}`);
-	log(`Restore: ${restore ? "yes" : "no"}`);
-	log("Candidate roots:");
-	for (const root of roots) log(`  - ${root}`);
+  if (targets.length === 0) {
+    throw new Error(
+      [
+        "Could not find an OpenClaw loader containing registerAgentToolResultMiddleware.",
+        "",
+        "Expected one of:",
+        `  ${path.join(os.homedir(), ".openclaw", "plugin-runtime-deps", "openclaw-*", "dist", "loader-*.js")}`,
+        `  ${path.join(process.env.APPDATA ?? "%APPDATA%", "nvm", "node_modules", "openclaw", "dist", "loader-*.js")}`,
+        "",
+        "Debug commands:",
+        `  where openclaw`,
+        `  rg "${FUNCTION_NAME}" "${path.join(os.homedir(), ".openclaw", "plugin-runtime-deps")}" -g "loader-*.js" -n`,
+        `  rg "${FUNCTION_NAME}" "${process.env.APPDATA ?? "%APPDATA%"}\\nvm\\node_modules\\openclaw" -g "loader-*.js" -n`,
+      ].join("\n"),
+    );
+  }
 
-	if (restore) {
-		const restored = restoreLatestBackups(roots);
-		if (restored.length === 0) {
-			throw new Error("No backups found to restore.");
-		}
+  console.log("Target file(s):");
+  for (const target of targets) {
+    console.log(`  - ${target}`);
+  }
 
-		log("\nRestored:");
-		for (const file of restored) log(`  - ${file}`);
-		return;
-	}
+  if (printTargets) {
+    return;
+  }
 
-	const candidates = [];
+  if (restore) {
+    for (const target of targets) {
+      restoreLatestBackupForFile(target);
+    }
+    return;
+  }
 
-	for (const root of roots) {
-		for (const file of walkFiles(root)) {
-			if (!isPatchCandidateFile(file)) continue;
+  let patched = 0;
 
-			const text = safeRead(file);
-			if (!text) continue;
+  for (const target of targets) {
+    const before = fs.readFileSync(target, "utf8");
 
-			if (
-				text.includes("registerAgentToolResultMiddleware") &&
-				text.includes(
-					"only bundled plugins can register agent tool result middleware",
-				)
-			) {
-				candidates.push(file);
-			}
-		}
-	}
+    if (!isRelevantRuntimeFile(before)) {
+      console.warn(`Skipping non-matching file: ${target}`);
+      continue;
+    }
 
-	if (candidates.length === 0) {
-		throw new Error(
-			[
-				"Could not find the OpenClaw registry file containing the middleware bundled-plugin guard.",
-				"This can mean one of:",
-				"  1. Your OpenClaw version already changed the guard text.",
-				"  2. You pointed --root at the wrong directory.",
-				"  3. Your installed OpenClaw build does not include agentToolResultMiddleware.",
-				"",
-				"Try locating it manually:",
-				'  rg "only bundled plugins can register agent tool result middleware" <openclaw-root>',
-				'  rg "registerAgentToolResultMiddleware" <openclaw-root>',
-			].join("\n"),
-		);
-	}
+    if (before.includes(PATCH_MARKER) && before.includes(pluginId)) {
+      console.log(`\nAlready patched: ${target}`);
+      patched += 1;
+      continue;
+    }
 
-	log("\nFound candidate files:");
-	for (const file of candidates) log(`  - ${file}`);
+    const after = patchRuntimeFile(before, pluginId);
 
-	const patched = [];
+    if (after === before) {
+      console.warn(`\nFound middleware function, but could not patch guard: ${target}`);
+      printMiddlewareSnippet(before);
+      continue;
+    }
 
-	for (const file of candidates) {
-		const before = fs.readFileSync(file, "utf8");
+    verifyPatched(after, target, pluginId);
 
-		if (before.includes(PATCH_MARKER) && before.includes(pluginId)) {
-			log(`\nAlready patched: ${file}`);
-			patched.push({ file, status: "already_patched" });
-			continue;
-		}
+    if (dryRun) {
+      console.log(`\nWould patch: ${target}`);
+      printPatchSnippet(after);
+    } else {
+      const backup = `${target}.bak-openclaw-workflow-${timestamp()}`;
+      fs.copyFileSync(target, backup);
+      fs.writeFileSync(target, after, "utf8");
 
-		const after = patchRegistrySource(before, pluginId);
+      console.log(`\nPatched: ${target}`);
+      console.log(`Backup:  ${backup}`);
+    }
 
-		if (after === before) {
-			log(`\nNo patch applied to: ${file}`);
-			continue;
-		}
+    patched += 1;
+  }
 
-		verifyPatchedSource(after, pluginId, file);
+  if (patched === 0) {
+    throw new Error("No target was patched.");
+  }
 
-		if (!dryRun) {
-			const backup = `${file}.bak-openclaw-workflow-${timestamp()}`;
-			fs.copyFileSync(file, backup);
-			fs.writeFileSync(file, after, "utf8");
-			log(`\nPatched: ${file}`);
-			log(`Backup:  ${backup}`);
-		} else {
-			log(`\nWould patch: ${file}`);
-		}
-
-		patched.push({ file, status: dryRun ? "dry_run" : "patched" });
-	}
-
-	if (patched.length === 0) {
-		throw new Error(
-			"Found candidate files, but none matched a known patch pattern. Open the candidate file and patch the guard manually.",
-		);
-	}
-
-	log("\nDone.");
-	log(
-		[
-			"Next steps:",
-			"  1. Restart OpenClaw/gateway.",
-			"  2. Ensure your plugin manifest declares contracts.agentToolResultMiddleware.",
-			"  3. Confirm your plugin's middleware registers successfully.",
-			"  4. Run your workflow_runtime_patch_status / middleware status tool.",
-		].join("\n"),
-	);
+  console.log("\nDone.");
+  console.log("Restart OpenClaw/gateway, then run workflow_runtime_patch_status and require ok=true.");
 }
 
-function patchRegistrySource(source, pluginId) {
-	const markerComment = `/* ${PATCH_MARKER}: allow ${pluginId} */`;
+function findTargets({ explicitRoot, all }) {
+  if (explicitRoot) {
+    return findRuntimeFilesInPackageRoot(explicitRoot);
+  }
 
-	// Patch only a local window around the exact diagnostic message, so we do not
-	// accidentally relax unrelated bundled-only restrictions.
-	const diagnostic =
-		"only bundled plugins can register agent tool result middleware";
+  const targets = [];
 
-	let cursor = 0;
-	let output = source;
-	let patchedAny = false;
+  // 1. Patch active global OpenClaw package, because gateway stack traces often
+  // point here: AppData/Roaming/nvm/node_modules/openclaw/dist/loader-*.js
+  for (const root of findGlobalOpenClawPackageRoots()) {
+    targets.push(...findRuntimeFilesInPackageRoot(root));
+  }
 
-	while (true) {
-		const diagnosticIndex = output.indexOf(diagnostic, cursor);
-		if (diagnosticIndex < 0) break;
+  // 2. Patch .openclaw/plugin-runtime-deps copy/copies.
+  const runtimeDepRoots = findRuntimeDependencyRoots({ all });
+  for (const root of runtimeDepRoots) {
+    targets.push(...findRuntimeFilesInPackageRoot(root));
+  }
 
-		const windowStart = Math.max(0, diagnosticIndex - 2500);
-		const windowEnd = Math.min(output.length, diagnosticIndex + 2500);
-		const window = output.slice(windowStart, windowEnd);
-
-		const patchedWindow = patchOriginGuardWindow(
-			window,
-			pluginId,
-			markerComment,
-		);
-
-		if (patchedWindow !== window) {
-			output =
-				output.slice(0, windowStart) + patchedWindow + output.slice(windowEnd);
-			patchedAny = true;
-			cursor = windowStart + patchedWindow.length;
-		} else {
-			cursor = diagnosticIndex + diagnostic.length;
-		}
-	}
-
-	if (patchedAny) {
-		return output;
-	}
-
-	// Fallback for minified or rearranged code: patch a larger area near
-	// registerAgentToolResultMiddleware if it also contains the diagnostic.
-	const methodIndex = output.indexOf("registerAgentToolResultMiddleware");
-	if (methodIndex >= 0) {
-		const windowStart = Math.max(0, methodIndex - 5000);
-		const windowEnd = Math.min(output.length, methodIndex + 8000);
-		const window = output.slice(windowStart, windowEnd);
-
-		if (window.includes(diagnostic)) {
-			const patchedWindow = patchOriginGuardWindow(
-				window,
-				pluginId,
-				markerComment,
-			);
-
-			if (patchedWindow !== window) {
-				return (
-					output.slice(0, windowStart) + patchedWindow + output.slice(windowEnd)
-				);
-			}
-		}
-	}
-
-	return source;
+  return uniqueExistingFiles(targets);
 }
 
-function patchOriginGuardWindow(window, pluginId, markerComment) {
-	if (window.includes(PATCH_MARKER)) return window;
+function findGlobalOpenClawPackageRoots() {
+  const roots = [];
 
-	const escapedPluginId = JSON.stringify(pluginId);
+  // From `where openclaw` / `which openclaw`
+  try {
+    const cmd = process.platform === "win32" ? "where" : "which";
+    const output = execFileSync(cmd, ["openclaw"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 3000,
+    });
 
-	// Most likely source:
-	//   if (record.origin !== "bundled") {
-	//
-	// We keep the original variable name and only add a plugin-id exception.
-	const patterns = [
-		/if\s*\(\s*([A-Za-z_$][\w$]*)\.origin\s*!==\s*(['"])bundled\2\s*\)\s*\{/g,
-		/if\s*\(\s*(['"])bundled\1\s*!==\s*([A-Za-z_$][\w$]*)\.origin\s*\)\s*\{/g,
-	];
+    for (const cli of output.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)) {
+      const cliDir = path.dirname(cli);
 
-	for (const pattern of patterns) {
-		let match;
-		let lastMatch = null;
+      // Windows nvm/global npm layout:
+      //   C:\Users\Adnan\AppData\Roaming\nvm\openclaw.cmd
+      //   C:\Users\Adnan\AppData\Roaming\nvm\node_modules\openclaw
+      roots.push(path.join(cliDir, "node_modules", "openclaw"));
+      roots.push(path.join(cliDir, "node_modules", "@openclaw", "openclaw"));
 
-		while ((match = pattern.exec(window))) {
-			lastMatch = match;
-		}
+      // npm bin parent fallback:
+      roots.push(path.join(path.dirname(cliDir), "node_modules", "openclaw"));
+      roots.push(path.join(path.dirname(cliDir), "node_modules", "@openclaw", "openclaw"));
+    }
+  } catch {
+    // ignore
+  }
 
-		if (!lastMatch) continue;
+  if (process.platform === "win32") {
+    if (process.env.APPDATA) {
+      roots.push(path.join(process.env.APPDATA, "nvm", "node_modules", "openclaw"));
+      roots.push(path.join(process.env.APPDATA, "npm", "node_modules", "openclaw"));
+      roots.push(path.join(process.env.APPDATA, "npm", "node_modules", "@openclaw", "openclaw"));
+    }
+  } else {
+    roots.push("/usr/local/lib/node_modules/openclaw");
+    roots.push("/opt/homebrew/lib/node_modules/openclaw");
+    roots.push("/usr/local/lib/node_modules/@openclaw/openclaw");
+    roots.push("/opt/homebrew/lib/node_modules/@openclaw/openclaw");
+  }
 
-		if (pattern === patterns[0]) {
-			const variable = lastMatch[1];
-			const quote = lastMatch[2];
-
-			const original = lastMatch[0];
-			const replacement =
-				`${markerComment}\n` +
-				`if (${variable}.origin !== ${quote}bundled${quote} && ${variable}.id !== ${escapedPluginId}) {`;
-
-			return (
-				window.slice(0, lastMatch.index) +
-				replacement +
-				window.slice(lastMatch.index + original.length)
-			);
-		}
-
-		if (pattern === patterns[1]) {
-			const quote = lastMatch[1];
-			const variable = lastMatch[2];
-
-			const original = lastMatch[0];
-			const replacement =
-				`${markerComment}\n` +
-				`if (${quote}bundled${quote} !== ${variable}.origin && ${variable}.id !== ${escapedPluginId}) {`;
-
-			return (
-				window.slice(0, lastMatch.index) +
-				replacement +
-				window.slice(lastMatch.index + original.length)
-			);
-		}
-	}
-
-	// More generic fallback:
-	// Patch just the first origin !== bundled expression in the window.
-	const generic = /([A-Za-z_$][\w$]*)\.origin\s*!==\s*(['"])bundled\2/;
-
-	const match = generic.exec(window);
-
-	if (match) {
-		const variable = match[1];
-		const quote = match[2];
-		const original = match[0];
-		const replacement = `(${variable}.origin !== ${quote}bundled${quote} && ${variable}.id !== ${escapedPluginId})`;
-
-		return (
-			markerComment +
-			"\n" +
-			window.slice(0, match.index) +
-			replacement +
-			window.slice(match.index + original.length)
-		);
-	}
-
-	return window;
+  return uniqueExistingDirs(roots);
 }
 
-function verifyPatchedSource(source, pluginId, file) {
-	if (!source.includes(PATCH_MARKER)) {
-		throw new Error(`Patch verification failed for ${file}: missing marker.`);
-	}
+function findRuntimeDependencyRoots({ all }) {
+  const runtimeDepsRoot = path.join(
+    os.homedir(),
+    ".openclaw",
+    "plugin-runtime-deps",
+  );
 
-	if (!source.includes(pluginId)) {
-		throw new Error(
-			`Patch verification failed for ${file}: missing plugin id.`,
-		);
-	}
+  if (!fs.existsSync(runtimeDepsRoot)) {
+    return [];
+  }
 
-	if (!source.includes("registerAgentToolResultMiddleware")) {
-		throw new Error(
-			`Patch verification failed for ${file}: missing middleware symbol.`,
-		);
-	}
+  const packages = fs
+    .readdirSync(runtimeDepsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.name.startsWith("openclaw-"))
+    .map((entry) => {
+      const full = path.join(runtimeDepsRoot, entry.name);
+      const stat = fs.statSync(full);
+      return {
+        full,
+        name: entry.name,
+        mtimeMs: stat.mtimeMs,
+      };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-	if (
-		!source.includes(
-			"only bundled plugins can register agent tool result middleware",
-		)
-	) {
-		throw new Error(
-			`Patch verification failed for ${file}: missing expected diagnostic text.`,
-		);
-	}
+  const selected = all ? packages : packages.slice(0, 1);
+
+  return selected.map((pkg) => pkg.full);
 }
 
-function restoreLatestBackups(roots) {
-	const backups = [];
+function findRuntimeFilesInPackageRoot(packageRoot) {
+  const root = path.resolve(packageRoot);
+  const dist = path.join(root, "dist");
 
-	for (const root of roots) {
-		for (const file of walkFiles(root)) {
-			if (file.includes(".bak-openclaw-workflow-")) {
-				backups.push(file);
-			}
-		}
-	}
+  const candidates = [];
 
-	const groups = new Map();
+  // Source checkout fallback.
+  candidates.push(path.join(root, "src", "plugins", "registry.ts"));
+  candidates.push(path.join(root, "src", "plugins", "registry.js"));
 
-	for (const backup of backups) {
-		const original = backup.replace(
-			/\.bak-openclaw-workflow-\d{8}T\d{6}Z$/,
-			"",
-		);
-		if (!groups.has(original)) groups.set(original, []);
-		groups.get(original).push(backup);
-	}
+  // Runtime/package layouts.
+  if (fs.existsSync(dist) && fs.statSync(dist).isDirectory()) {
+    for (const entry of fs.readdirSync(dist, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
 
-	const restored = [];
+      const name = entry.name;
 
-	for (const [original, files] of groups.entries()) {
-		files.sort();
-		const latest = files[files.length - 1];
+      if (
+        /^loader-[A-Za-z0-9_-]+\.(js|mjs|cjs)$/.test(name) ||
+        /^registry-[A-Za-z0-9_-]+\.(js|mjs|cjs)$/.test(name)
+      ) {
+        candidates.push(path.join(dist, name));
+      }
+    }
+  }
 
-		if (!dryRun) {
-			fs.copyFileSync(latest, original);
-		}
+  const matches = [];
 
-		restored.push(original);
-	}
+  for (const file of candidates) {
+    if (!fs.existsSync(file)) continue;
 
-	return restored;
+    try {
+      const text = fs.readFileSync(file, "utf8");
+      if (isRelevantRuntimeFile(text)) {
+        matches.push(file);
+      }
+    } catch {
+      // ignore unreadable files
+    }
+  }
+
+  // Prefer loader-* because active stack traces show implementation there.
+  matches.sort((a, b) => {
+    const aBase = path.basename(a);
+    const bBase = path.basename(b);
+
+    const aLoader = aBase.startsWith("loader-") ? 0 : 1;
+    const bLoader = bBase.startsWith("loader-") ? 0 : 1;
+
+    if (aLoader !== bLoader) return aLoader - bLoader;
+    return a.localeCompare(b);
+  });
+
+  return matches.slice(0, 1);
 }
 
-function getCandidateRoots(explicitRoot) {
-	const roots = new Set();
-
-	const add = (value) => {
-		if (!value) return;
-
-		const resolved = path.resolve(String(value));
-
-		try {
-			const real = fs.realpathSync(resolved);
-			if (fs.existsSync(real)) roots.add(real);
-		} catch {
-			// Ignore.
-		}
-	};
-
-	add(explicitRoot);
-	add(process.env.OPENCLAW_ROOT);
-
-	// Global package roots.
-	for (const cmd of ["npm", "pnpm"]) {
-		try {
-			const root = execFileSync(cmd, ["root", "-g"], {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "ignore"],
-			}).trim();
-
-			add(path.join(root, "openclaw"));
-			add(path.join(root, "@openclaw", "openclaw"));
-		} catch {
-			// Ignore.
-		}
-	}
-
-	// Resolve openclaw command path if available.
-	for (const cmd of process.platform === "win32" ? ["where"] : ["which"]) {
-		try {
-			const output = execFileSync(cmd, ["openclaw"], {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "ignore"],
-			})
-				.split(/\r?\n/)
-				.map((line) => line.trim())
-				.filter(Boolean);
-
-			for (const cliPath of output) {
-				add(path.dirname(cliPath));
-				add(path.dirname(path.dirname(cliPath)));
-
-				// Common npm shim target layout:
-				//   .../npm/openclaw.cmd -> .../npm/node_modules/openclaw/...
-				const parent = path.dirname(cliPath);
-				add(path.join(parent, "node_modules", "openclaw"));
-				add(path.join(path.dirname(parent), "node_modules", "openclaw"));
-			}
-		} catch {
-			// Ignore.
-		}
-	}
-
-	// Common user-level OpenClaw/runtime locations.
-	const home = os.homedir();
-	add(path.join(home, ".openclaw"));
-	add(path.join(home, ".openclaw", "plugin-runtime-deps"));
-
-	if (process.platform === "win32") {
-		add(
-			process.env.APPDATA &&
-				path.join(process.env.APPDATA, "npm", "node_modules", "openclaw"),
-		);
-		add(
-			process.env.LOCALAPPDATA &&
-				path.join(process.env.LOCALAPPDATA, "openclaw"),
-		);
-		add(
-			process.env.LOCALAPPDATA &&
-				path.join(process.env.LOCALAPPDATA, "Programs", "openclaw"),
-		);
-	} else {
-		add("/usr/local/lib/node_modules/openclaw");
-		add("/opt/homebrew/lib/node_modules/openclaw");
-	}
-
-	// Keep only directories.
-	return [...roots].filter((root) => {
-		try {
-			return fs.statSync(root).isDirectory();
-		} catch {
-			return false;
-		}
-	});
+function isRelevantRuntimeFile(source) {
+  return (
+    source.includes(FUNCTION_NAME) &&
+    source.includes(DIAGNOSTIC) &&
+    source.includes("record.origin")
+  );
 }
 
-function* walkFiles(root) {
-	const stack = [root];
-	let seen = 0;
-	const maxFiles = 80_000;
+function patchRuntimeFile(source, pluginId) {
+  const functionIndex = source.indexOf(`const ${FUNCTION_NAME}`);
 
-	while (stack.length) {
-		const current = stack.pop();
+  const symbolIndex =
+    functionIndex >= 0 ? functionIndex : source.indexOf(FUNCTION_NAME);
 
-		let entries;
-		try {
-			entries = fs.readdirSync(current, { withFileTypes: true });
-		} catch {
-			continue;
-		}
+  if (symbolIndex < 0) {
+    return source;
+  }
 
-		for (const entry of entries) {
-			const full = path.join(current, entry.name);
+  const diagnosticIndex = source.indexOf(DIAGNOSTIC, symbolIndex);
 
-			if (entry.isDirectory()) {
-				if (shouldSkipDir(entry.name, full)) continue;
-				stack.push(full);
-				continue;
-			}
+  if (diagnosticIndex < 0) {
+    return source;
+  }
 
-			if (!entry.isFile()) continue;
+  // Patch only local middleware guard; leave other bundled-only guards alone.
+  const windowStart = Math.max(0, symbolIndex - 500);
+  const windowEnd = Math.min(source.length, diagnosticIndex + 1200);
+  const window = source.slice(windowStart, windowEnd);
 
-			seen += 1;
-			if (seen > maxFiles) {
-				if (verbose) {
-					console.warn(
-						`Stopped scanning ${root}: file limit ${maxFiles} reached.`,
-					);
-				}
-				return;
-			}
+  if (window.includes(PATCH_MARKER)) {
+    return source;
+  }
 
-			yield full;
-		}
-	}
+  const patchedWindow = patchMiddlewareWindow(window, pluginId);
+
+  if (patchedWindow === window) {
+    return source;
+  }
+
+  return source.slice(0, windowStart) + patchedWindow + source.slice(windowEnd);
 }
 
-function shouldSkipDir(name, fullPath) {
-	if (
-		name === ".git" ||
-		name === ".hg" ||
-		name === ".svn" ||
-		name === "coverage" ||
-		name === ".cache" ||
-		name === ".next" ||
-		name === "tmp" ||
-		name === "temp"
-	) {
-		return true;
-	}
+function patchMiddlewareWindow(window, pluginId) {
+  const pluginLiteral = JSON.stringify(pluginId);
 
-	// Do not skip node_modules globally, because npm-installed OpenClaw lives in
-	// node_modules. But avoid nested dependency forests unless they look relevant.
-	if (name === "node_modules" && !/openclaw/i.test(fullPath)) {
-		return true;
-	}
+  const functionMatch = new RegExp(
+    String.raw`${FUNCTION_NAME}\s*=\s*\(\s*([A-Za-z_$][\w$]*)\s*,`,
+  ).exec(window);
 
-	return false;
+  const recordVar = functionMatch?.[1] ?? "record";
+
+  const patterns = [
+    new RegExp(
+      String.raw`if\s*\(\s*${escapeRegExp(recordVar)}\.origin\s*!==\s*(["'])bundled\1\s*\)\s*\{`,
+      "g",
+    ),
+    new RegExp(
+      String.raw`if\s*\(\s*${escapeRegExp(recordVar)}\.origin!==(["'])bundled\1\s*\)\s*\{`,
+      "g",
+    ),
+    /if\s*\(\s*([A-Za-z_$][\w$]*)\.origin\s*!==\s*(["'])bundled\2\s*\)\s*\{/g,
+  ];
+
+  const matches = [];
+
+  for (const pattern of patterns) {
+    for (const match of window.matchAll(pattern)) {
+      matches.push({ pattern, match });
+    }
+  }
+
+  if (matches.length === 0) {
+    return window;
+  }
+
+  const diagnosticIndex = window.indexOf(DIAGNOSTIC);
+
+  matches.sort((a, b) => {
+    const ai = a.match.index ?? 0;
+    const bi = b.match.index ?? 0;
+    return Math.abs(diagnosticIndex - ai) - Math.abs(diagnosticIndex - bi);
+  });
+
+  const selected = matches[0];
+  const match = selected.match;
+  const original = match[0];
+
+  let variable = recordVar;
+  let quote = '"';
+
+  if (selected.pattern === patterns[2]) {
+    variable = match[1];
+    quote = match[2];
+  } else {
+    quote = match[1];
+  }
+
+  const allowExpression =
+    `${variable}.id !== ${pluginLiteral} && ` +
+    `${variable}.pluginId !== ${pluginLiteral} && ` +
+    `${variable}.manifest?.id !== ${pluginLiteral}`;
+
+  const replacement =
+    `/* ${PATCH_MARKER}: allow ${pluginId} */\n` +
+    `                if (${variable}.origin !== ${quote}bundled${quote} && ${allowExpression}) {`;
+
+  return (
+    window.slice(0, match.index) +
+    replacement +
+    window.slice((match.index ?? 0) + original.length)
+  );
 }
 
-function isPatchCandidateFile(file) {
-	const ext = path.extname(file).toLowerCase();
-	if (![".js", ".mjs", ".cjs", ".ts", ".tsx"].includes(ext)) return false;
+function verifyPatched(source, file, pluginId) {
+  const required = [
+    PATCH_MARKER,
+    pluginId,
+    FUNCTION_NAME,
+    DIAGNOSTIC,
+    `record.id !== ${JSON.stringify(pluginId)}`,
+  ];
 
-	const base = path.basename(file).toLowerCase();
-	const full = file.toLowerCase();
-
-	if (
-		base.includes("registry") ||
-		base.includes("plugin") ||
-		base.includes("middleware") ||
-		full.includes(`${path.sep}plugins${path.sep}`) ||
-		full.includes(`${path.sep}dist${path.sep}`)
-	) {
-		try {
-			const stat = fs.statSync(file);
-			return stat.size <= 5 * 1024 * 1024;
-		} catch {
-			return false;
-		}
-	}
-
-	return false;
+  for (const needle of required) {
+    if (!source.includes(needle)) {
+      throw new Error(`Patch verification failed for ${file}: missing ${needle}`);
+    }
+  }
 }
 
-function safeRead(file) {
-	try {
-		return fs.readFileSync(file, "utf8");
-	} catch {
-		return null;
-	}
+function restoreLatestBackupForFile(file) {
+  const dir = path.dirname(file);
+  const base = path.basename(file);
+  const prefix = `${base}.bak-openclaw-workflow-`;
+
+  const backups = fs
+    .readdirSync(dir)
+    .filter((name) => name.startsWith(prefix))
+    .map((name) => path.join(dir, name))
+    .sort();
+
+  if (backups.length === 0) {
+    throw new Error(`No backups found for ${file}`);
+  }
+
+  const latest = backups[backups.length - 1];
+
+  if (dryRun) {
+    console.log(`Would restore ${file}`);
+    console.log(`From:          ${latest}`);
+  } else {
+    fs.copyFileSync(latest, file);
+    console.log(`Restored ${file}`);
+    console.log(`From:     ${latest}`);
+  }
+}
+
+function printMiddlewareSnippet(source) {
+  const index = source.indexOf(FUNCTION_NAME);
+  const start = Math.max(0, index - 500);
+  const end = Math.min(source.length, index + 2000);
+
+  console.log("\nMiddleware snippet:");
+  console.log(source.slice(start, end));
+}
+
+function printPatchSnippet(source) {
+  const index = source.indexOf(PATCH_MARKER);
+  const start = Math.max(0, index - 500);
+  const end = Math.min(source.length, index + 1200);
+
+  console.log("\nPatched snippet:");
+  console.log(source.slice(start, end));
+}
+
+function uniqueExistingDirs(values) {
+  const out = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    if (!value) continue;
+
+    try {
+      const real = fs.realpathSync(path.resolve(value));
+      if (!fs.existsSync(real)) continue;
+      if (!fs.statSync(real).isDirectory()) continue;
+      if (seen.has(real)) continue;
+
+      seen.add(real);
+      out.push(real);
+    } catch {
+      // ignore
+    }
+  }
+
+  return out;
+}
+
+function uniqueExistingFiles(values) {
+  const out = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    if (!value) continue;
+
+    try {
+      const real = fs.realpathSync(path.resolve(value));
+      if (!fs.existsSync(real)) continue;
+      if (!fs.statSync(real).isFile()) continue;
+      if (seen.has(real)) continue;
+
+      seen.add(real);
+      out.push(real);
+    } catch {
+      // ignore
+    }
+  }
+
+  return out;
 }
 
 function parseArgs(argv) {
-	const out = {};
+  const out = {};
 
-	for (let i = 0; i < argv.length; i += 1) {
-		const arg = argv[i];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
 
-		if (!arg.startsWith("--")) {
-			continue;
-		}
+    if (!arg.startsWith("--")) continue;
 
-		const eq = arg.indexOf("=");
-		if (eq >= 0) {
-			out[arg.slice(2, eq)] = arg.slice(eq + 1);
-			continue;
-		}
+    const eq = arg.indexOf("=");
 
-		const key = arg.slice(2);
-		const next = argv[i + 1];
+    if (eq >= 0) {
+      out[arg.slice(2, eq)] = arg.slice(eq + 1);
+      continue;
+    }
 
-		if (!next || next.startsWith("--")) {
-			out[key] = true;
-		} else {
-			out[key] = next;
-			i += 1;
-		}
-	}
+    const key = arg.slice(2);
+    const next = argv[i + 1];
 
-	return out;
+    if (!next || next.startsWith("--")) {
+      out[key] = true;
+    } else {
+      out[key] = next;
+      i += 1;
+    }
+  }
+
+  return out;
+}
+
+function assertSafePluginId(value) {
+  if (!/^[a-zA-Z0-9._@/-]+$/.test(value)) {
+    throw new Error(`Unsafe plugin id: ${value}`);
+  }
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function timestamp() {
-	return new Date()
-		.toISOString()
-		.replace(/[-:]/g, "")
-		.replace(/\.\d{3}Z$/, "Z");
-}
-
-function log(message) {
-	console.log(message);
+  return new Date()
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(/\.\d{3}Z$/, "Z");
 }
