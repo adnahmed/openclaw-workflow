@@ -106,6 +106,39 @@ const USES_TOOLS: Record<AuthoringUses, string[]> = {
 	drain: [],
 };
 
+const STATE_PLUGIN_SPEC_KEYS = [
+	"state_publish",
+	"state_consume",
+	"state_complete",
+	"state_reclaim",
+	"state_query",
+	"state_partition",
+	"state_patch_outputs",
+	"state_report",
+] as const;
+
+type StatePluginSpecKey = (typeof STATE_PLUGIN_SPEC_KEYS)[number];
+
+const STATE_PLUGIN_OPERATIONS: Record<string, StatePluginSpecKey> = {
+	"workflow.state_publish": "state_publish",
+	"workflow.state_claim": "state_consume",
+	"workflow.state_reclaim_expired": "state_reclaim",
+	"workflow.state_complete": "state_complete",
+	"workflow.state_query": "state_query",
+	"workflow.state_partition": "state_partition",
+	"workflow.state_patch_outputs": "state_patch_outputs",
+	"workflow.state_report": "state_report",
+};
+
+const PLUGIN_REQUIRED_FIELDS: Record<string, string[]> = {
+	"workflow.state_publish": ["output", "collection"],
+	"workflow.state_query": ["collection", "output"],
+	"workflow.state_partition": ["collection", "partitions"],
+	"workflow.state_report": ["json_output"],
+	"workflow.state_complete": ["output"],
+	"workflow.state_patch_outputs": ["collection", "output"],
+};
+
 export function compileAuthoringWorkflow(
 	input: AuthoringWorkflow,
 	options: AuthoringCompileOptions = {},
@@ -643,8 +676,25 @@ function compilePluginAuthoringStep(args: {
 		);
 	}
 
-	const withArgs = { ...(args.body.with ?? {}) };
-	delete (withArgs as Record<string, unknown>).operation;
+	if (
+		args.body.operation &&
+		args.body.with?.operation &&
+		args.body.operation !== args.body.with.operation
+	) {
+		throw new AuthoringCompileError(
+			`plugin operation conflict: operation=${args.body.operation} but with.operation=${args.body.with.operation}`,
+			`${args.pointer}/with/operation`,
+		);
+	}
+
+	validatePluginOperationSpec(
+		args.body,
+		op,
+		args.pointer,
+		args.normalizedOutputs,
+	);
+
+	const withArgs = normalizePluginWithConfig(args.body, op, args.pointer);
 
 	return {
 		id: args.stepId,
@@ -679,6 +729,186 @@ function compilePluginAuthoringStep(args: {
 		external_landing_preflight: args.body.external_landing_preflight,
 		__compiled_from: args.compiledFrom,
 	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function stableJson(value: unknown): string {
+	if (!isRecord(value)) {
+		return JSON.stringify(value);
+	}
+	return JSON.stringify(value, Object.keys(value as object).sort());
+}
+
+function sameJson(a: unknown, b: unknown): boolean {
+	return stableJson(a) === stableJson(b);
+}
+
+function normalizePluginWithConfig(
+	body: AuthoringStepBody,
+	operation: string,
+	pointer: string,
+): Record<string, unknown> {
+	const withArgs = { ...(body.with ?? {}) } as Record<string, unknown>;
+	delete withArgs.operation;
+
+	const specKey = STATE_PLUGIN_OPERATIONS[operation];
+	if (!specKey) return withArgs;
+
+	const topLevelSpec = body[specKey];
+	const withSpec = withArgs[specKey];
+
+	if (
+		topLevelSpec !== undefined &&
+		withSpec !== undefined &&
+		!sameJson(topLevelSpec, withSpec)
+	) {
+		throw new AuthoringCompileError(
+			`${operation} has conflicting ${specKey} in top-level and with.${specKey}`,
+			`${pointer}/with/${specKey}`,
+		);
+	}
+
+	if (topLevelSpec !== undefined && withSpec === undefined) {
+		withArgs[specKey] = topLevelSpec;
+	}
+
+	return withArgs;
+}
+
+function missing(value: unknown): boolean {
+	return (
+		value === undefined ||
+		value === null ||
+		value === "" ||
+		(Array.isArray(value) && value.length === 0) ||
+		(isRecord(value) && Object.keys(value).length === 0)
+	);
+}
+
+function validatePluginOperationSpec(
+	body: AuthoringStepBody,
+	operation: string,
+	pointer: string,
+	outputs: OutputSpec[],
+): void {
+	const specKey = STATE_PLUGIN_OPERATIONS[operation];
+	if (!specKey) return;
+
+	const withSpec = isRecord(body.with) ? body.with[specKey] : undefined;
+	const topLevelSpec = body[specKey];
+	const spec = topLevelSpec ?? withSpec;
+
+	if (!isRecord(spec) && !Array.isArray(spec)) {
+		throw new AuthoringCompileError(
+			`${operation} requires ${specKey}`,
+			`${pointer}/${specKey}`,
+		);
+	}
+
+	const specs = Array.isArray(spec) ? spec : [spec];
+	const required = PLUGIN_REQUIRED_FIELDS[operation] ?? [];
+
+	for (let i = 0; i < specs.length; i += 1) {
+		const item = specs[i];
+		const itemPointer = Array.isArray(spec)
+			? `${pointer}/${specKey}/${i}`
+			: `${pointer}/${specKey}`;
+
+		if (!isRecord(item)) {
+			throw new AuthoringCompileError(
+				`${operation} ${specKey} entry must be an object`,
+				itemPointer,
+			);
+		}
+
+		for (const field of required) {
+			if (missing(item[field])) {
+				throw new AuthoringCompileError(
+					`${operation} requires ${specKey}.${field}`,
+					`${itemPointer}/${field}`,
+				);
+			}
+		}
+
+		validateStatePluginOutputs(operation, item, outputs, itemPointer);
+	}
+}
+
+function outputIds(outputs: OutputSpec[]): Set<string> {
+	return new Set(
+		outputs
+			.map((out) => (typeof out === "string" ? out : out.id))
+			.filter(Boolean),
+	);
+}
+
+function validateOutputRef(
+	ids: Set<string>,
+	value: unknown,
+	pointer: string,
+): void {
+	if (typeof value !== "string" || value.length === 0) return;
+	if (ids.size > 0 && !ids.has(value)) {
+		throw new AuthoringCompileError(
+			`plugin output "${value}" is not declared in outputs`,
+			pointer,
+		);
+	}
+}
+
+function validateStatePluginOutputs(
+	operation: string,
+	spec: Record<string, unknown>,
+	outputs: OutputSpec[],
+	pointer: string,
+): void {
+	const ids = outputIds(outputs);
+
+	for (const field of [
+		"output",
+		"summary_output",
+		"json_output",
+		"markdown_output",
+	]) {
+		validateOutputRef(ids, spec[field], `${pointer}/${field}`);
+	}
+
+	if (operation === "workflow.state_partition") {
+		if (!isRecord(spec.partitions)) {
+			throw new AuthoringCompileError(
+				"workflow.state_partition requires state_partition.partitions object",
+				`${pointer}/partitions`,
+			);
+		}
+
+		for (const [name, partition] of Object.entries(spec.partitions)) {
+			if (!isRecord(partition)) {
+				throw new AuthoringCompileError(
+					`workflow.state_partition partition "${name}" must be an object`,
+					`${pointer}/partitions/${name}`,
+				);
+			}
+
+			if (
+				typeof partition.output !== "string" ||
+				partition.output.length === 0
+			) {
+				throw new AuthoringCompileError(
+					`workflow.state_partition partition "${name}" requires output`,
+					`${pointer}/partitions/${name}/output`,
+				);
+			}
+
+			validateOutputRef(
+				ids,
+				partition.output,
+				`${pointer}/partitions/${name}/output`,
+			);
+		}
+	}
 }
 
 function compileTransformStep(args: {

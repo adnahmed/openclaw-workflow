@@ -94,6 +94,87 @@ import { createRunState, getLocalISOString } from "./workflow-state.js";
 /** Scheduler tick interval in milliseconds. Lower = more responsive but more CPU. */
 const TICK_INTERVAL_MS = 500;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function missing(value: unknown): boolean {
+	return (
+		value === undefined ||
+		value === null ||
+		value === "" ||
+		(Array.isArray(value) && value.length === 0) ||
+		(isRecord(value) && Object.keys(value).length === 0)
+	);
+}
+
+function validateCompiledStatePluginSteps(workflow: WorkflowDefinition): void {
+	const visit = (step: WorkflowStep, pointer: string) => {
+		if (step.kind === "plugin") {
+			validateCompiledStatePluginStep(step, pointer);
+		}
+
+		for (const child of step.steps ?? []) {
+			visit(child, `${pointer}/steps/${child.id}`);
+		}
+	};
+
+	for (const step of workflow.steps ?? []) {
+		visit(step, `/steps/${step.id}`);
+	}
+}
+
+function validateCompiledStatePluginStep(
+	step: WorkflowStep,
+	pointer: string,
+): void {
+	const op = step.uses;
+	const withObj = isRecord(step.with) ? step.with : {};
+
+	const rules: Record<string, { key: string; required: string[] }> = {
+		"workflow.state_publish": {
+			key: "state_publish",
+			required: ["output", "collection"],
+		},
+		"workflow.state_query": {
+			key: "state_query",
+			required: ["collection", "output"],
+		},
+		"workflow.state_partition": {
+			key: "state_partition",
+			required: ["collection", "partitions"],
+		},
+		"workflow.state_report": {
+			key: "state_report",
+			required: ["json_output"],
+		},
+	};
+
+	const rule = rules[op];
+	if (!rule) return;
+
+	const stepRecord = step as Record<string, unknown>;
+	const withRecord = withObj as Record<string, unknown>;
+	const topLevel = stepRecord[rule.key];
+	const inWith = withRecord[rule.key];
+	const spec = inWith ?? topLevel;
+
+	if (!isRecord(spec)) {
+		throw new Error(
+			`Plugin config error at ${pointer}: ${op} missing ${rule.key}; expected ${rule.key} or with.${rule.key}`,
+		);
+	}
+
+	const specRecord = spec as Record<string, unknown>;
+	for (const field of rule.required) {
+		if (missing(specRecord[field])) {
+			throw new Error(
+				`Plugin config error at ${pointer}: ${op} missing ${rule.key}.${field}`,
+			);
+		}
+	}
+}
+
 /**
  * @typedef {Object} ExecutorConfig
  * @property {string}   runsDir        - Directory for state files
@@ -114,6 +195,7 @@ const TICK_INTERVAL_MS = 500;
 
 export async function compileWorkflow(workflow, runId, config) {
 	validateWorkflowTemplates(workflow);
+	validateCompiledStatePluginSteps(workflow);
 	const varCtx = buildContext(
 		runId,
 		workflow.config,
@@ -1224,9 +1306,7 @@ export async function executeWorkflow(
 									path: "",
 									exists: false,
 									decision: "fail",
-									errors: [
-										`Unknown plugin operation "${args.operation}".`,
-									],
+									errors: [`Unknown plugin operation "${args.operation}".`],
 								},
 							],
 						},
@@ -1281,7 +1361,7 @@ export async function executeWorkflow(
 								decision: "fail",
 								errors: [
 									error instanceof Error
-										? error.stack ?? error.message
+										? (error.stack ?? error.message)
 										: String(error),
 								],
 							},
@@ -1289,7 +1369,7 @@ export async function executeWorkflow(
 					},
 					error:
 						error instanceof Error
-							? error.stack ?? error.message
+							? (error.stack ?? error.message)
 							: String(error),
 					logs: null,
 					duration_ms: Date.now() - startedAt,

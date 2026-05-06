@@ -357,6 +357,8 @@ Authoring step additions:
   - string entries (`- jobs_ready`)
   - objects with `id`, `path`, `validate`, `optional`, and `materialize.{path,mode}`
 - plugin op shorthand via top-level `operation` (preferred over `with.operation`, still backward-compatible)
+- for state plugin specs (`state_publish`, `state_query`, etc.), authoring prefers top-level fields; compiler normalizes compiled/runtime shape to always include `with.state_*` while preserving top-level `state_*` for audit/debug compatibility
+- conflicting top-level vs `with.state_*` values are compile-time errors (runtime does not guess)
 - public sealed-loop authoring via `for_each` (+ `parser`, `item_schema`) for browser/model steps
 - named drain controller authoring via `uses: drain` + `worker_group`, `claim`, `worker`, `complete`
 - step-level `sealed` overrides merged over defaults/profile
@@ -587,6 +589,12 @@ Rules:
 - may include `with: { ... }` operation arguments
 - cannot use `for_each`
 - may still use `depends_on`, `outputs`, retry policy, and variable substitution
+
+For semantic state plugin operations (`workflow.state_publish`, `workflow.state_query`, `workflow.state_partition`, `workflow.state_report`, etc.):
+- authoring can define config at top-level `state_*`
+- compiler normalizes compiled config so `with.state_*` is populated
+- top-level `state_*` is retained on compiled steps for traceability
+- if both top-level and `with.state_*` are present but differ, compilation fails
 
 Built-in operation IDs:
 - `workflow.cache_json_document`

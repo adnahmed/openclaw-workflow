@@ -113,6 +113,48 @@ function failResult(
 	};
 }
 
+function configFailResult(
+	ctx: PluginOperationContext,
+	operation: string,
+	message: string,
+	details: Record<string, unknown> = {},
+): PluginOperationResult {
+	const compiledFrom = (ctx.step as Record<string, unknown>)[
+		"__compiled_from"
+	] as
+		| {
+				source_pointer?: string;
+				pointer?: string;
+		  }
+		| undefined;
+	const sourcePointer =
+		compiledFrom?.source_pointer ??
+		compiledFrom?.pointer ??
+		`/steps/${ctx.step.id}`;
+
+	return failResult(
+		`${operation}: invalid configuration at ${sourcePointer}: ${message}`,
+		{
+			retryable: false,
+			failure_kind: "configuration",
+			logs: JSON.stringify(
+				{
+					phase: "plugin_config_validation",
+					operation,
+					step_id: ctx.step.id,
+					source_pointer: sourcePointer,
+					message,
+					step_keys: Object.keys(ctx.step as Record<string, unknown>).sort(),
+					with_keys: Object.keys(withObject(ctx)).sort(),
+					...details,
+				},
+				null,
+				2,
+			),
+		},
+	);
+}
+
 function asArray<T>(value: T | T[] | undefined | null): T[] {
 	if (value == null) return [];
 	return Array.isArray(value) ? value : [value];
@@ -120,6 +162,116 @@ function asArray<T>(value: T | T[] | undefined | null): T[] {
 
 function withObject(ctx: PluginOperationContext): JsonObject {
 	return (ctx.step.with ?? {}) as unknown as JsonObject;
+}
+
+type ConfigResolution<T> =
+	| {
+			ok: true;
+			spec: T;
+			source: string;
+	  }
+	| {
+			ok: false;
+			result: PluginOperationResult;
+	  };
+
+const STATE_CONFIG_ALIASES: Record<string, string[]> = {
+	state_publish: ["publish"],
+	state_consume: ["consume"],
+	state_complete: ["complete"],
+	state_reclaim: ["reclaim"],
+	state_query: ["query"],
+	state_partition: ["partition"],
+	state_patch_outputs: ["patch_outputs"],
+	state_report: ["report"],
+};
+
+function resolveStateConfig<T extends Record<string, unknown>>(
+	ctx: PluginOperationContext,
+	operation: string,
+	key: string,
+): ConfigResolution<T> {
+	const step = ctx.step as unknown as Record<string, unknown>;
+	const withObj = withObject(ctx);
+
+	const topLevel = step[key];
+	const canonicalWith = withObj[key];
+
+	const aliases = STATE_CONFIG_ALIASES[key] ?? [];
+	const aliasHits = aliases
+		.filter((alias) => withObj[alias] !== undefined)
+		.map((alias) => ({ alias, value: withObj[alias] }));
+
+	if (aliasHits.length > 1) {
+		return {
+			ok: false,
+			result: configFailResult(
+				ctx,
+				operation,
+				`multiple legacy config aliases found for ${key}: ${aliasHits.map((h) => h.alias).join(", ")}`,
+				{ expected: [`${key}`, `with.${key}`] },
+			),
+		};
+	}
+
+	const aliasValue = aliasHits[0]?.value;
+
+	if (canonicalWith !== undefined && aliasValue !== undefined) {
+		return {
+			ok: false,
+			result: configFailResult(
+				ctx,
+				operation,
+				`conflicting config paths with.${key} and with.${aliasHits[0].alias}`,
+				{ expected: [`${key}`, `with.${key}`] },
+			),
+		};
+	}
+
+	const withValue = canonicalWith ?? aliasValue;
+	const withSource =
+		canonicalWith !== undefined
+			? `with.${key}`
+			: aliasHits[0]
+				? `with.${aliasHits[0].alias}`
+				: null;
+
+	if (
+		topLevel !== undefined &&
+		withValue !== undefined &&
+		JSON.stringify(topLevel) !== JSON.stringify(withValue)
+	) {
+		return {
+			ok: false,
+			result: configFailResult(
+				ctx,
+				operation,
+				`conflicting config at ${key} and ${withSource}`,
+				{
+					top_level_key: key,
+					with_key: withSource,
+				},
+			),
+		};
+	}
+
+	const spec = withValue ?? topLevel;
+
+	if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+		return {
+			ok: false,
+			result: configFailResult(ctx, operation, `missing config ${key}`, {
+				expected: [key, `with.${key}`],
+				legacy_aliases: aliases.map((alias) => `with.${alias}`),
+			}),
+		};
+	}
+
+	return {
+		ok: true,
+		spec: spec as T,
+		source: withSource ?? key,
+	};
 }
 
 function readPath(value: unknown, selector?: string): unknown {
@@ -582,23 +734,20 @@ function completeSpecs(ctx: PluginOperationContext): StateCompleteSpec[] {
 	);
 }
 
-function querySpec(ctx: PluginOperationContext): StateQuerySpec {
-	const stepSpec = (ctx.step as unknown as { state_query?: StateQuerySpec })
-		.state_query;
-	return (withObject(ctx).state_query ??
-		withObject(ctx).query ??
-		stepSpec ??
-		{}) as StateQuerySpec;
+function querySpecResolved(ctx: PluginOperationContext) {
+	return resolveStateConfig<StateQuerySpec>(
+		ctx,
+		"workflow.state_query",
+		"state_query",
+	);
 }
 
-function partitionSpec(ctx: PluginOperationContext): StatePartitionSpec {
-	const stepSpec = (
-		ctx.step as unknown as { state_partition?: StatePartitionSpec }
-	).state_partition;
-	return (withObject(ctx).state_partition ??
-		withObject(ctx).partition ??
-		stepSpec ??
-		{}) as StatePartitionSpec;
+function partitionSpecResolved(ctx: PluginOperationContext) {
+	return resolveStateConfig<StatePartitionSpec>(
+		ctx,
+		"workflow.state_partition",
+		"state_partition",
+	);
 }
 
 function patchOutputsSpec(ctx: PluginOperationContext): StatePatchOutputsSpec {
@@ -611,13 +760,12 @@ function patchOutputsSpec(ctx: PluginOperationContext): StatePatchOutputsSpec {
 		{}) as StatePatchOutputsSpec;
 }
 
-function reportSpec(ctx: PluginOperationContext): StateReportSpec {
-	const stepSpec = (ctx.step as unknown as { state_report?: StateReportSpec })
-		.state_report;
-	return (withObject(ctx).state_report ??
-		withObject(ctx).report ??
-		stepSpec ??
-		{}) as StateReportSpec;
+function reportSpecResolved(ctx: PluginOperationContext) {
+	return resolveStateConfig<StateReportSpec>(
+		ctx,
+		"workflow.state_report",
+		"state_report",
+	);
 }
 
 function projectItem(
@@ -1148,9 +1296,31 @@ export const statePublishOperation: WorkflowPluginOperation = {
 
 			for (const spec of specs) {
 				if (!spec.output)
-					return failResult("workflow.state_publish: output is required");
+					return configFailResult(
+						ctx,
+						"workflow.state_publish",
+						"missing required field state_publish.output",
+						{
+							required_fields: ["output", "collection"],
+							accepted_paths: [
+								"state_publish.output",
+								"with.state_publish.output",
+							],
+						},
+					);
 				if (!spec.collection)
-					return failResult("workflow.state_publish: collection is required");
+					return configFailResult(
+						ctx,
+						"workflow.state_publish",
+						"missing required field state_publish.collection",
+						{
+							required_fields: ["output", "collection"],
+							accepted_paths: [
+								"state_publish.collection",
+								"with.state_publish.collection",
+							],
+						},
+					);
 
 				const fromStep = spec.from_step ?? ctx.step.depends_on?.[0];
 				if (!fromStep) {
@@ -1631,7 +1801,18 @@ export const stateCompleteOperation: WorkflowPluginOperation = {
 
 			for (const spec of specs) {
 				if (!spec.output)
-					return failResult("workflow.state_complete: output is required");
+					return configFailResult(
+						ctx,
+						"workflow.state_complete",
+						"missing required field state_complete.output",
+						{
+							required_fields: ["output"],
+							accepted_paths: [
+								"state_complete.output",
+								"with.state_complete.output",
+							],
+						},
+					);
 
 				const fromStep = spec.from_step ?? ctx.step.depends_on?.[0];
 				if (!fromStep) {
@@ -1925,14 +2106,36 @@ export const stateQueryOperation: WorkflowPluginOperation = {
 		const start = Date.now();
 
 		try {
-			const spec = querySpec(ctx);
+			const resolved = querySpecResolved(ctx);
+			if (resolved.ok === false) return resolved.result;
+
+			const spec = resolved.spec;
 
 			if (!spec.collection) {
-				return failResult("workflow.state_query: collection is required");
+				return configFailResult(
+					ctx,
+					"workflow.state_query",
+					"missing required field state_query.collection",
+					{
+						required_fields: ["collection", "output"],
+						accepted_paths: [
+							"state_query.collection",
+							"with.state_query.collection",
+						],
+					},
+				);
 			}
 
 			if (!spec.output) {
-				return failResult("workflow.state_query: output is required");
+				return configFailResult(
+					ctx,
+					"workflow.state_query",
+					"missing required field state_query.output",
+					{
+						required_fields: ["collection", "output"],
+						accepted_paths: ["state_query.output", "with.state_query.output"],
+					},
+				);
 			}
 
 			if (!ctx.redis) {
@@ -1998,13 +2201,33 @@ export const statePatchOutputsOperation: WorkflowPluginOperation = {
 			const spec = patchOutputsSpec(ctx);
 
 			if (!spec.collection) {
-				return failResult(
-					"workflow.state_patch_outputs: collection is required",
+				return configFailResult(
+					ctx,
+					"workflow.state_patch_outputs",
+					"missing required field state_patch_outputs.collection",
+					{
+						required_fields: ["collection", "output"],
+						accepted_paths: [
+							"state_patch_outputs.collection",
+							"with.state_patch_outputs.collection",
+						],
+					},
 				);
 			}
 
 			if (!spec.output) {
-				return failResult("workflow.state_patch_outputs: output is required");
+				return configFailResult(
+					ctx,
+					"workflow.state_patch_outputs",
+					"missing required field state_patch_outputs.output",
+					{
+						required_fields: ["collection", "output"],
+						accepted_paths: [
+							"state_patch_outputs.output",
+							"with.state_patch_outputs.output",
+						],
+					},
+				);
 			}
 
 			if (!ctx.redis) {
@@ -2122,14 +2345,39 @@ export const statePartitionOperation: WorkflowPluginOperation = {
 		const start = Date.now();
 
 		try {
-			const spec = partitionSpec(ctx);
+			const resolved = partitionSpecResolved(ctx);
+			if (resolved.ok === false) return resolved.result;
+
+			const spec = resolved.spec;
 
 			if (!spec.collection) {
-				return failResult("workflow.state_partition: collection is required");
+				return configFailResult(
+					ctx,
+					"workflow.state_partition",
+					"missing required field state_partition.collection",
+					{
+						required_fields: ["collection", "partitions"],
+						accepted_paths: [
+							"state_partition.collection",
+							"with.state_partition.collection",
+						],
+					},
+				);
 			}
 
 			if (!spec.partitions || Object.keys(spec.partitions).length === 0) {
-				return failResult("workflow.state_partition: partitions are required");
+				return configFailResult(
+					ctx,
+					"workflow.state_partition",
+					"missing required field state_partition.partitions",
+					{
+						required_fields: ["collection", "partitions"],
+						accepted_paths: [
+							"state_partition.partitions",
+							"with.state_partition.partitions",
+						],
+					},
+				);
 			}
 
 			if (!ctx.redis) {
@@ -2271,10 +2519,24 @@ export const stateReportOperation: WorkflowPluginOperation = {
 		const start = Date.now();
 
 		try {
-			const spec = reportSpec(ctx);
+			const resolved = reportSpecResolved(ctx);
+			if (resolved.ok === false) return resolved.result;
+
+			const spec = resolved.spec;
 
 			if (!spec.json_output) {
-				return failResult("workflow.state_report: json_output is required");
+				return configFailResult(
+					ctx,
+					"workflow.state_report",
+					"missing required field state_report.json_output",
+					{
+						required_fields: ["json_output"],
+						accepted_paths: [
+							"state_report.json_output",
+							"with.state_report.json_output",
+						],
+					},
+				);
 			}
 
 			if (!ctx.redis) {
