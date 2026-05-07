@@ -864,8 +864,7 @@ export default definePluginEntry({
 													api,
 													config,
 												),
-												model:
-													config.sealedTaskDigestModel || config.defaultModel,
+												model: config.sealedTaskDigestModel,
 												mode: config.sealedTaskDigestMode || "hybrid",
 												maxInputChars:
 													config.sealedTaskDigestMaxInputChars ?? 100_000,
@@ -933,11 +932,17 @@ export default definePluginEntry({
 										openclaw_workflow_sealed: true,
 										observation_ref:
 											envelope.observation_ref ?? envelope.result_ref,
+										observation_id: envelope.observation_id,
 										tool_call_id: event.toolCallId,
 										tool_name: event.toolName,
 										bytes: envelope.bytes,
 										kind: envelope.kind,
 										truncated_for_context: envelope.truncated_for_context,
+										has_task_digest: Boolean(envelope.sealed?.task_digest),
+										task_digest_producer:
+											envelope.sealed?.task_digest?.producer,
+										task_digest_evidence_count:
+											envelope.sealed?.task_digest?.evidence?.length ?? 0,
 									},
 								},
 							};
