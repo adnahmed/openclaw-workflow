@@ -50,6 +50,7 @@ type RawPluginConfig = {
 	sealedTaskDigestMaxOutputBytes?: number;
 	sealedTaskDigestTimeoutMs?: number;
 	sealedTaskDigestModel?: string;
+	sealedTaskDigestProvider?: string;
 };
 
 type RuntimeConfig = {
@@ -159,6 +160,11 @@ export function normalizePluginConfig(
 			typeof rawConfig.sealedTaskDigestModel === "string" &&
 			rawConfig.sealedTaskDigestModel.trim()
 				? rawConfig.sealedTaskDigestModel
+				: undefined,
+		sealedTaskDigestProvider:
+			typeof rawConfig.sealedTaskDigestProvider === "string" &&
+			rawConfig.sealedTaskDigestProvider.trim()
+				? rawConfig.sealedTaskDigestProvider
 				: undefined,
 	};
 }

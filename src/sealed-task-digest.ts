@@ -36,6 +36,8 @@ export type BuildSealedTaskDigestArgs = {
 	maxInputChars?: number;
 	maxOutputBytes?: number;
 	timeoutMs?: number;
+	/** When true, LLM errors propagate instead of falling back. */
+	strict?: boolean;
 };
 
 function stringifyForDigest(value: unknown): string {
@@ -301,7 +303,28 @@ export async function buildSealedTaskDigest(
 	}
 
 	if (mode === "llm") {
-		return clampDigest(await buildLlmDigest(args), maxOutputBytes);
+		if (args.strict) {
+			return clampDigest(await buildLlmDigest(args), maxOutputBytes);
+		}
+
+		try {
+			return clampDigest(await buildLlmDigest(args), maxOutputBytes);
+		} catch (err) {
+			const fallback = buildDeterministicFallback(args);
+			return clampDigest(
+				{
+					...fallback,
+					producer: "fallback",
+					warnings: [
+						...(fallback.warnings || []),
+						`LLM digest failed; deterministic fallback used: ${
+							err instanceof Error ? err.message : String(err)
+						}`,
+					],
+				},
+				maxOutputBytes,
+			);
+		}
 	}
 
 	try {

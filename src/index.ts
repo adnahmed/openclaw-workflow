@@ -20,7 +20,10 @@ import {
 	searchObservationText,
 	spoolValue,
 } from "./sealed-spool.js";
-import { buildSealedTaskDigest } from "./sealed-task-digest.js";
+import {
+	buildSealedTaskDigest,
+	type SealedTaskDigest,
+} from "./sealed-task-digest.js";
 import {
 	FilesystemArtifactStore,
 	FilesystemStateStore,
@@ -178,6 +181,68 @@ function resolveRedisMode(stateBackend, redisPrefer) {
 	return stateBackend;
 }
 
+const DIGEST_SESSION_MARKER = ":sealed-task-digest:";
+
+function isDigestSession(ctx: any): boolean {
+	return String(ctx?.sessionKey || "").includes(DIGEST_SESSION_MARKER);
+}
+
+function extractAssistantText(result: unknown): string {
+	if (!result || typeof result !== "object") return String(result ?? "");
+
+	const obj = result as Record<string, any>;
+
+	if (typeof obj.text === "string") return obj.text;
+	if (typeof obj.output === "string") return obj.output;
+	if (typeof obj.message === "string") return obj.message;
+	if (typeof obj.finalText === "string") return obj.finalText;
+
+	if (Array.isArray(obj.messages)) {
+		const lastAssistant = [...obj.messages]
+			.reverse()
+			.find((m) => m?.role === "assistant");
+
+		if (lastAssistant) {
+			if (typeof lastAssistant.content === "string")
+				return lastAssistant.content;
+
+			if (Array.isArray(lastAssistant.content)) {
+				return lastAssistant.content
+					.map((c: any) => c?.text || c?.content || "")
+					.join("\n");
+			}
+		}
+	}
+
+	return JSON.stringify(result);
+}
+
+function parseJsonObjectFromText(text: string): unknown {
+	const trimmed = text.trim();
+
+	try {
+		return JSON.parse(trimmed);
+	} catch {
+		// fall through
+	}
+
+	const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+	if (fenced?.[1]) {
+		return JSON.parse(fenced[1].trim());
+	}
+
+	const start = trimmed.indexOf("{");
+	const end = trimmed.lastIndexOf("}");
+
+	if (start >= 0 && end > start) {
+		return JSON.parse(trimmed.slice(start, end + 1));
+	}
+
+	throw new Error(
+		"Could not parse JSON from sealed task digest subagent output",
+	);
+}
+
 function createSealedTaskDigestModelClient(api: any, config: any) {
 	return {
 		async generateJson(args: {
@@ -186,49 +251,50 @@ function createSealedTaskDigestModelClient(api: any, config: any) {
 			user: string;
 			timeoutMs: number;
 		}) {
-			const model = args.model || config.defaultModel;
+			if (!api?.runtime?.subagent?.run || !api?.runtime?.subagent?.waitForRun) {
+				throw new Error("api.runtime.subagent.run/waitForRun unavailable");
+			}
 
-			const timeout = new Promise<never>((_, reject) => {
-				setTimeout(
-					() => reject(new Error("sealed task digest timed out")),
-					args.timeoutMs,
-				);
-			});
+			const sessionKey = [
+				"agent:main:subagent",
+				"openclaw-workflow",
+				DIGEST_SESSION_MARKER.replaceAll(":", ""),
+				crypto.randomUUID(),
+			].join(":");
 
-			const run = async () => {
-				if (typeof api?.runtime?.model?.generateJson === "function") {
-					return api.runtime.model.generateJson({
-						model,
-						system: args.system,
-						prompt: args.user,
-						temperature: 0,
-					});
-				}
+			const message = [
+				args.system,
+				"",
+				"Return JSON only. No markdown.",
+				"",
+				args.user,
+			].join("\n");
 
-				if (typeof api?.runtime?.agent?.completeJson === "function") {
-					return api.runtime.agent.completeJson({
-						model,
-						system: args.system,
-						prompt: args.user,
-						temperature: 0,
-					});
-				}
-
-				if (typeof api?.runtime?.llm?.generateJson === "function") {
-					return api.runtime.llm.generateJson({
-						model,
-						system: args.system,
-						prompt: args.user,
-						temperature: 0,
-					});
-				}
-
-				throw new Error(
-					"No JSON-capable model API available for sealed task digest.",
-				);
+			const runArgs: Record<string, unknown> = {
+				sessionKey,
+				message,
+				deliver: false,
 			};
 
-			return Promise.race([run(), timeout]);
+			// Only pass provider/model if explicitly configured and allowed.
+			// Otherwise rely on OpenClaw defaults.
+			if (config.sealedTaskDigestProvider) {
+				runArgs.provider = config.sealedTaskDigestProvider;
+			}
+
+			if (args.model) {
+				runArgs.model = args.model;
+			}
+
+			const { runId } = await api.runtime.subagent.run(runArgs);
+
+			const result = await api.runtime.subagent.waitForRun({
+				runId,
+				timeoutMs: args.timeoutMs,
+			});
+
+			const text = extractAssistantText(result);
+			return parseJsonObjectFromText(text);
 		},
 	};
 }
@@ -749,6 +815,11 @@ export default definePluginEntry({
 							});
 							incrementIntercepted(event?.toolName ?? "");
 
+							// Bypass digest-subagent tool results to prevent recursion.
+							if (isDigestSession(ctx)) {
+								return undefined;
+							}
+
 							// Bypass known safe workflow control/read tools.
 							if (PASSTHROUGH_TOOLS.has(event.toolName)) {
 								trace("middleware.passthrough", {
@@ -777,28 +848,44 @@ export default definePluginEntry({
 
 							const outputId = `observation_${event.toolCallId}`;
 							const control = deriveToolResultControl(event, config);
-							const taskDigest =
-								config.sealedTaskDigestEnabled === false
-									? undefined
-									: await buildSealedTaskDigest({
-											value: event.result,
-											taskText: active.taskDigestContext?.taskText || "",
-											outputs: active.taskDigestContext?.outputs || [],
-											toolName: event.toolName,
-											control,
-											modelClient: createSealedTaskDigestModelClient(
-												api,
-												config,
-											),
-											model:
-												config.sealedTaskDigestModel || config.defaultModel,
-											mode: config.sealedTaskDigestMode || "hybrid",
-											maxInputChars:
-												config.sealedTaskDigestMaxInputChars ?? 100_000,
-											maxOutputBytes:
-												config.sealedTaskDigestMaxOutputBytes ?? 12_000,
-											timeoutMs: config.sealedTaskDigestTimeoutMs ?? 20_000,
-										});
+
+							let taskDigest: SealedTaskDigest | undefined;
+							try {
+								taskDigest =
+									config.sealedTaskDigestEnabled === false
+										? undefined
+										: await buildSealedTaskDigest({
+												value: event.result,
+												taskText: active.taskDigestContext?.taskText || "",
+												outputs: active.taskDigestContext?.outputs || [],
+												toolName: event.toolName,
+												control,
+												modelClient: createSealedTaskDigestModelClient(
+													api,
+													config,
+												),
+												model:
+													config.sealedTaskDigestModel || config.defaultModel,
+												mode: config.sealedTaskDigestMode || "hybrid",
+												maxInputChars:
+													config.sealedTaskDigestMaxInputChars ?? 100_000,
+												maxOutputBytes:
+													config.sealedTaskDigestMaxOutputBytes ?? 12_000,
+												timeoutMs: config.sealedTaskDigestTimeoutMs ?? 20_000,
+											});
+							} catch (err) {
+								taskDigest = {
+									version: 1,
+									producer: "fallback",
+									summary:
+										"Task digest failed; sealed payload was still preserved.",
+									evidence: [],
+									next_action:
+										"Use the sealed observation readers or continue from the tool control fields.",
+									empty_output_risk: "medium",
+									warnings: [err instanceof Error ? err.message : String(err)],
+								};
+							}
 
 							const envelope = await spoolValue({
 								artifactStore: active.artifactStore,
@@ -827,6 +914,10 @@ export default definePluginEntry({
 								kind: envelope.kind,
 								truncatedForContext: envelope.truncated_for_context,
 								control: envelope.control,
+								digestProducer: envelope.sealed?.task_digest?.producer,
+								digestEvidenceCount:
+									envelope.sealed?.task_digest?.evidence?.length ?? 0,
+								digestWarnings: envelope.sealed?.task_digest?.warnings,
 							});
 							incrementSealed(event.toolName);
 
