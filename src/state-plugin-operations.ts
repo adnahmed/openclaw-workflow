@@ -1337,6 +1337,30 @@ export const statePublishOperation: WorkflowPluginOperation = {
 				});
 
 				if (sourceArtifacts.length === 0) {
+					if (spec.allow_missing_source === true) {
+						const summaryOutput =
+							(withObject(ctx).summary_output as string | undefined) ??
+							spec.summary_output ??
+							"state_publish_summary";
+
+						await commitPluginOutput(ctx, summaryOutput, {
+							status: "ok",
+							reason: "missing_source_allowed",
+							processed_count: 0,
+							published_count: 0,
+							workflow_result: {
+								ok: true,
+								retryable: false,
+								blocked: false,
+								failed: false,
+							},
+						});
+
+						return okResult({
+							logs: `no source artifacts found for ${fromStep}.${spec.output}; allow_missing_source=true`,
+						});
+					}
+
 					return failResult(
 						`workflow.state_publish: artifact not found for ${fromStep}.${spec.output}`,
 					);

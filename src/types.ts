@@ -140,6 +140,7 @@ export type StateArtifactSourceMode = "auto" | "exact" | "descendants";
 export type StatePublishSpec = {
 	from_step?: string;
 	source?: StateArtifactSourceMode;
+	allow_missing_source?: boolean;
 	output: string;
 	select?: string;
 	collection: string;

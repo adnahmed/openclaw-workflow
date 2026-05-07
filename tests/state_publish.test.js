@@ -281,3 +281,69 @@ test("state_publish fails without redis when the publish requires a queue", asyn
 		assert.match(result.error, /requires Redis/i);
 	});
 });
+
+test("state_publish succeeds with empty summary when allow_missing_source is true", async () => {
+	await withTempDir("state-publish-allow-missing-source", async (dir) => {
+		const artifactStore = new FilesystemArtifactStore(dir, dir, "on_demand");
+		const registry = createDefaultRegistry();
+		const publish = registry.get("workflow.state_publish");
+		assert.ok(publish);
+
+		const workflow = {
+			name: "Publish Workflow",
+			version: "1.0",
+			description: "",
+			config: { redis_prefix: "wf:test" },
+			state: {
+				collections: {
+					alerts: {
+						entity: "alert",
+						item_key: "id",
+					},
+				},
+			},
+		};
+
+		const result = await publish.run({
+			workflow,
+			step: {
+				id: "publish",
+				uses: "workflow.state_publish",
+				with: {
+					state_publish: {
+						from_step: "collect",
+						output: "alerts_manifest",
+						collection: "alerts",
+						allow_missing_source: true,
+						summary_output: "state_publish_summary",
+					},
+				},
+				depends_on: ["collect"],
+				outputs: [{ id: "state_publish_summary" }],
+			},
+			config: workflow.config,
+			runId: "run-publish-allow-missing-source",
+			date: "2026-05-07",
+			stateStore: null,
+			artifactStore,
+			redis: null,
+			validators: {},
+		});
+
+		assert.equal(result.status, "ok");
+		assert.match(result.logs ?? "", /allow_missing_source=true/i);
+
+		const summary = await artifactStore.readArtifact(
+			"run-publish-allow-missing-source",
+			"publish",
+			"state_publish_summary",
+		);
+		assert.ok(summary);
+		assert.equal(summary.data.status, "ok");
+		assert.equal(summary.data.reason, "missing_source_allowed");
+		assert.equal(summary.data.processed_count, 0);
+		assert.equal(summary.data.published_count, 0);
+		assert.equal(summary.data.workflow_result.ok, true);
+		assert.equal(summary.data.workflow_result.failed, false);
+	});
+});
