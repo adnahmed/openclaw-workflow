@@ -44,6 +44,12 @@ type RawPluginConfig = {
 	materializeOutputs?: "never" | "on_demand" | "always";
 	requireSealedToolResultMiddleware?: boolean;
 	sealedMaxPreviewBytes?: number;
+	sealedTaskDigestEnabled?: boolean;
+	sealedTaskDigestMode?: "llm" | "deterministic" | "hybrid" | "off";
+	sealedTaskDigestMaxInputChars?: number;
+	sealedTaskDigestMaxOutputBytes?: number;
+	sealedTaskDigestTimeoutMs?: number;
+	sealedTaskDigestModel?: string;
 };
 
 type RuntimeConfig = {
@@ -132,5 +138,27 @@ export function normalizePluginConfig(
 		sealedMaxPreviewBytes: Number.isFinite(rawConfig.sealedMaxPreviewBytes)
 			? Math.max(64, Math.floor(rawConfig.sealedMaxPreviewBytes!))
 			: 2048,
+		sealedTaskDigestEnabled: rawConfig.sealedTaskDigestEnabled !== false,
+		sealedTaskDigestMode: rawConfig.sealedTaskDigestMode || "hybrid",
+		sealedTaskDigestMaxInputChars: Number.isFinite(
+			rawConfig.sealedTaskDigestMaxInputChars,
+		)
+			? Math.max(1000, Math.floor(rawConfig.sealedTaskDigestMaxInputChars!))
+			: 100_000,
+		sealedTaskDigestMaxOutputBytes: Number.isFinite(
+			rawConfig.sealedTaskDigestMaxOutputBytes,
+		)
+			? Math.max(256, Math.floor(rawConfig.sealedTaskDigestMaxOutputBytes!))
+			: 12_000,
+		sealedTaskDigestTimeoutMs: Number.isFinite(
+			rawConfig.sealedTaskDigestTimeoutMs,
+		)
+			? Math.max(100, Math.floor(rawConfig.sealedTaskDigestTimeoutMs!))
+			: 20_000,
+		sealedTaskDigestModel:
+			typeof rawConfig.sealedTaskDigestModel === "string" &&
+			rawConfig.sealedTaskDigestModel.trim()
+				? rawConfig.sealedTaskDigestModel
+				: undefined,
 	};
 }

@@ -20,6 +20,7 @@ import {
 	searchObservationText,
 	spoolValue,
 } from "./sealed-spool.js";
+import { buildSealedTaskDigest } from "./sealed-task-digest.js";
 import {
 	FilesystemArtifactStore,
 	FilesystemStateStore,
@@ -175,6 +176,61 @@ function resolveRedisMode(stateBackend, redisPrefer) {
 	}
 
 	return stateBackend;
+}
+
+function createSealedTaskDigestModelClient(api: any, config: any) {
+	return {
+		async generateJson(args: {
+			model?: string;
+			system: string;
+			user: string;
+			timeoutMs: number;
+		}) {
+			const model = args.model || config.defaultModel;
+
+			const timeout = new Promise<never>((_, reject) => {
+				setTimeout(
+					() => reject(new Error("sealed task digest timed out")),
+					args.timeoutMs,
+				);
+			});
+
+			const run = async () => {
+				if (typeof api?.runtime?.model?.generateJson === "function") {
+					return api.runtime.model.generateJson({
+						model,
+						system: args.system,
+						prompt: args.user,
+						temperature: 0,
+					});
+				}
+
+				if (typeof api?.runtime?.agent?.completeJson === "function") {
+					return api.runtime.agent.completeJson({
+						model,
+						system: args.system,
+						prompt: args.user,
+						temperature: 0,
+					});
+				}
+
+				if (typeof api?.runtime?.llm?.generateJson === "function") {
+					return api.runtime.llm.generateJson({
+						model,
+						system: args.system,
+						prompt: args.user,
+						temperature: 0,
+					});
+				}
+
+				throw new Error(
+					"No JSON-capable model API available for sealed task digest.",
+				);
+			};
+
+			return Promise.race([run(), timeout]);
+		},
+	};
 }
 
 export function resolveObservationOutputId(args: {
@@ -720,6 +776,29 @@ export default definePluginEntry({
 							}
 
 							const outputId = `observation_${event.toolCallId}`;
+							const control = deriveToolResultControl(event, config);
+							const taskDigest =
+								config.sealedTaskDigestEnabled === false
+									? undefined
+									: await buildSealedTaskDigest({
+											value: event.result,
+											taskText: active.taskDigestContext?.taskText || "",
+											outputs: active.taskDigestContext?.outputs || [],
+											toolName: event.toolName,
+											control,
+											modelClient: createSealedTaskDigestModelClient(
+												api,
+												config,
+											),
+											model:
+												config.sealedTaskDigestModel || config.defaultModel,
+											mode: config.sealedTaskDigestMode || "hybrid",
+											maxInputChars:
+												config.sealedTaskDigestMaxInputChars ?? 100_000,
+											maxOutputBytes:
+												config.sealedTaskDigestMaxOutputBytes ?? 12_000,
+											timeoutMs: config.sealedTaskDigestTimeoutMs ?? 20_000,
+										});
 
 							const envelope = await spoolValue({
 								artifactStore: active.artifactStore,
@@ -729,11 +808,12 @@ export default definePluginEntry({
 								value: event.result,
 								toolCallId: event.toolCallId,
 								toolName: event.toolName,
-								control: deriveToolResultControl(event, config),
+								control,
 								maxPreviewBytes:
 									active.maxPreviewBytes ??
 									config.sealedMaxPreviewBytes ??
 									2048,
+								taskDigest,
 							});
 
 							trace("middleware.sealed", {

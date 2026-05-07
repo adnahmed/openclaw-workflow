@@ -42,16 +42,7 @@ function buildSealedWorkerPreamble(args: {
 
 	return `
 IMPORTANT — sealed worker boundary:
-- Tool calls in this step return sealed observation envelopes, not raw payloads.
-- Use envelope.control to decide whether an action worked:
-	- control.ok / control.error
-	- control.url / control.title / control.page_loaded
-	- control.visible_item_count
-	- control.scroll.near_bottom
-	- control.batch_items / control.total_items / control.exhausted
-- Do not ask tools to return full DOM, full page text, full logs, or full network payloads.
-- When more detail is needed, use workflow_observation_read, workflow_observation_search, or workflow_observation_json_path with bounded max_bytes.
-- The final source of truth is declared outputs written with write_output.
+Tool results may include \`sealed.task_digest\`. Treat it as private evidence for the next action. Never copy \`sealed\`, \`task_digest\`, \`preview\`, \`observation_ref\`, \`observation_id\`, \`available_reads\`, or diagnostic metadata into workflow outputs. Commit only the declared output schema.
 
 Execution metadata:
 - run_id: "${args.runId}"

@@ -755,6 +755,10 @@ export type ActiveSealedRun = {
 	runId: string;
 	stepId: string;
 	maxPreviewBytes: number;
+	taskDigestContext?: {
+		taskText: string;
+		outputs: OutputSpec[];
+	};
 };
 
 /**
@@ -1326,6 +1330,10 @@ export async function runStep(step, runId, api, options) {
 				runId,
 				stepId: step.id,
 				maxPreviewBytes,
+				taskDigestContext: {
+					taskText: step.task || "",
+					outputs: Array.isArray(step.outputs) ? step.outputs : [],
+				},
 			};
 			const addActiveKey = (key: string) => {
 				activeSealedRuns.set(key, activeRun);

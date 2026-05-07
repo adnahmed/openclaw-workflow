@@ -1,3 +1,4 @@
+import type { SealedTaskDigest } from "./sealed-task-digest.js";
 import type {
 	OutputSpec,
 	ValidationDecision,
@@ -48,6 +49,7 @@ export type SealedResultEnvelope = {
 	status: "ok" | "failed" | "blocked";
 	result_ref?: string;
 	observation_ref?: string;
+	observation_id?: string;
 	tool_call_id?: string;
 	tool_name?: string;
 	bytes?: number;
@@ -62,6 +64,11 @@ export type SealedResultEnvelope = {
 		json_path?: boolean;
 		page?: boolean;
 		search?: boolean;
+	};
+	sealed?: {
+		observation_id: string;
+		observation_ref: string;
+		task_digest?: SealedTaskDigest;
 	};
 };
 
@@ -478,6 +485,7 @@ export async function spoolValue(args: {
 	toolName?: string;
 	control?: Partial<ObservationControl>;
 	elapsedMs?: number;
+	taskDigest?: SealedTaskDigest;
 }): Promise<SealedResultEnvelope> {
 	const raw = asText(args.value);
 	const bytes = Buffer.byteLength(raw, "utf8");
@@ -507,6 +515,7 @@ export async function spoolValue(args: {
 		status,
 		result_ref: ref,
 		observation_ref: ref,
+		observation_id: args.outputId,
 		tool_call_id: args.toolCallId,
 		tool_name: args.toolName,
 		bytes,
@@ -521,6 +530,11 @@ export async function spoolValue(args: {
 			json_path: kind === "json_object" || kind === "json_array",
 			page: true,
 			search: true,
+		},
+		sealed: {
+			observation_id: args.outputId,
+			observation_ref: ref,
+			task_digest: args.taskDigest,
 		},
 	};
 }
