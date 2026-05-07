@@ -177,6 +177,41 @@ function resolveRedisMode(stateBackend, redisPrefer) {
 	return stateBackend;
 }
 
+export function resolveObservationOutputId(args: {
+	runId: string;
+	stepId: string;
+	observationId: string;
+}): string {
+	const { runId, stepId, observationId } = args;
+	const prefix = `${runId}:${stepId}:`;
+
+	if (observationId.startsWith(prefix)) {
+		return observationId.slice(prefix.length);
+	}
+
+	if (observationId.startsWith("observation_")) {
+		return observationId;
+	}
+
+	const parts = observationId.split(":");
+	const last = parts.at(-1);
+
+	if (last?.startsWith("observation_")) {
+		const givenRun = parts[0];
+		const givenStep = parts[1];
+
+		if (givenRun === runId && givenStep === stepId) {
+			return last;
+		}
+
+		throw new Error(
+			`observation_ref scope mismatch: expected ${runId}:${stepId}, got ${givenRun}:${givenStep}`,
+		);
+	}
+
+	return observationId;
+}
+
 export default definePluginEntry({
 	id: "openclaw-workflow",
 	name: "Workflow Orchestrator",
@@ -1190,18 +1225,37 @@ export default definePluginEntry({
 						try {
 							const runtime = await resolveWorkflowRuntime(run_id);
 							await runtime.stateStore.loadRun(run_id);
+							const outputId = resolveObservationOutputId({
+								runId: run_id,
+								stepId: step_id,
+								observationId: observation_id,
+							});
 
 							const result = await readResultSlice({
 								artifactStore: runtime.artifactStore,
 								runId: run_id,
 								stepId: step_id,
-								outputId: observation_id,
+								outputId,
 								mode,
 								page,
 								maxBytes: Math.min(max_bytes, 32768),
 							});
 
-							return textResult({ ok: true, ...((result as object) || {}) });
+							if (!result) {
+								return textResult({
+									ok: false,
+									error: "observation_not_found",
+									observation_id,
+									resolved_output_id: outputId,
+									run_id,
+									step_id,
+								});
+							}
+
+							return textResult({
+								...(result as Record<string, unknown>),
+								ok: true,
+							});
 						} catch (err) {
 							dumpError("workflow_observation_read failed", err);
 							return errorResult(err);
@@ -1230,18 +1284,37 @@ export default definePluginEntry({
 						try {
 							const runtime = await resolveWorkflowRuntime(run_id);
 							await runtime.stateStore.loadRun(run_id);
+							const outputId = resolveObservationOutputId({
+								runId: run_id,
+								stepId: step_id,
+								observationId: observation_id,
+							});
 
 							const result = await searchObservationText({
 								artifactStore: runtime.artifactStore,
 								runId: run_id,
 								stepId: step_id,
-								outputId: observation_id,
+								outputId,
 								query,
 								maxMatches: max_matches,
 								contextBytes: context_bytes,
 							});
 
-							return textResult({ ok: true, ...((result as object) || {}) });
+							if (!result) {
+								return textResult({
+									ok: false,
+									error: "observation_not_found",
+									observation_id,
+									resolved_output_id: outputId,
+									run_id,
+									step_id,
+								});
+							}
+
+							return textResult({
+								...(result as Record<string, unknown>),
+								ok: true,
+							});
 						} catch (err) {
 							dumpError("workflow_observation_search failed", err);
 							return errorResult(err);
@@ -1270,18 +1343,37 @@ export default definePluginEntry({
 						try {
 							const runtime = await resolveWorkflowRuntime(run_id);
 							await runtime.stateStore.loadRun(run_id);
+							const outputId = resolveObservationOutputId({
+								runId: run_id,
+								stepId: step_id,
+								observationId: observation_id,
+							});
 
 							const result = await readObservationJsonPath({
 								artifactStore: runtime.artifactStore,
 								runId: run_id,
 								stepId: step_id,
-								outputId: observation_id,
+								outputId,
 								path,
 								maxItems: max_items,
 								maxBytes: max_bytes,
 							});
 
-							return textResult({ ok: true, ...((result as object) || {}) });
+							if (!result) {
+								return textResult({
+									ok: false,
+									error: "observation_not_found",
+									observation_id,
+									resolved_output_id: outputId,
+									run_id,
+									step_id,
+								});
+							}
+
+							return textResult({
+								...(result as Record<string, unknown>),
+								ok: true,
+							});
 						} catch (err) {
 							dumpError("workflow_observation_json_path failed", err);
 							return errorResult(err);
