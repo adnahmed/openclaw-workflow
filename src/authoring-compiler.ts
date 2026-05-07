@@ -859,6 +859,31 @@ function validateOutputRef(
 	}
 }
 
+function statePluginProducedOutputFields(operation: string): string[] {
+	switch (operation) {
+		case "workflow.state_publish":
+		case "workflow.state_complete":
+		case "workflow.state_patch_outputs":
+			return ["summary_output"];
+
+		case "workflow.state_query":
+			return ["output", "summary_output"];
+
+		case "workflow.state_claim":
+		case "workflow.state_reclaim_expired":
+			return ["output"];
+
+		case "workflow.state_report":
+			return ["json_output", "markdown_output"];
+
+		case "workflow.state_partition":
+			return ["summary_output"];
+
+		default:
+			return ["output", "summary_output", "json_output", "markdown_output"];
+	}
+}
+
 function validateStatePluginOutputs(
 	operation: string,
 	spec: Record<string, unknown>,
@@ -867,12 +892,7 @@ function validateStatePluginOutputs(
 ): void {
 	const ids = outputIds(outputs);
 
-	for (const field of [
-		"output",
-		"summary_output",
-		"json_output",
-		"markdown_output",
-	]) {
+	for (const field of statePluginProducedOutputFields(operation)) {
 		validateOutputRef(ids, spec[field], `${pointer}/${field}`);
 	}
 
