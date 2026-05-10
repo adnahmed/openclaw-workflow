@@ -1,0 +1,1141 @@
+# examples/feature-tour-workflow.yml
+#
+# Purpose
+# -------
+# This is a heavily annotated authoring-schema workflow intended for the
+# examples/ directory. It uses a tiny "work item review" domain so readers can
+# focus on how openclaw-workflow YAML is written.
+#
+# What this demonstrates
+# ----------------------
+# - Top-level authoring metadata: schema/name/version/description/concurrency.
+# - Workflow-wide defaults for sealed execution, artifact materialization,
+#   retries, context firewalls, result visibility, spooling, and watchdogs.
+# - Config and resource declarations with {config.*}, {date}, {run_id}, and
+#   {workflow_name} substitution.
+# - JSON/text validators with pass/fail/block/retry policies.
+# - Profiles for model and browser workers; command work is shown with kind: sealed.
+# - Explicit semantic state: collections, queues, worker groups, indexes,
+#   counters, Redis/native-state configuration, and filesystem fallback.
+# - Built-in plugin operations: state_init, cache_json_document, state_publish,
+#   state_claim, state_reclaim_expired, state_complete, state_query,
+#   state_patch_outputs, state_partition, and state_report.
+# - Normal model/browser workers, sealed command steps, per-step overrides, for_each
+#   loops, drain controllers, engine-injected claim context, route queues,
+#   output contracts, cache reuse, optional/always_run steps, retry filters,
+#   complete_when, skip_if_empty, and materialized artifacts.
+#
+# Notes for maintainers
+# ---------------------
+# - Queue claiming and drain workers require Redis-capable state; filesystem
+#   fallback can preserve artifacts, but it does not implement queue claims.
+# - This file follows the public authoring surface documented by the current
+#   openclaw-workflow README where practical. The production LinkedIn workflow
+#   may use stricter/private sealed-policy fields; keep those in production, but
+#   do not teach them here unless the public schema supports them.
+# - The example favors clarity over minimum YAML size. Many settings are the
+#   defaults in normal workflows, but they are shown here so users can discover
+#   and copy them safely.
+
+schema: authoring
+name: Workflow Feature Tour
+version: "1.1-feature-tour"
+description: >
+  A compact but comprehensive example workflow that demonstrates the authoring
+  surface: sealed workers, profiles, validators, semantic state, state plugin
+  operations, for_each loops, drain workers, bounded claim injection, retries,
+  cache reuse, state partitioning, patching, and final reporting.
+
+concurrency: 8
+
+required_skills:
+  - write_output
+  - read_output
+
+required_mcp_servers:
+  - filesystem
+
+defaults:
+  mode: sealed
+  context: adaptive
+  output_mode: artifacts
+  retry: safe
+  materialize: on_demand
+
+  layout:
+    data: "output/{workflow_slug}/{output_id}-{date}.json"
+    report: "reports/{workflow_slug}/{output_id}-{date}.md"
+    spool: ".openclaw-workflow/sealed"
+
+  sealed:
+    result_visibility:
+      mode: artifact_ref
+      inline_when_safe: false
+      preserve_full_results: true
+      spool_when_large: true
+      return_refs: true
+      lazy_read: true
+      expose_preview: false
+    context_firewall:
+      enabled: true
+      strategy: adaptive
+      on_context_pressure: spool_and_compact
+    tool_result_policy:
+      mode: spool_and_summarize
+      max_context_injection_bytes: 2048
+      max_single_result_bytes_before_spool: 4096
+      include_head_bytes: 0
+      include_tail_bytes: 0
+      preserve_full_result: true
+    stdout_policy:
+      max_stdout_bytes: 4096
+      max_stderr_bytes: 4096
+      max_process_output_bytes: 104857600
+      mode: spool_and_summarize
+    watchdog:
+      mode: progress_based
+      require_declared_outputs: true
+      detect_repeated_tool_calls: true
+      detect_repeated_navigation: true
+      repeated_tool_call_threshold: 3
+      on_no_progress: fail
+    artifact_spool:
+      enabled: true
+      path: .openclaw-workflow/sealed
+
+vars:
+  example_domain: work_item_review
+  example_owner: openclaw-workflow
+
+config:
+  force_refresh: false
+  timezone: UTC
+  redis_prefix: "feature_tour"
+  output_dir: "output/feature-tour"
+  report_dir: "reports/feature-tour"
+  input_manifest_path: "examples/fixtures/feature-tour-items.json"
+  review_policy_path: "examples/fixtures/review-policy.json"
+  operator_profile_path: "examples/fixtures/operator-profile.json"
+  max_items_per_claim: 3
+  max_browser_review_parallelism: 2
+  max_model_parallelism: 4
+  max_loop_parallelism: 4
+
+resources:
+  review_policy:
+    type: json
+    source: "{config.review_policy_path}"
+    cache: true
+    validate: review_policy_json
+
+state:
+  backend: auto
+  fallback: filesystem
+  materialize_outputs: on_demand
+  redis:
+    provider: auto
+    tool_prefix: MCP_DOCKER
+
+  collections:
+    work_items:
+      entity: work_item
+      item_key: item_id
+      lifecycle: discovered
+      default_queue: items_pending
+      views:
+        document: true
+        metadata_hash: true
+        seen_index: true
+        pending_queue: true
+        event_stream: true
+      counters:
+        published: work_items_published
+        completed: work_items_completed
+        failed: work_items_failed
+        rejected: work_items_rejected
+      indexes:
+        - status
+        - route
+        - priority
+        - owner
+        - needs_browser
+        - review_decision
+        - retryable
+
+  queues:
+    items_pending:
+      collection: work_items
+      lifecycle: pending
+      batch_size: 3
+      visibility_timeout_s: 900
+      suffix: work-items:pending
+
+    items_needs_browser:
+      collection: work_items
+      lifecycle: needs_browser
+      batch_size: 1
+      visibility_timeout_s: 900
+      suffix: work-items:needs-browser
+
+  worker_groups:
+    classifier:
+      queue: items_pending
+      batch_size: 3
+      lease_seconds: 900
+
+    browser_reviewer:
+      queue: items_needs_browser
+      batch_size: 1
+      lease_seconds: 900
+
+validators:
+  text_artifact:
+    type: text
+    min_bytes: 2
+    pass_when: "true"
+    unknown_policy: fail
+
+  review_policy_json:
+    type: json
+    min_bytes: 2
+    schema:
+      type: object
+      required: [policy_id]
+      properties:
+        policy_id: { type: string }
+        allow_browser_review: { type: boolean }
+        priority_threshold: { type: number }
+    pass_when: "true"
+    unknown_policy: fail
+
+  operator_profile_json:
+    type: json
+    min_bytes: 2
+    schema:
+      type: object
+      required: [operator_id]
+      properties:
+        operator_id: { type: string }
+        display_name: { type: string }
+        timezone: { type: string }
+    pass_when: "true"
+    unknown_policy: fail
+
+  run_config_json:
+    type: json
+    min_bytes: 2
+    schema:
+      type: object
+      required: [run_id]
+      properties:
+        run_id: { type: string }
+        run_key: { type: string }
+        initialized_at: { type: string }
+        stream_key:
+          type: [string, "null"]
+        stream_group:
+          type: [string, "null"]
+        metadata: { type: object }
+    pass_when: "true"
+    unknown_policy: fail
+
+  work_item_manifest_array:
+    type: json
+    min_bytes: 2
+    schema:
+      type: array
+      items:
+        type: object
+        required: [item_id, title, priority, source_url, status]
+        properties:
+          item_id:
+            type: string
+            pattern: "^item_[A-Za-z0-9_-]+$"
+          title: { type: string }
+          priority: { type: number }
+          owner: { type: string }
+          source_url: { type: string }
+          status: { type: string }
+          route: { type: string }
+          needs_browser: { type: boolean }
+    pass_when: "true"
+    unknown_policy: fail
+
+  workflow_result_json:
+    type: json
+    min_bytes: 2
+    schema:
+      type: object
+      required: [status, workflow_result]
+      properties:
+        status: { type: string }
+        generated_at: { type: string }
+        claimed_count: { type: number }
+        processed_count: { type: number }
+        failed_count: { type: number }
+        valid_count: { type: number }
+        count: { type: number }
+        counts: { type: object }
+        items: { type: array }
+        rejected_items: { type: array }
+        workflow_result:
+          type: object
+          required: [ok, retryable, blocked, failed]
+          properties:
+            ok: { type: boolean }
+            retryable: { type: boolean }
+            blocked: { type: boolean }
+            failed: { type: boolean }
+    pass_when: doc.workflow_result.ok == true
+    retry_when: doc.workflow_result.retryable == true
+    block_when: doc.workflow_result.blocked == true
+    fail_when: doc.workflow_result.failed == true
+    unknown_policy: fail
+
+  partition_summary_json:
+    type: json
+    min_bytes: 2
+    schema:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string }
+        counts: { type: object }
+        partitions: { type: object }
+    pass_when: doc.status == 'ok'
+    unknown_policy: fail
+
+  report_json:
+    type: json
+    min_bytes: 2
+    schema:
+      type: object
+      required: [status, generated_at]
+      properties:
+        status: { type: string }
+        generated_at: { type: string }
+        collections: { type: array }
+        counters: { type: object }
+        samples: { type: object }
+    pass_when: "true"
+    unknown_policy: fail
+
+profiles:
+  model_worker:
+    uses: model
+    tools:
+      - workflow_observation_read
+      - workflow_observation_search
+      - workflow_observation_json_path
+      - write_output
+      - read_output
+    context: adaptive
+    retry: safe
+    output: artifacts
+
+  browser_worker:
+    uses: browser
+    tools:
+      - browser-harness
+      - workflow_observation_read
+      - workflow_observation_search
+      - workflow_observation_json_path
+      - write_output
+      - read_output
+    context: adaptive
+    retry: safe
+    output: artifacts
+
+pipeline:
+  # Plugin step: initializes the run-wide semantic state.
+  # It seeds the run hash, counters, and stream group used by later queue steps.
+  - initialize_run_state:
+      name: Initialize semantic run state
+      uses: plugin
+      operation: workflow.state_init
+      output_contract_version: 1
+      depends_on: []
+      concurrency: 1
+      retry: 3
+      retry_delay: 10
+      timeout: 120
+      with:
+        run_key: "{config.redis_prefix}:run:{date}"
+        stream_key: "{config.redis_prefix}:stream:{date}"
+        stream_group: feature_tour_workers_{date}
+        ttl_seconds: 604800
+        output_id: run_config
+        counter_keys:
+          "{config.redis_prefix}:counter:work_items_published:{date}": 0
+          "{config.redis_prefix}:counter:work_items_completed:{date}": 0
+          "{config.redis_prefix}:counter:work_items_failed:{date}": 0
+          "{config.redis_prefix}:counter:work_items_rejected:{date}": 0
+        metadata:
+          workflow: "{workflow_name}"
+          run_id: "{run_id}"
+          timezone: "{config.timezone}"
+          example_domain: "{vars.example_domain}"
+      outputs:
+        - id: run_config
+          validate: run_config_json
+          materialize:
+            path: "{config.output_dir}/run-config-{date}.json"
+            mode: always
+      complete_when: outputs
+      reuse_outputs:
+        enabled: true
+        when: config.force_refresh == false
+        require: declared_outputs
+        require_signature: true
+        legacy_unsigned_cache: stale
+        freshness:
+          include:
+            - output_contract_version
+            - validators
+            - selected_config
+            - input_signature
+        accept_decisions: [pass]
+        on_hit:
+          reason: cache_hit
+        on_invalid: run_step
+
+  # Plugin step: reads a JSON file from disk and caches it into semantic state.
+  # This makes the operator profile available both as an artifact and as Redis data.
+  - cache_operator_profile:
+      name: Cache operator profile
+      uses: plugin
+      operation: workflow.cache_json_document
+      output_contract_version: 1
+      depends_on: [initialize_run_state]
+      retry: 2
+      retry_delay: 20
+      timeout: 120
+      with:
+        source_path: "{config.operator_profile_path}"
+        json_key: "{config.redis_prefix}:operator_profile_doc:{date}"
+        hash_key: "{config.redis_prefix}:operator_profile:{date}"
+        allowed_hash_fields:
+          - operator_id
+          - display_name
+          - timezone
+        output_id: operator_profile_cache
+      outputs:
+        - id: operator_profile_cache
+          validate: operator_profile_json
+      complete_when: outputs
+
+  # Model step: synthesizes a deterministic demo manifest from the cached policy
+  # and operator profile. The result stays in a validated artifact before publishing.
+  - discover_demo_items:
+      name: Discover or synthesize demo work items
+      uses: model
+      profile: model_worker
+      model: "anthropic/claude-sonnet-4-6"
+      depends_on: [cache_operator_profile]
+      reads:
+        - review_policy
+        - operator_profile_cache
+      concurrency: 1
+      retry: 2
+      retry_delay: 30
+      retry_on: [missing_file, parse, timeout]
+      retry_except: [blocked]
+      timeout: 300
+      output_contract_version: 2
+      task: >
+        Create a tiny deterministic demo manifest of 5 work items. Use the
+        cached operator profile and review policy as context. Produce only the
+        declared output items_manifest as a JSON array. Each item must include
+        item_id, title, priority, owner, source_url, status "discovered", and
+        a short reason. Use fake example.com URLs; do not browse the web.
+      sealed:
+        result_visibility:
+          expose_preview: true
+        tool_result_policy:
+          include_head_bytes: 512
+          include_tail_bytes: 512
+      outputs:
+        - id: items_manifest
+          validate: work_item_manifest_array
+          materialize:
+            path: "{config.output_dir}/items-manifest-{date}.json"
+            mode: always
+      complete_when: outputs
+      reuse_outputs:
+        enabled: true
+        when: config.force_refresh == false
+        require: declared_outputs
+        require_signature: true
+        freshness:
+          include: [output_contract_version, validators, selected_config]
+        accept_decisions: [pass]
+        on_hit: { reason: cache_hit }
+        on_invalid: run_step
+
+        # Sealed command step: normalizes the raw model output with deterministic Node.js.
+        # This is neither a plugin step nor a model step; it is a command-style sealed step.
+  - normalize_items_manifest:
+      name: Normalize discovered item manifest
+      kind: sealed
+      depends_on: [discover_demo_items]
+      timeout: 120
+      retry: 1
+      sealed:
+        mode: command
+        command:
+          argv:
+            - node
+            - -e
+            - |
+              const fs = require('fs');
+              const path = require('path');
+
+              const input = '{config.output_dir}/items-manifest-{date}.json';
+              const output = '{config.output_dir}/items-normalized-{date}.json';
+              const raw = fs.readFileSync(input, 'utf8');
+              const items = JSON.parse(raw);
+
+              if (!Array.isArray(items)) {
+                throw new Error('items_manifest must be a JSON array');
+              }
+
+              const normalized = items.map((item, index) => {
+                const priority = Number(item.priority ?? 0);
+                const route = item.route || (priority >= 8 ? 'needs_browser_review' : 'auto_approved');
+                return {
+                  ...item,
+                  item_id: item.item_id || `item_${index + 1}`,
+                  title: item.title || `Demo item ${index + 1}`,
+                  priority,
+                  owner: item.owner || 'demo-operator',
+                  source_url: item.source_url || `https://example.com/work-items/${index + 1}`,
+                  status: item.status || 'discovered',
+                  route,
+                  needs_browser: Boolean(item.needs_browser ?? route === 'needs_browser_review'),
+                };
+              });
+
+              fs.mkdirSync(path.dirname(output), { recursive: true });
+              fs.writeFileSync(output, JSON.stringify(normalized, null, 2));
+
+              console.log(JSON.stringify({
+                status: 'ok',
+                output,
+                count: normalized.length
+              }));
+        stdout_policy:
+          max_stdout_bytes: 2048
+          max_stderr_bytes: 4096
+          max_process_output_bytes: 104857600
+          mode: spool_and_summarize
+        return_contract:
+          type: json
+          max_context_bytes: 2048
+          schema:
+            type: object
+            required: [status, output, count]
+            properties:
+              status: { type: string }
+              output: { type: string }
+              count: { type: number }
+      outputs:
+        - id: normalized_items
+          path: "{config.output_dir}/items-normalized-{date}.json"
+          validate: work_item_manifest_array
+          materialize:
+            path: "{config.output_dir}/items-normalized-{date}.json"
+            mode: always
+      complete_when: outputs
+
+  # Plugin step: publishes the normalized items into the semantic collection and
+  # queue so the classifier drain can claim them later.
+  - publish_items_state:
+      name: Publish normalized items into semantic state
+      uses: plugin
+      operation: workflow.state_publish
+      output_contract_version: 1
+      depends_on: [normalize_items_manifest]
+      retry: 3
+      retry_delay: 15
+      timeout: 180
+      state_publish:
+        from_step: normalize_items_manifest
+        source: exact
+        output: normalized_items
+        collection: work_items
+        queue: items_pending
+        lifecycle: pending
+        item_key: item_id
+        summary_output: publish_items_summary
+      outputs:
+        - id: publish_items_summary
+          validate: workflow_result_json
+      complete_when: outputs
+
+  # Plugin step: queries a bounded snapshot of the collection for visibility.
+  # This is read-only and does not mutate semantic state.
+  - query_pending_items_snapshot:
+      name: Query pending items snapshot
+      uses: plugin
+      operation: workflow.state_query
+      depends_on: [publish_items_state]
+      retry: 2
+      retry_delay: 15
+      timeout: 120
+      state_query:
+        collection: work_items
+        where:
+          all:
+            status: discovered
+        projection:
+          - item_id
+          - title
+          - source_url
+          - priority
+          - status
+          - route
+          - needs_browser
+        limit: 100
+        output: pending_items_snapshot
+        summary_output: pending_items_query_summary
+      outputs:
+        - id: pending_items_snapshot
+          validate: work_item_manifest_array
+        - id: pending_items_query_summary
+          validate: workflow_result_json
+      complete_when: outputs
+
+  # Plugin step: repairs any expired classifier leases before the drain begins.
+  # This prevents stale in-flight items from getting stuck in the processing set.
+  - reclaim_stale_classifier_leases:
+      name: Reclaim stale classifier leases before processing
+      uses: plugin
+      operation: workflow.state_reclaim_expired
+      depends_on: [publish_items_state]
+      optional: true
+      retry: 2
+      retry_delay: 10
+      timeout: 120
+      state_reclaim:
+        worker_group: classifier
+        output: classifier_reclaim_summary
+      outputs:
+        - id: classifier_reclaim_summary
+          validate: workflow_result_json
+      complete_when: outputs
+
+  # Drain controller: repeatedly claims queue items, runs the nested worker,
+  # and completes the items back into semantic state until the queue is empty.
+  - classify_items:
+      name: Classify all queued work items
+      uses: drain
+      depends_on:
+        - publish_items_state
+        - reclaim_stale_classifier_leases
+      worker_group: classifier
+      drain_mode: streaming
+      idle_wait_seconds: 5
+      max_idle_seconds: 120
+      max_empty_claims: 2
+      max_active_iterations: "{config.max_model_parallelism}"
+      max_iterations: null
+      retry: 0
+      retry_delay: 0
+      timeout: 120
+      stop_when:
+        queues_empty:
+          - items_pending
+
+      # Nested plugin step: claims up to 3 items from the queue and injects the
+      # lease-backed claim manifest into the worker as `claim`.
+      claim:
+        uses: plugin
+        operation: workflow.state_claim
+        state_consume:
+          worker_group: classifier
+          batch_size: 3
+          output: classifier_claim_manifest
+        outputs:
+          - id: classifier_claim_manifest
+            validate: workflow_result_json
+        timeout: 120
+        retry: 3
+        retry_delay: 10
+        complete_when: outputs
+
+      # Nested sealed model step: classifies each claimed item and returns a
+      # structured result artifact for completion.
+      worker:
+        id: classify_claimed_items
+        name: Classify claimed work items
+        uses: model
+        profile: model_worker
+        depends_on: [claim]
+        concurrency: 1
+        retry: 2
+        retry_delay: 30
+        retry_on: [missing_file, parse, timeout]
+        timeout: 600
+        output_contract_version: 1
+        input:
+          claim:
+            from: classifier_claim_manifest
+            inject_as: claim
+            max_items: 3
+            max_bytes: 32768
+            include_fields:
+              - item_id
+              - item_key
+              - lease
+              - title
+              - priority
+              - owner
+              - source_url
+              - status
+            require_lease: true
+            expose_artifact_path: false
+        task: >
+          Process the engine-injected claim. If claim.items is empty, write a
+          valid empty classification_results object. Otherwise classify every
+          item. Preserve item_id, item_key, and lease. Set route to one of
+          auto_approved, needs_browser_review, blocked, or failed. Use status
+          classified for auto_approved and needs_browser_review. Set
+          needs_browser true only for needs_browser_review. Include reason,
+          retryable, priority, owner, review_decision, and workflow_result.
+        outputs:
+          - id: classification_results
+            validate: workflow_result_json
+        complete_when: handoff_or_outputs
+        signaling: auto
+
+      # Nested plugin step: applies the model output back into the collection,
+      # updates indexes, and routes browser-bound items into the browser queue.
+      complete:
+        uses: plugin
+        operation: workflow.state_complete
+        depends_on: [classify_claimed_items]
+        state_complete:
+          from_step: classify_claimed_items
+          output: classification_results
+          worker_group: classifier
+          collection: work_items
+          summary_output: classifier_complete_summary
+          select: $.items
+          item_key: item_id
+          status_field: status
+          merge_document: true
+          merge_fields:
+            - route
+            - status
+            - reason
+            - retryable
+            - priority
+            - owner
+            - needs_browser
+            - review_decision
+          indexes:
+            - route
+            - status
+            - retryable
+            - priority
+            - owner
+            - needs_browser
+            - review_decision
+          require_rows: false
+          fail_on_skipped: true
+          fail_on_stale: true
+          route_queues:
+            - when:
+                all:
+                  route: needs_browser_review
+                  status: classified
+                  needs_browser: true
+              queue: items_needs_browser
+              lifecycle: needs_browser
+        outputs:
+          - id: classifier_complete_summary
+            validate: workflow_result_json
+        timeout: 120
+        retry: 3
+        retry_delay: 10
+        complete_when: outputs
+
+        # Second drain controller: claims items that require browser evidence,
+        # runs a browser worker, and writes the reviewed outcome back to state.
+  - browser_review_items:
+      name: Review items that require browser evidence
+      uses: drain
+      depends_on: [classify_items]
+      worker_group: browser_reviewer
+      drain_mode: streaming
+      idle_wait_seconds: 5
+      max_idle_seconds: 120
+      max_empty_claims: 2
+      max_active_iterations: "{config.max_browser_review_parallelism}"
+      max_iterations: null
+      optional: true
+      retry: 0
+      retry_delay: 0
+      timeout: 120
+      stop_when:
+        producers_done:
+          - classify_items
+        queues_empty:
+          - items_needs_browser
+
+      # Nested plugin step: claims one browser-review item at a time.
+      claim:
+        uses: plugin
+        operation: workflow.state_claim
+        state_consume:
+          worker_group: browser_reviewer
+          output: browser_claim_manifest
+        outputs:
+          - id: browser_claim_manifest
+            validate: workflow_result_json
+        timeout: 120
+        retry: 3
+        retry_delay: 10
+        complete_when: outputs
+
+      # Nested browser step: opens the source URL, gathers evidence, and returns
+      # a sealed review artifact without dumping raw page content into the transcript.
+      worker:
+        id: browser_review_one_item
+        name: Browser-review one claimed item
+        uses: browser
+        profile: browser_worker
+        depends_on: [claim]
+        concurrency: 1
+        retry: 1
+        retry_delay: 60
+        retry_on: [missing_file, parse, timeout]
+        retry_except: [blocked]
+        timeout: 600
+        output_contract_version: 1
+        input:
+          claim:
+            from: browser_claim_manifest
+            inject_as: claim
+            max_items: 1
+            max_bytes: 32768
+            include_fields:
+              - item_id
+              - item_key
+              - lease
+              - title
+              - source_url
+              - route
+              - status
+              - reason
+            require_lease: true
+            expose_artifact_path: false
+        task: >
+          Process claim.items[0] only. Use the source_url as browser evidence.
+          Treat sealed observation envelopes as the control plane; inspect only
+          compact control fields and bounded observation reads. Do not print raw
+          DOM, full page text, screenshots, cookies, network payloads, or long
+          extracted content into the transcript. Return browser_review_result
+          with items containing item_id, item_key, lease, status "reviewed",
+          review_decision, reason, retryable, evidence_url, and workflow_result.
+        sealed:
+          tools:
+            allow:
+              - browser-harness
+              - workflow_observation_read
+              - workflow_observation_search
+              - workflow_observation_json_path
+              - write_output
+              - read_output
+            deny:
+              - shell
+          result_visibility:
+            mode: artifact_ref
+            expose_preview: false
+        outputs:
+          - id: browser_review_result
+            validate: workflow_result_json
+        complete_when: outputs
+
+      # Nested plugin step: merges browser evidence and review decisions back into
+      # the semantic document store.
+      complete:
+        uses: plugin
+        operation: workflow.state_complete
+        depends_on: [browser_review_one_item]
+        state_complete:
+          from_step: browser_review_one_item
+          output: browser_review_result
+          worker_group: browser_reviewer
+          collection: work_items
+          summary_output: browser_review_complete_summary
+          select: $.items
+          item_key: item_id
+          status_field: status
+          merge_document: true
+          merge_fields:
+            - status
+            - reason
+            - retryable
+            - evidence_url
+            - review_decision
+          indexes:
+            - status
+            - retryable
+            - review_decision
+          require_rows: false
+          fail_on_skipped: true
+          fail_on_stale: true
+        outputs:
+          - id: browser_review_complete_summary
+            validate: workflow_result_json
+        timeout: 120
+        retry: 3
+        retry_delay: 10
+        complete_when: outputs
+
+  # Plugin step: partitions the reviewed collection into outcome-specific output
+  # artifacts and, when configured, routes subsets to downstream queues.
+  - partition_reviewed_items:
+      name: Partition reviewed items by outcome
+      uses: plugin
+      operation: workflow.state_partition
+      depends_on:
+        - classify_items
+        - browser_review_items
+      always_run: true
+      retry: 2
+      retry_delay: 15
+      timeout: 180
+      state_partition:
+        collection: work_items
+        projection:
+          - item_id
+          - item_key
+          - title
+          - source_url
+          - status
+          - route
+          - priority
+          - owner
+          - needs_browser
+          - review_decision
+          - reason
+        limit_per_partition: 250
+        partitions:
+          approved:
+            where:
+              any:
+                - review_decision: approved
+                - route: auto_approved
+            output: approved_items
+          needs_browser:
+            where:
+              all:
+                needs_browser: true
+            output: needs_browser_items
+          blocked:
+            where:
+              any:
+                - status: blocked
+                - route: blocked
+            output: blocked_items
+          retryable:
+            where:
+              retryable: true
+            output: retryable_items
+        summary_output: review_partition_summary
+      outputs:
+        - id: approved_items
+          validate: work_item_manifest_array
+          optional: true
+        - id: needs_browser_items
+          validate: work_item_manifest_array
+          optional: true
+        - id: blocked_items
+          validate: work_item_manifest_array
+          optional: true
+        - id: retryable_items
+          validate: work_item_manifest_array
+          optional: true
+        - id: review_partition_summary
+          validate: partition_summary_json
+      complete_when: outputs
+
+  # For-each model loop: one sealed model invocation per approved item. This is
+  # a modest per-item worker, not a plugin step, and it runs in parallel.
+  - write_per_item_notes:
+      name: Write short note for every approved item
+      uses: model
+      profile: model_worker
+      depends_on: [partition_reviewed_items]
+      for_each:
+        from_step: partition_reviewed_items
+        output: approved_items
+      parser: json
+      loop: sealed_each
+      concurrency: 4
+      optional: true
+      item_schema:
+        type: object
+        required: [item_id, title]
+        properties:
+          item_id:
+            type: string
+            pattern: "^item_[A-Za-z0-9_-]+$"
+          title: { type: string }
+      task: >
+        Current item: {item.item_id} — {item.title}. Write item_note as compact
+        JSON with status ok, generated_at, items array containing item_id,
+        note, and note_quality, plus workflow_result. Keep the note under 80
+        words.
+      outputs:
+        - id: item_note
+          validate: workflow_result_json
+      complete_when: outputs
+
+  # Plugin step: patches the per-item notes back into the semantic documents so
+  # downstream queries and reports can see them without re-running the loop.
+  - patch_notes_back_to_state:
+      name: Patch per-item notes back into item documents
+      uses: plugin
+      operation: workflow.state_patch_outputs
+      depends_on: [write_per_item_notes]
+      always_run: true
+      optional: true
+      retry: 2
+      retry_delay: 15
+      timeout: 180
+      state_patch_outputs:
+        from_step: write_per_item_notes
+        source: descendants
+        output: item_note
+        select: $.items
+        collection: work_items
+        item_key: item_id
+        status_field: status
+        merge_fields:
+          - note
+          - note_quality
+        indexes:
+          - note_quality
+        summary_output: notes_patch_summary
+      outputs:
+        - id: notes_patch_summary
+          validate: workflow_result_json
+      complete_when: outputs
+
+  # Plugin step: queries the final collection snapshot after classification,
+  # browser review, partitioning, and note patching are complete.
+  - query_final_items_snapshot:
+      name: Query final item snapshot
+      uses: plugin
+      operation: workflow.state_query
+      depends_on:
+        - partition_reviewed_items
+        - patch_notes_back_to_state
+      always_run: true
+      retry: 2
+      retry_delay: 15
+      timeout: 120
+      state_query:
+        collection: work_items
+        where:
+          any:
+            - status: classified
+            - status: reviewed
+            - status: blocked
+        projection:
+          - item_id
+          - title
+          - source_url
+          - priority
+          - status
+          - route
+          - review_decision
+          - retryable
+          - reason
+          - note_quality
+        limit: 500
+        offset: 0
+        output: final_items_snapshot
+        summary_output: final_items_query_summary
+      outputs:
+        - id: final_items_snapshot
+          validate: work_item_manifest_array
+          optional: true
+        - id: final_items_query_summary
+          validate: workflow_result_json
+      complete_when: outputs
+
+  # Plugin step: generates the final machine-readable report and the markdown
+  # report directly from semantic state, counters, and index breakdowns.
+  - generate_state_report:
+      name: Generate final semantic state report
+      uses: plugin
+      operation: workflow.state_report
+      depends_on:
+        - query_final_items_snapshot
+      always_run: true
+      retry: 3
+      retry_delay: 30
+      timeout: 300
+      state_report:
+        collections:
+          - work_items
+        counters:
+          - work_items_published
+          - work_items_completed
+          - work_items_failed
+          - work_items_rejected
+        indexes:
+          work_items:
+            - status
+            - route
+            - priority
+            - owner
+            - needs_browser
+            - review_decision
+            - retryable
+            - note_quality
+        include_samples: 25
+        json_output: final_report_json
+        markdown_output: final_report_markdown
+      outputs:
+        - id: final_report_json
+          validate: report_json
+          materialize:
+            path: "{config.report_dir}/final-report-{date}.json"
+            mode: always
+        - id: final_report_markdown
+          validate: text_artifact
+          materialize:
+            path: "{config.report_dir}/final-report-{date}.md"
+            mode: always
+      complete_when: outputs
+
+  # Model step: turns the final report artifact into a concise human summary.
+  - render_human_summary:
+      name: Render a concise human summary
+      uses: model
+      profile: model_worker
+      depends_on: [generate_state_report]
+      always_run: true
+      optional: true
+      on_block: continue
+      skip_if_empty: "{config.report_dir}/final-report-{date}.json"
+      timeout: 180
+      retry: 1
+      retry_delay: 30
+      task: >
+        Read the final_report_json artifact and write human_summary_markdown.
+        Summarize counts, routed outcomes, retryable items, blocked items, and
+        any notes patched back into state. Keep it under 120 lines and include a
+        short "How to read this workflow" section for new users.
+      outputs:
+        - id: human_summary_markdown
+          validate: text_artifact
+          materialize:
+            path: "{config.report_dir}/human-summary-{date}.md"
+            mode: always
+      complete_when: outputs
